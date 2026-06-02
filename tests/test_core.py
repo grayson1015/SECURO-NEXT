@@ -38,6 +38,7 @@ def test_config():
         "ruin_mode_enabled": False,
         "storage_base_dir": "",
         "known_bad_hashes": [],
+        "executor_confirmation_keywords": ["Volt", "Potassium", "Wave", "Synapse Z", "Seliware", "Madium", "Cosmic", "Velocity", "SirHurt", "Solara", "Xeno", "MacSploit", "Opiumware"],
         "category_thresholds": {"confirmed": 70, "suspicious": 35, "weak": 10},
         "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation", "Python Software Foundation"],
         "suspicious_name_terms": ["executor", "injector", "roblox", "solara", "arceus"],
@@ -265,6 +266,19 @@ class CoreTests(unittest.TestCase):
         result = checker.finalize_findings([finding], config)[0]
         self.assertEqual(result["classification"], "Confirmed Exploit")
         self.assertIn("Executor Keyword Match", result.get("detection_categories", []))
+
+    def test_config_executor_keyword_is_second_stage_only(self):
+        config = test_config()
+        keyword_only = checker.make_finding("C:\\Users\\timmy\\Downloads\\Potassium.exe", "Potassium.exe", "unit", config)
+        keyword_only_result = checker.finalize_findings([keyword_only], config)[0]
+        self.assertNotEqual(keyword_only_result["classification"], "Confirmed Exploit")
+        self.assertNotIn("Executor Keyword Match", keyword_only_result.get("detection_categories", []))
+
+        flagged = checker.make_finding("C:\\Users\\timmy\\Downloads\\Potassium.exe", "Potassium.exe", "unit", config)
+        checker.add_detection(flagged, "A3", "A3 indicator found in flagged artifact", "High", 20)
+        flagged_result = checker.finalize_findings([flagged], config)[0]
+        self.assertEqual(flagged_result["classification"], "Confirmed Exploit")
+        self.assertIn("Executor Keyword Match", flagged_result.get("detection_categories", []))
 
     def test_reports_save_to_securo_storage_folders(self):
         with tempfile.TemporaryDirectory() as tmp:

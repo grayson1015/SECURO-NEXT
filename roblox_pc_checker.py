@@ -79,12 +79,19 @@ WARNING_DETECTION_CATEGORIES = {
     "Manual Review Required",
 }
 EXPLOIT_FAMILY_TERMS = {
+    "volt",
+    "potassium",
     "xeno",
     "xenoui",
     "synapse",
+    "synapse z",
     "krnl",
     "fluxus",
     "solara",
+    "seliware",
+    "madium",
+    "cosmic",
+    "velocity",
     "celery",
     "wave",
     "delta",
@@ -97,6 +104,8 @@ EXPLOIT_FAMILY_TERMS = {
     "sirhurt",
     "oxygen",
     "vega",
+    "macsploit",
+    "opiumware",
     "skript",
     "skriptloader",
     "skript loader",
@@ -590,6 +599,7 @@ def executor_keyword_match(finding: dict, config: dict) -> bool:
         return False
     terms = set(EXPLOIT_FAMILY_TERMS)
     terms.update(str(t).lower() for t in config.get("suspicious_name_terms", []))
+    terms.update(str(t).lower() for t in config.get("executor_confirmation_keywords", []))
     terms.update({"executor", "injector", "exploit", "dllloader", "script hub", "calibration loader", "unknown updater"})
     text = " ".join(
         [

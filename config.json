@@ -5,6 +5,21 @@
   "ruin_mode_enabled": false,
   "storage_base_dir": "",
   "known_bad_hashes": [],
+  "executor_confirmation_keywords": [
+    "Volt",
+    "Potassium",
+    "Wave",
+    "Synapse Z",
+    "Seliware",
+    "Madium",
+    "Cosmic",
+    "Velocity",
+    "SirHurt",
+    "Solara",
+    "Xeno",
+    "MacSploit",
+    "Opiumware"
+  ],
   "score_rules": {
     "sysmon_remote_thread": 50,
     "sysmon_process_access_dangerous": 40,
