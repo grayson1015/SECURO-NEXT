@@ -317,6 +317,41 @@ class CoreTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / "Logs" / "application_logs.log").exists())
             self.assertTrue(any(p.parent.name == "Reports" and p.suffix == ".html" for p in paths))
 
+    def test_html_report_includes_offline_time_filter(self):
+        report = {
+            "scanTime": "2026-06-02T17:55:00",
+            "hostname": "h",
+            "highestResult": "Indicator Found",
+            "confidence": "low",
+            "evidenceSources": {},
+            "timeline": [{"time": "2026-06-02 17:55:00", "source": "unit", "text": "event"}],
+            "sessions": [],
+            "findings": [],
+            "detectLogs": [{
+                "type": "Generic",
+                "detectionName": "Unit",
+                "severity": "Low",
+                "confidenceLevel": "low",
+                "manualReviewRequired": True,
+                "evidencePath": "unit",
+                "timestamp": "2026-06-02 17:55:00",
+                "explanation": "unit",
+            }],
+            "warningLogs": [],
+            "recoveryArtifacts": [],
+            "antivirusLogs": [],
+            "engineResults": [],
+            "limitations": [],
+            "finalStatement": "test",
+        }
+        rendered = checker.render_html(report)
+        self.assertIn('id="report-time-filter"', rendered)
+        self.assertIn('<option value="7" selected>1 week</option>', rendered)
+        self.assertIn('<option value="all">All logs</option>', rendered)
+        self.assertIn("report-entry", rendered)
+        self.assertIn('data-timestamp=', rendered)
+        self.assertIn('applyReportTimeFilter', rendered)
+
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json
         try:
