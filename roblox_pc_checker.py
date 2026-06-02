@@ -23,14 +23,60 @@ from pathlib import Path
 
 APP_NAME = "Securo"
 ROBLOX_EXE = "RobloxPlayerBeta.exe"
+DETECT_LOG_TYPES = ("Direct", "Generic", "Specific", "Warning", "Recovery", "Antivirus", "Manual Review")
 CONFIRMED_EXPLOIT_CATEGORIES = {
     "DotNetExecutable",
     "DotNetDLL",
     "Suspicious Net File",
     "Tampered File",
     "A3",
+    "Skript Loader Trace",
 }
 HIGH_CONFIDENCE_CHEAT_CATEGORIES = {"S1", "DLL", "BSoD", "S2", "C3", "C4", "A"}
+GENERIC_DETECTION_CATEGORIES = {
+    "UPX Packer",
+    "Generic Packed File",
+    "A1",
+    "A2",
+    "X1",
+    "X2",
+    "L1",
+    "B",
+    "D",
+    "F5",
+    "P1",
+    "P2",
+    "AutoIT Usage",
+    "AutoHotkey Usage",
+    "Suspicious Net File",
+    "Executed Suspicious File",
+    "Suspicious DLL Loading",
+    "Modified File Extension",
+    "Generic Packed Mod",
+    "Untrusted File",
+}
+SPECIFIC_DETECTION_CATEGORIES = {
+    "Generic Bypass Method",
+    "Tampered File",
+    "Suspicious DLL Deletion",
+    "Suspicious File Deletion",
+    "Suspicious File Modification",
+    "Deleted Prefetch File",
+    "Duplicate Prefetch Behavior",
+    "Impossible Prefetch Behavior",
+    "Network File Execution",
+    "External Device Execution",
+    "RAR File Execution",
+    "RAM Suspicious Indicator",
+    "Game Instance Modification",
+    "ActivitiesCache Disabled",
+}
+WARNING_DETECTION_CATEGORIES = {
+    "Virtualization Check",
+    "ActivitiesCache Disabled",
+    "RUIN Mode Warning",
+    "Manual Review Required",
+}
 EXPLOIT_FAMILY_TERMS = {
     "xeno",
     "xenoui",
@@ -51,6 +97,9 @@ EXPLOIT_FAMILY_TERMS = {
     "oxygen",
     "vega",
 }
+VIRTUALIZATION_TERMS = ("qemu", "vmware", "sandboxie", "parallels", "virtualbox", "virtual pc", "vbox")
+NETWORK_PATH_PREFIXES = ("\\\\", "file://")
+EXTERNAL_DRIVE_LETTERS = set("DEFGHIJKLMNOPQRSTUVWXYZ")
 EVENT_NS = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
 DEFAULT_API_BASE_URL = "https://securo-next.vercel.app/"
 tk = None
@@ -307,12 +356,43 @@ def shannon_entropy(data: bytes) -> float:
 def add_detection(finding: dict, category: str, reason: str, risk="Medium", points=20):
     finding.setdefault("detection_categories", [])
     finding.setdefault("detections", [])
+    detection_type = detection_type_for_category(category)
     if category not in finding["detection_categories"]:
         finding["detection_categories"].append(category)
     if not any(d.get("category") == category and d.get("reason") == reason for d in finding["detections"]):
-        finding["detections"].append({"category": category, "reason": reason, "risk": risk})
+        finding["detections"].append({"category": category, "type": detection_type, "reason": reason, "risk": risk})
         add_score(finding, points, f"{category}: {reason}")
         finding["supporting_evidence"].append(reason)
+
+
+def detection_type_for_category(category: str) -> str:
+    if category in HIGH_CONFIDENCE_CHEAT_CATEGORIES or category in CONFIRMED_EXPLOIT_CATEGORIES:
+        return "Direct"
+    if category in GENERIC_DETECTION_CATEGORIES:
+        return "Generic"
+    if category in SPECIFIC_DETECTION_CATEGORIES:
+        return "Specific"
+    if category in WARNING_DETECTION_CATEGORIES:
+        return "Warning"
+    if category in {"ShellBag Analyzer", "Recycle Bin", "Recovered File Metadata"}:
+        return "Recovery"
+    if category in {"Windows Defender", "Antivirus Detection"}:
+        return "Antivirus"
+    return "Manual Review"
+
+
+def confidence_from_score(score: int, classification: str) -> str:
+    if classification == "Confirmed":
+        return "high"
+    if score >= 50:
+        return "medium-high"
+    if score >= 25:
+        return "medium"
+    return "low"
+
+
+def review_required_for_type(log_type: str, classification: str) -> bool:
+    return log_type in {"Warning", "Recovery", "Manual Review"} or classification not in {"Confirmed"}
 
 
 def exploit_family_match(finding: dict, config: dict) -> bool:
@@ -332,6 +412,8 @@ def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
     if categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES:
         return True
+    if "Skript Loader Trace" in categories:
+        return True
     if categories & CONFIRMED_EXPLOIT_CATEGORIES and exploit_family_match(finding, config):
         return True
     return False
@@ -339,11 +421,25 @@ def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
 
 def inspect_file_indicators(path: str, finding: dict):
     suffix = Path(path).suffix.lower()
-    if suffix not in {".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".ahk", ".zip", ".rar", ".7z"}:
+    if suffix not in {".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".ahk", ".zip", ".rar", ".7z", ".jar"}:
         return
     data = file_sample(path)
     lower = data.lower()
     name = Path(path).name.lower()
+    path_lower = (path or "").lower()
+
+    if re.search(r"\.(jpg|png|gif|txt|pdf|docx?)\.(exe|dll|scr|bat|cmd|ps1)$", name):
+        add_detection(finding, "Modified File Extension", "Executable uses a double-extension or disguised extension pattern", "High", 35)
+        finding["evidence_types"].append("modified_extension")
+    if path.startswith(NETWORK_PATH_PREFIXES):
+        add_detection(finding, "Network File Execution", "Artifact path is on a network/remote location", "Medium", 25)
+        finding["evidence_types"].append("network_artifact")
+    if len(path) > 2 and path[1] == ":" and path[0].upper() in EXTERNAL_DRIVE_LETTERS:
+        add_detection(finding, "External Device Execution", "Artifact path is on a removable/external-drive style letter", "Medium", 20)
+        finding["evidence_types"].append("external_device")
+    if suffix == ".rar" and suspicious_name(name, {"suspicious_name_terms": list(EXPLOIT_FAMILY_TERMS)}):
+        add_detection(finding, "RAR File Execution", "RAR archive name matches known exploit/loader terms", "Medium", 25)
+        finding["evidence_types"].append("archive_artifact")
 
     if suffix == ".ahk" or b"autohotkey" in lower or b"ahk2exe" in lower:
         add_detection(finding, "AutoHotkey Usage", "AutoHotkey script or compiled AHK signature found", "High", 35)
@@ -351,6 +447,9 @@ def inspect_file_indicators(path: str, finding: dict):
     if b"autoit" in lower or b"au3!" in lower or name.endswith(".au3"):
         add_detection(finding, "AutoIT Usage", "AutoIT script or compiled AutoIT signature found", "High", 35)
         finding["evidence_types"].append("autoit")
+    if any(term in lower for term in [b"skript loader", b"skriptloader", b"skript.gg", b"skript hook", b"skript bypass"]):
+        add_detection(finding, "Skript Loader Trace", "Known Skript Loader-style trace found in metadata/content", "High", 55)
+        finding["evidence_types"].append("known_cheat_artifact")
 
     if suffix in {".exe", ".dll"} and data.startswith(b"MZ"):
         # .NET assemblies usually include CLR metadata strings in the PE.
@@ -374,6 +473,22 @@ def inspect_file_indicators(path: str, finding: dict):
             add_detection(finding, "Suspicious Net File", "Packed/protected .NET assembly", "High", 45)
         if finding.get("signer", {}).get("status", "").lower() in {"hashmismatch", "nottrusted", "unknownerror"}:
             add_detection(finding, "Tampered File", "Authenticode status suggests modification or trust failure", "High", 35)
+        if suffix == ".dll" and user_writable_path(path) and suspicious_name(path, {"suspicious_name_terms": list(EXPLOIT_FAMILY_TERMS) + ["inject", "loader", "mapper", "hook"]}):
+            add_detection(finding, "Suspicious DLL Loading", "Suspicious DLL name in a user-writable path", "High", 35)
+            finding["evidence_types"].append("suspicious_dll")
+        if any(term in lower for term in [b"bypass", b"anti dump", b"antidump", b"anti-debug", b"antidebug", b"hide process", b"self destruct", b"selfdelete", b"deletefile"]):
+            add_detection(finding, "Generic Bypass Method", "Bypass, anti-debug, anti-forensic, or self-destruct string found", "High", 35)
+            finding["evidence_types"].append("bypass_method")
+        if any(term in lower for term in [b"virtualbox", b"vmware", b"qemu", b"sandboxie", b"parallels", b"virtual pc"]):
+            add_detection(finding, "Virtualization Check", "Virtualization or sandbox detection string found", "Medium", 15)
+            finding["evidence_types"].append("warning")
+        if any(term in lower for term in [b"writeprocessmemory", b"createremotethread", b"ntcreatethreadex", b"manualmap", b"manual map", b"loadlibrary"]):
+            add_detection(finding, "RAM Suspicious Indicator", "Runtime injection API/string indicator found in file content", "High", 35)
+            finding["evidence_types"].append("ram_indicator")
+    if ".minecraft" in path_lower or "\\mods\\" in path_lower or "minecraft" in path_lower:
+        if suffix in {".jar", ".zip", ".dll", ".exe"} or any(term in lower for term in [b"mixin", b"forge", b"fabric", b"minecraft"]):
+            add_detection(finding, "Game Instance Modification", "Minecraft Java/game instance modification artifact observed", "Medium", 25)
+            finding["evidence_types"].append("ruin_mode")
 
     special_terms = {
         "A1": ["a1"],
@@ -963,7 +1078,7 @@ def make_possible_context_finding(path_text: str, name: str, source: str, reason
         "supporting_evidence": [reason],
         "evidence_types": ["possible_context"],
         "detection_categories": [source],
-        "detections": [{"category": source, "reason": reason, "risk": "Low"}],
+        "detections": [{"category": source, "type": detection_type_for_category(source), "reason": reason, "risk": "Low"}],
         "artifact_source": source.lower().replace(" ", "_"),
         "attribution_explanation": "",
         "classification": "Weak",
@@ -1036,6 +1151,148 @@ def collect_recycle_bin_context(days: int, config: dict, sessions: list[dict]) -
             merge_findings(findings, finding)
             timeline.append({"time": finding["first_seen"], "source": "Recycle Bin", "text": reason})
     return list(findings.values()), timeline
+
+
+def parse_recycle_i_record(path: Path) -> dict:
+    # Windows $Recycle.Bin $I files store deleted-file metadata. This reads metadata only.
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return {}
+    original = ""
+    deleted_time = ""
+    size = ""
+    try:
+        if len(data) >= 24:
+            size = str(int.from_bytes(data[8:16], "little", signed=False))
+            filetime = int.from_bytes(data[16:24], "little", signed=False)
+            if filetime:
+                deleted_dt = dt.datetime(1601, 1, 1) + dt.timedelta(microseconds=filetime / 10)
+                deleted_time = deleted_dt.isoformat(sep=" ", timespec="seconds")
+        text = data[24:].decode("utf-16-le", errors="ignore").strip("\x00\r\n ")
+        original = text.split("\x00", 1)[0]
+    except Exception:
+        pass
+    return {"original_path": original, "deleted_time": deleted_time, "size": size, "metadata_file": str(path)}
+
+
+def collect_recovery_artifacts(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    findings = {}
+    timeline = []
+    recovered = []
+    cut = cutoff(days)
+    roots = [Path(f"{letter}:/$Recycle.Bin") for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ"]
+    for root in roots:
+        if not safe_exists(root):
+            continue
+        try:
+            entries = list(root.rglob("$I*"))[:3000]
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                mtime = dt.datetime.fromtimestamp(entry.stat().st_mtime)
+            except Exception:
+                continue
+            if mtime < cut:
+                continue
+            meta = parse_recycle_i_record(entry)
+            original = meta.get("original_path") or str(entry)
+            if not suspicious_text(original, config):
+                continue
+            when = meta.get("deleted_time") or mtime.isoformat(sep=" ", timespec="seconds")
+            finding = make_possible_context_finding(
+                original,
+                Path(original).name or entry.name,
+                "Recovered File Metadata",
+                "Recycle Bin metadata recovered for a suspicious deleted path. Manual review required.",
+                parse_dt(when) or mtime,
+                config,
+            )
+            finding["evidence_types"].append("recovery")
+            finding["manual_review_required"] = True
+            finding["recovered_metadata"] = meta
+            add_detection(finding, "Suspicious File Deletion", "Deleted suspicious file metadata recovered from Recycle Bin", "Medium", 20)
+            merge_findings(findings, finding)
+            recovered.append({
+                "name": finding["name"],
+                "path": original,
+                "source": "Recycle Bin",
+                "timestamp": when,
+                "metadata": meta,
+                "manualReviewRequired": True,
+            })
+            timeline.append({"time": when, "source": "Recovery", "text": f"Recovered deleted-file metadata: {original}"})
+    return list(findings.values()), timeline, recovered
+
+
+def collect_warning_logs(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    warnings = []
+    findings = {}
+    timeline = []
+    system = collect_system_info()
+    virt_text = json.dumps(system, default=str).lower()
+    if any(term in virt_text for term in VIRTUALIZATION_TERMS):
+        when = iso_now()
+        warning = {
+            "detectionName": "Virtualization Check",
+            "severity": "Medium",
+            "explanation": "Virtualization or sandbox indicator was observed. This can be legitimate, but may reduce confidence in local artifacts.",
+            "evidencePath": "System information",
+            "timestamp": when,
+            "manualReviewRequired": True,
+            "confidenceLevel": "medium",
+            "type": "Warning",
+        }
+        warnings.append(warning)
+        finding = make_possible_context_finding("System information", "Virtualization Check", "Virtualization Check", warning["explanation"], parse_dt(when), config)
+        finding["evidence_types"].append("warning")
+        add_detection(finding, "Virtualization Check", warning["explanation"], "Medium", 15)
+        merge_findings(findings, finding)
+        timeline.append({"time": when, "source": "Warning", "text": warning["explanation"]})
+
+    activities_paths = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "ConnectedDevicesPlatform",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "ConnectedDevicesPlatform" / "L.UserActivity",
+    ]
+    if not any(safe_exists(p) for p in activities_paths):
+        when = iso_now()
+        warning = {
+            "detectionName": "Disabled ActivitiesCache",
+            "severity": "Low",
+            "explanation": "Windows ActivitiesCache/UserActivity artifacts were not found. This is a coverage limitation, not proof of cheating.",
+            "evidencePath": "ConnectedDevicesPlatform ActivitiesCache",
+            "timestamp": when,
+            "manualReviewRequired": True,
+            "confidenceLevel": "low",
+            "type": "Warning",
+        }
+        warnings.append(warning)
+        finding = make_possible_context_finding("ConnectedDevicesPlatform ActivitiesCache", "ActivitiesCache", "ActivitiesCache Disabled", warning["explanation"], parse_dt(when), config)
+        finding["evidence_types"].append("warning")
+        add_detection(finding, "ActivitiesCache Disabled", warning["explanation"], "Low", 10)
+        merge_findings(findings, finding)
+        timeline.append({"time": when, "source": "Warning", "text": warning["explanation"]})
+
+    if config.get("ruin_mode_enabled"):
+        when = iso_now()
+        warning = {
+            "detectionName": "RUIN Mode Warning",
+            "severity": "Medium",
+            "explanation": "RUIN Mode is enabled. Game instance modification checks may require the game to close after scanning.",
+            "evidencePath": "Configuration",
+            "timestamp": when,
+            "manualReviewRequired": True,
+            "confidenceLevel": "medium",
+            "type": "Warning",
+        }
+        warnings.append(warning)
+        finding = make_possible_context_finding("Configuration", "RUIN Mode", "RUIN Mode Warning", warning["explanation"], parse_dt(when), config)
+        finding["evidence_types"].append("warning")
+        add_detection(finding, "RUIN Mode Warning", warning["explanation"], "Medium", 10)
+        merge_findings(findings, finding)
+        timeline.append({"time": when, "source": "Warning", "text": warning["explanation"]})
+    return list(findings.values()), timeline, warnings
 
 
 def collect_powershell_history(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -1271,6 +1528,120 @@ def combine_findings(groups: list[list[dict]], config: dict) -> list[dict]:
     return finalize_findings(list(combined.values()), config)
 
 
+def engine_assessment(finding: dict, config: dict) -> dict:
+    categories = set(finding.get("detection_categories", []))
+    score = int(finding.get("score", 0) or 0)
+    local_hits = len(categories)
+    vt_enabled = bool(config.get("virustotal_api_key"))
+    if finding.get("classification") == "Confirmed":
+        detectability = "high"
+    elif score >= 50 or categories & GENERIC_DETECTION_CATEGORIES:
+        detectability = "medium-high"
+    elif score >= 25:
+        detectability = "medium"
+    else:
+        detectability = "low"
+    return {
+        "file": finding.get("name", ""),
+        "path": finding.get("path", ""),
+        "sha256": finding.get("sha256", ""),
+        "localHeuristicScore": score,
+        "localEngineHits": local_hits,
+        "detectabilityRange": detectability,
+        "virusTotalEnabled": vt_enabled,
+        "virusTotalStatus": "configured_not_queried" if vt_enabled else "not_configured",
+        "manualReviewRequired": finding.get("classification") != "Confirmed",
+    }
+
+
+def antivirus_logs_from_findings(findings: list[dict]) -> list[dict]:
+    rows = []
+    for f in findings:
+        if "defender_detection" not in f.get("evidence_types", []) and not any(d.get("type") == "Antivirus" for d in f.get("detections", [])):
+            continue
+        rows.append({
+            "filePath": f.get("path", ""),
+            "detectionName": "; ".join(d.get("category", "") for d in f.get("detections", []) if d.get("type") == "Antivirus") or "Antivirus Detection",
+            "antivirusSource": f.get("artifact_source", "Windows Defender"),
+            "timestamp": f.get("first_seen", ""),
+            "severity": "High" if f.get("classification") in {"Confirmed", "Suspicious"} else "Medium",
+            "classification": f.get("classification", "Weak"),
+        })
+    return rows
+
+
+def detect_logs_from_report_parts(findings: list[dict], warnings: list[dict], recovered: list[dict], antivirus_logs: list[dict], config: dict) -> list[dict]:
+    logs = []
+    for f in findings:
+        detections = f.get("detections") or [{"category": f.get("classification", "Manual Review"), "type": "Manual Review", "reason": f.get("attribution_explanation", ""), "risk": "Low"}]
+        for d in detections:
+            log_type = d.get("type") or detection_type_for_category(d.get("category", ""))
+            logs.append({
+                "type": log_type,
+                "detectionName": d.get("category", "Detection"),
+                "severity": d.get("risk", "Medium"),
+                "explanation": d.get("reason", ""),
+                "evidencePath": f.get("path", ""),
+                "artifactSource": f.get("artifact_source", ""),
+                "timestamp": f.get("first_seen", ""),
+                "manualReviewRequired": review_required_for_type(log_type, f.get("classification", "Weak")),
+                "confidenceLevel": confidence_from_score(f.get("score", 0), f.get("classification", "Weak")),
+                "classification": f.get("classification", "Weak"),
+                "score": f.get("score", 0),
+                "sha256": f.get("sha256", ""),
+                "signer": f.get("signer", {}),
+            })
+    for warning in warnings:
+        logs.append({
+            "type": "Warning",
+            "detectionName": warning.get("detectionName", "Warning"),
+            "severity": warning.get("severity", "Low"),
+            "explanation": warning.get("explanation", ""),
+            "evidencePath": warning.get("evidencePath", ""),
+            "artifactSource": warning.get("evidencePath", ""),
+            "timestamp": warning.get("timestamp", ""),
+            "manualReviewRequired": True,
+            "confidenceLevel": warning.get("confidenceLevel", "low"),
+            "classification": "Warning",
+            "score": 0,
+            "sha256": "",
+            "signer": {},
+        })
+    for item in recovered:
+        logs.append({
+            "type": "Recovery",
+            "detectionName": "Recovered File Metadata",
+            "severity": "Medium",
+            "explanation": "Deleted-file metadata was recovered. This requires manual review and is not proof of cheating by itself.",
+            "evidencePath": item.get("path", ""),
+            "artifactSource": item.get("source", ""),
+            "timestamp": item.get("timestamp", ""),
+            "manualReviewRequired": True,
+            "confidenceLevel": "medium",
+            "classification": "Recovery",
+            "score": 0,
+            "sha256": "",
+            "signer": {},
+        })
+    for av in antivirus_logs:
+        logs.append({
+            "type": "Antivirus",
+            "detectionName": av.get("detectionName", "Antivirus Detection"),
+            "severity": av.get("severity", "Medium"),
+            "explanation": "Antivirus log reported a detection or remediation event.",
+            "evidencePath": av.get("filePath", ""),
+            "artifactSource": av.get("antivirusSource", ""),
+            "timestamp": av.get("timestamp", ""),
+            "manualReviewRequired": av.get("classification") != "Confirmed",
+            "confidenceLevel": "medium",
+            "classification": av.get("classification", "Weak"),
+            "score": 0,
+            "sha256": "",
+            "signer": {},
+        })
+    return sorted(logs, key=lambda x: (parse_dt(x.get("timestamp")) or dt.datetime.min), reverse=True)
+
+
 def determine_overall_category(report: dict) -> str:
     findings = report.get("findings", [])
     quality = report.get("evidence_quality", {})
@@ -1425,10 +1796,15 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
     shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
+    recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
+    warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
     findings = combine_findings(
-        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings],
+        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
         config,
     )
+    antivirus_logs = antivirus_logs_from_findings(findings)
+    detect_logs = detect_logs_from_report_parts(findings, warning_logs, recovery_artifacts, antivirus_logs, config)
+    engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
     timeline = dedupe_timeline(
@@ -1442,6 +1818,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + browser_timeline
         + shellbag_timeline
         + recycle_timeline
+        + recovery_timeline
+        + warning_timeline
     )
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
@@ -1457,6 +1835,11 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "timeline": timeline,
         "sessions": [camel_session(s) for s in sessions_raw],
         "findings": [camel_finding(f) for f in findings],
+        "detectLogs": detect_logs,
+        "warningLogs": warning_logs,
+        "recoveryArtifacts": recovery_artifacts,
+        "antivirusLogs": antivirus_logs,
+        "engineResults": engine_results,
         "limitations": limitations_from_quality(quality),
         "scanDays": days,
         "topScore": top_score,
@@ -1490,11 +1873,18 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
     progress("Checking Recycle Bin context...")
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
+    progress("Checking recovery metadata...")
+    recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
+    progress("Checking warning indicators...")
+    warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
     progress("Building report...")
     findings = combine_findings(
-        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings],
+        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
         config,
     )
+    antivirus_logs = antivirus_logs_from_findings(findings)
+    detect_logs = detect_logs_from_report_parts(findings, warning_logs, recovery_artifacts, antivirus_logs, config)
+    engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
     timeline = dedupe_timeline(
@@ -1508,6 +1898,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + browser_timeline
         + shellbag_timeline
         + recycle_timeline
+        + recovery_timeline
+        + warning_timeline
     )
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
@@ -1523,6 +1915,11 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "timeline": timeline,
         "sessions": [camel_session(s) for s in sessions_raw],
         "findings": [camel_finding(f) for f in findings],
+        "detectLogs": detect_logs,
+        "warningLogs": warning_logs,
+        "recoveryArtifacts": recovery_artifacts,
+        "antivirusLogs": antivirus_logs,
+        "engineResults": engine_results,
         "limitations": limitations_from_quality(quality),
         "scanDays": days,
         "topScore": top_score,
@@ -1618,6 +2015,24 @@ def render_txt(report: dict) -> str:
     for k, v in report["evidenceSources"].items():
         lines.append(f"{k}: {'yes' if v else 'no'}")
     lines.append("")
+    lines += ["Detect Logs", "-----------"]
+    if not report.get("detectLogs"):
+        lines.append("No detect logs found.")
+    for d in report.get("detectLogs", []):
+        lines += [
+            f"[{d.get('type')}] {d.get('detectionName')} Severity={d.get('severity')} Confidence={d.get('confidenceLevel')}",
+            f"  Evidence: {d.get('evidencePath') or d.get('artifactSource')}",
+            f"  Time: {d.get('timestamp')}",
+            f"  Manual review required: {'yes' if d.get('manualReviewRequired') else 'no'}",
+            f"  Explanation: {d.get('explanation')}",
+        ]
+    lines.append("")
+    lines += ["Warning Logs", "------------"]
+    if not report.get("warningLogs"):
+        lines.append("No warning logs found.")
+    for w in report.get("warningLogs", []):
+        lines.append(f"{w.get('detectionName')} Severity={w.get('severity')} Confidence={w.get('confidenceLevel')} ManualReview={'yes' if w.get('manualReviewRequired') else 'no'} Source={w.get('evidencePath')} Time={w.get('timestamp')}: {w.get('explanation')}")
+    lines.append("")
     lines += ["Timeline", "--------"]
     for e in report["timeline"]:
         lines.append(f"{e['time']}  {e['text']}")
@@ -1654,6 +2069,24 @@ def render_txt(report: dict) -> str:
         lines += ["Supporting evidence:"]
         lines += [f"  - {x}" for x in f["supportingEvidence"]]
         lines += [f"Attribution: {f['attributionExplanation']}", ""]
+    lines += ["Recovery Artifacts", "------------------"]
+    if not report.get("recoveryArtifacts"):
+        lines.append("No recovery metadata found.")
+    for item in report.get("recoveryArtifacts", []):
+        lines.append(f"{item.get('timestamp')} {item.get('source')}: {item.get('path')} ManualReview={'yes' if item.get('manualReviewRequired') else 'no'}")
+    lines.append("")
+    lines += ["Antivirus Logs", "--------------"]
+    if not report.get("antivirusLogs"):
+        lines.append("No antivirus detections found.")
+    for item in report.get("antivirusLogs", []):
+        lines.append(f"{item.get('timestamp')} {item.get('antivirusSource')} {item.get('severity')} {item.get('detectionName')}: {item.get('filePath')}")
+    lines.append("")
+    lines += ["Engines", "-------"]
+    if not report.get("engineResults"):
+        lines.append("No engine heuristic results found.")
+    for item in report.get("engineResults", [])[:40]:
+        lines.append(f"{item.get('detectabilityRange')} score={item.get('localHeuristicScore')} VT={item.get('virusTotalStatus')} {item.get('path')}")
+    lines.append("")
     lines += ["Evidence Limitations", "--------------------"]
     lines += [f"- {x}" for x in report["limitations"]]
     lines += ["", "Final Note", "----------", report["finalStatement"]]
@@ -1676,6 +2109,47 @@ def render_html(report: dict) -> str:
         "Signer": f["signer"].get("status", ""), "First Seen": f["firstSeen"], "Reason": "; ".join(b["reason"] for b in f["scoreBreakdown"][:3])
     } for f in sorted(report["findings"], key=lambda x: x["score"], reverse=True)[:10]]
     sessions = [{"Username": s["username"], "Display Name": s.get("displayName", ""), "User ID": s["userId"], "Place ID": s["placeId"], "Job ID": s["jobId"], "Duration": s["duration"], "Status": s.get("status", "Clean")} for s in report["sessions"]]
+    detect_rows = [{
+        "Type": d.get("type", ""),
+        "Detection": d.get("detectionName", ""),
+        "Severity": d.get("severity", ""),
+        "Confidence": d.get("confidenceLevel", ""),
+        "Manual Review": "yes" if d.get("manualReviewRequired") else "no",
+        "Evidence": d.get("evidencePath") or d.get("artifactSource", ""),
+        "Timestamp": d.get("timestamp", ""),
+        "Explanation": d.get("explanation", ""),
+    } for d in report.get("detectLogs", [])]
+    warning_rows = [{
+        "Detection": w.get("detectionName", ""),
+        "Severity": w.get("severity", ""),
+        "Confidence": w.get("confidenceLevel", ""),
+        "Manual Review": "yes" if w.get("manualReviewRequired") else "no",
+        "Source": w.get("evidencePath", ""),
+        "Timestamp": w.get("timestamp", ""),
+        "Explanation": w.get("explanation", ""),
+    } for w in report.get("warningLogs", [])]
+    recovery_rows = [{
+        "Name": r.get("name", ""),
+        "Path": r.get("path", ""),
+        "Source": r.get("source", ""),
+        "Timestamp": r.get("timestamp", ""),
+        "Manual Review": "yes" if r.get("manualReviewRequired") else "no",
+    } for r in report.get("recoveryArtifacts", [])]
+    antivirus_rows = [{
+        "Source": a.get("antivirusSource", ""),
+        "Detection": a.get("detectionName", ""),
+        "Severity": a.get("severity", ""),
+        "Timestamp": a.get("timestamp", ""),
+        "Path": a.get("filePath", ""),
+    } for a in report.get("antivirusLogs", [])]
+    engine_rows = [{
+        "File": e.get("file", ""),
+        "Score": e.get("localHeuristicScore", ""),
+        "Local Hits": e.get("localEngineHits", ""),
+        "Detectability": e.get("detectabilityRange", ""),
+        "VirusTotal": e.get("virusTotalStatus", ""),
+        "Manual Review": "yes" if e.get("manualReviewRequired") else "no",
+    } for e in report.get("engineResults", [])[:60]]
     primary_session = report["sessions"][0] if report["sessions"] else {}
     timeline = "".join(f"<li><time>{html.escape(e['time'])}</time><span>{html.escape(e['text'])}</span><small>{html.escape(e['source'])}</small></li>" for e in report["timeline"])
     quality = "".join(f"<li><span>{html.escape(k)}</span><b class='{str(v).lower()}'>{'yes' if v else 'no'}</b></li>" for k, v in report["evidenceSources"].items())
@@ -1704,11 +2178,16 @@ def render_html(report: dict) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
 <style>
-body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline li{{display:grid;grid-template-columns:170px 1fr 130px;gap:12px;padding:8px 0;border-bottom:1px solid #edf0f3}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}
+body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline li{{display:grid;grid-template-columns:170px 1fr 130px;gap:12px;padding:8px 0;border-bottom:1px solid #edf0f3}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}
 </style></head><body><header><h1>{APP_NAME} Report</h1><p>No confirmed result means only that available logs did not prove it. Logging coverage may be incomplete.</p></header><main>
 <section><h2>Summary</h2><div class="summary"><div class="card"><div>Scan Date</div><div class="value">{html.escape(report['scanTime'])}</div></div><div class="card"><div>Highest Result</div><div class="value">{report['highestResult']}</div></div><div class="card"><div>Top Score</div><div class="value">{report.get('topScore', 0)}</div></div><div class="card"><div>Roblox Sessions</div><div class="value">{len(report['sessions'])}</div></div></div></section>
 <section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed','Suspicious'] else 'Not confirmed')}</div></div></div></section>
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'])}</section>
+<section><h2>Interaction / Detect Logs</h2><div class="filters">{''.join(f"<span class='pill'>{x}</span>" for x in DETECT_LOG_TYPES)}</div>{html_table(detect_rows, ['Type','Detection','Severity','Confidence','Manual Review','Evidence','Timestamp','Explanation'])}</section>
+<section><h2>Warning Logs</h2><p class="muted">Warnings indicate modifications or behaviors that may reduce confidence or require review. They are not automatically cheating evidence.</p>{html_table(warning_rows, ['Detection','Severity','Confidence','Manual Review','Source','Timestamp','Explanation'])}</section>
+<section><h2>Recovery</h2>{html_table(recovery_rows, ['Name','Path','Source','Timestamp','Manual Review'])}</section>
+<section><h2>Antivirus Logs</h2>{html_table(antivirus_rows, ['Source','Detection','Severity','Timestamp','Path'])}</section>
+<section><h2>Engines</h2>{html_table(engine_rows, ['File','Score','Local Hits','Detectability','VirusTotal','Manual Review'])}</section>
 <section><h2>Session Information</h2><div class="sessions">{session_cards}</div>{html_table(sessions, ['Username','Display Name','User ID','Place ID','Job ID','Duration','Status'])}</section>
 <section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section>
 <section><h2>Findings</h2>{findings_html}</section>

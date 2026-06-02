@@ -1,6 +1,8 @@
 {
   "api_base_url": "https://securo-next.vercel.app/",
   "scan_days": 7,
+  "virustotal_api_key": "",
+  "ruin_mode_enabled": false,
   "score_rules": {
     "sysmon_remote_thread": 50,
     "sysmon_process_access_dangerous": 40,
@@ -80,7 +82,9 @@
     "nihon",
     "sirhurt",
     "mapper",
-    "dllloader"
+    "dllloader",
+    "skript",
+    "skriptloader"
   ],
   "suspicious_extensions": [
     ".dll",
@@ -92,7 +96,8 @@
     ".js",
     ".zip",
     ".rar",
-    ".7z"
+    ".7z",
+    ".jar"
   ],
   "scan_locations": [
     "Downloads",

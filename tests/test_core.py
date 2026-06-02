@@ -34,6 +34,8 @@ def test_config():
             "suspicious_dll_loaded": 35,
             "near_roblox_launch": 25,
         },
+        "virustotal_api_key": "",
+        "ruin_mode_enabled": False,
         "category_thresholds": {"confirmed": 70, "suspicious": 35, "weak": 10},
         "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation"],
         "suspicious_name_terms": ["executor", "injector", "roblox", "solara", "arceus"],
@@ -56,6 +58,8 @@ class CoreTests(unittest.TestCase):
             "collect_browser_downloads",
             "collect_shellbag_context",
             "collect_recycle_bin_context",
+            "collect_recovery_artifacts",
+            "collect_warning_logs",
             "evidence_quality",
             "collect_system_info",
         ]:
@@ -71,6 +75,8 @@ class CoreTests(unittest.TestCase):
             checker.collect_browser_downloads = lambda days, config, sessions: ([], [])
             checker.collect_shellbag_context = lambda days, config, sessions: ([], [])
             checker.collect_recycle_bin_context = lambda days, config, sessions: ([], [])
+            checker.collect_recovery_artifacts = lambda days, config, sessions: ([], [], [])
+            checker.collect_warning_logs = lambda days, config, sessions: ([], [], [])
             checker.evidence_quality = lambda days: {"Roblox logs available": False}
             checker.collect_system_info = lambda: {"hostname": "unit-host", "scan_time": "old"}
             report = checker.build_scan_report(7, test_config())
@@ -81,6 +87,8 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("scan_time", report)
         dt.datetime.fromisoformat(report["scanTime"])
         for key in ["hostname", "highestResult", "confidence", "evidenceSources", "timeline", "sessions", "findings", "limitations"]:
+            self.assertIn(key, report)
+        for key in ["detectLogs", "warningLogs", "recoveryArtifacts", "antivirusLogs", "engineResults"]:
             self.assertIn(key, report)
 
     def test_upload_payload_shape(self):
@@ -175,6 +183,41 @@ class CoreTests(unittest.TestCase):
             finding["score"] = 100
             result = checker.finalize_findings([finding], config)[0]
             self.assertEqual(result["classification"], "Weak", source)
+
+    def test_warning_logs_do_not_become_confirmed(self):
+        config = test_config()
+        finding = checker.make_possible_context_finding(
+            "ConnectedDevicesPlatform ActivitiesCache",
+            "ActivitiesCache",
+            "ActivitiesCache Disabled",
+            "coverage warning only",
+            dt.datetime.now(),
+            config,
+        )
+        finding["evidence_types"].append("warning")
+        checker.add_detection(finding, "ActivitiesCache Disabled", "coverage warning only", "Low", 10)
+        result = checker.finalize_findings([finding], config)[0]
+        logs = checker.detect_logs_from_report_parts([result], [{
+            "detectionName": "ActivitiesCache Disabled",
+            "severity": "Low",
+            "explanation": "coverage warning only",
+            "evidencePath": "ActivitiesCache",
+            "timestamp": result["first_seen"],
+            "manualReviewRequired": True,
+            "confidenceLevel": "low",
+            "type": "Warning",
+        }], [], [], config)
+        self.assertEqual(result["classification"], "Weak")
+        self.assertTrue(any(log["type"] == "Warning" and log["manualReviewRequired"] for log in logs))
+
+    def test_skript_loader_trace_is_direct_detection(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\SkriptLoader.exe", "SkriptLoader.exe", "unit", config)
+        checker.add_detection(finding, "Skript Loader Trace", "Known Skript Loader-style trace found", "High", 55)
+        result = checker.finalize_findings([finding], config)[0]
+        logs = checker.detect_logs_from_report_parts([result], [], [], [], config)
+        self.assertEqual(result["classification"], "Confirmed")
+        self.assertTrue(any(log["type"] == "Direct" for log in logs))
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json
