@@ -36,8 +36,9 @@ def test_config():
         },
         "virustotal_api_key": "",
         "ruin_mode_enabled": False,
+        "known_bad_hashes": [],
         "category_thresholds": {"confirmed": 70, "suspicious": 35, "weak": 10},
-        "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation"],
+        "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation", "Python Software Foundation"],
         "suspicious_name_terms": ["executor", "injector", "roblox", "solara", "arceus"],
         "suspicious_extensions": [".exe", ".dll", ".zip", ".ps1"],
         "dangerous_access_terms": ["PROCESS_VM_WRITE", "PROCESS_CREATE_THREAD"],
@@ -100,7 +101,7 @@ class CoreTests(unittest.TestCase):
                 return True, {"ok": True}
 
             checker.post_json = fake_post
-            report = {"scanTime": dt.datetime.now().astimezone().isoformat(), "hostname": "h", "highestResult": "Weak", "confidence": "low", "evidenceSources": {}, "timeline": [], "sessions": [], "findings": [], "limitations": []}
+            report = {"scanTime": dt.datetime.now().astimezone().isoformat(), "hostname": "h", "highestResult": "Indicator Found", "confidence": "low", "evidenceSources": {}, "timeline": [], "sessions": [], "findings": [], "limitations": []}
             ok, _ = checker.upload_report("https://example.test", "sid", "tok", report)
         finally:
             checker.post_json = original
@@ -166,7 +167,7 @@ class CoreTests(unittest.TestCase):
             finding["detections"] = [{"category": categories[0], "reason": "fixture", "risk": "High"}]
             finding["score"] = 20
             result = checker.finalize_findings([finding], config)[0]
-            self.assertEqual(result["classification"], "Confirmed", path)
+            self.assertEqual(result["classification"], "Confirmed Exploit", path)
             self.assertGreaterEqual(result["score"], config["category_thresholds"]["confirmed"])
 
     def test_shellbag_and_recycle_bin_context_stay_possible(self):
@@ -182,7 +183,7 @@ class CoreTests(unittest.TestCase):
             )
             finding["score"] = 100
             result = checker.finalize_findings([finding], config)[0]
-            self.assertEqual(result["classification"], "Weak", source)
+            self.assertEqual(result["classification"], "Indicator Found", source)
 
     def test_warning_logs_do_not_become_confirmed(self):
         config = test_config()
@@ -207,7 +208,7 @@ class CoreTests(unittest.TestCase):
             "confidenceLevel": "low",
             "type": "Warning",
         }], [], [], config)
-        self.assertEqual(result["classification"], "Weak")
+        self.assertEqual(result["classification"], "Indicator Found")
         self.assertTrue(any(log["type"] == "Warning" and log["manualReviewRequired"] for log in logs))
 
     def test_skript_loader_trace_is_direct_detection(self):
@@ -216,8 +217,38 @@ class CoreTests(unittest.TestCase):
         checker.add_detection(finding, "Skript Loader Trace", "Known Skript Loader-style trace found", "High", 55)
         result = checker.finalize_findings([finding], config)[0]
         logs = checker.detect_logs_from_report_parts([result], [], [], [], config)
-        self.assertEqual(result["classification"], "Confirmed")
+        self.assertEqual(result["classification"], "Confirmed Exploit")
         self.assertTrue(any(log["type"] == "Direct" for log in logs))
+
+    def test_a3_alone_is_indicator_found(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\Public\\zlib1.dll", "zlib1.dll", "unit", config)
+        finding["detection_categories"] = ["A3"]
+        finding["detections"] = [{"category": "A3", "type": "Direct", "reason": "generic string fixture", "risk": "High"}]
+        finding["score"] = 100
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertEqual(result["classification"], "Indicator Found")
+
+    def test_trusted_signed_dependency_downgrades(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\SECURO\\_internal\\python312.dll", "python312.dll", "unit", config)
+        finding["signer"] = {"status": "Valid", "subject": "CN=Python Software Foundation", "issuer": "CN=Trusted CA"}
+        finding["detection_categories"] = ["A3", "RAM Suspicious Indicator"]
+        finding["detections"] = [
+            {"category": "A3", "type": "Direct", "reason": "generic string fixture", "risk": "High"},
+            {"category": "RAM Suspicious Indicator", "type": "Specific", "reason": "API strings", "risk": "High"},
+        ]
+        finding["score"] = 100
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertIn(result["classification"], {"Likely False Positive", "Trusted Safe"})
+
+    def test_suspicious_dll_name_without_load_evidence_is_indicator(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\xeno_hook.dll", "xeno_hook.dll", "unit", config)
+        finding["signer"] = {"status": "Valid", "subject": "CN=Microsoft Corporation", "issuer": "CN=Trusted CA"}
+        checker.add_detection(finding, "Suspicious DLL Loading", "Suspicious DLL name in user-writable path", "High", 35)
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertIn(result["classification"], {"Indicator Found", "Likely False Positive"})
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json

@@ -100,6 +100,47 @@ EXPLOIT_FAMILY_TERMS = {
 VIRTUALIZATION_TERMS = ("qemu", "vmware", "sandboxie", "parallels", "virtualbox", "virtual pc", "vbox")
 NETWORK_PATH_PREFIXES = ("\\\\", "file://")
 EXTERNAL_DRIVE_LETTERS = set("DEFGHIJKLMNOPQRSTUVWXYZ")
+TRUST_DAMPEN_SIGNERS = (
+    "Roblox Corporation",
+    "Microsoft Corporation",
+    "Microsoft Windows",
+    "Logitech",
+    "Razer",
+    "Corsair",
+    "NVIDIA Corporation",
+    "MeldaProduction",
+    "Spotify",
+    "Proton",
+    "Python Software Foundation",
+)
+COMMON_DEPENDENCY_NAMES = (
+    "sqlite3.dll",
+    "libcrypto",
+    "python312.dll",
+    "python3.dll",
+    "libffi",
+    "vcruntime",
+    "api-ms-win",
+    "webview2loader.dll",
+    "base_library.zip",
+)
+LOW_SIGNAL_PATH_MARKERS = (
+    "\\vstplugins\\",
+    "\\otvdm",
+    "\\kyotowindows\\",
+    "\\roblox\\versions\\",
+    "\\roblox\\downloads\\",
+    "\\_internal\\",
+)
+REAL_BEHAVIOR_EVIDENCE_TYPES = {
+    "sysmon_remote_thread",
+    "sysmon_process_access",
+    "suspicious_module_load",
+    "persistence",
+    "powershell_history",
+    "prefetch",
+    "known_cheat_artifact",
+}
 EVENT_NS = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
 DEFAULT_API_BASE_URL = "https://securo-next.vercel.app/"
 tk = None
@@ -225,6 +266,52 @@ def is_known_safe_signer(signer: dict, config: dict) -> bool:
     return any(safe.lower() in text.lower() for safe in config["known_safe_signers"])
 
 
+def trusted_dampened_signer(signer: dict) -> bool:
+    if (signer.get("status") or "").lower() != "valid":
+        return False
+    text = f"{signer.get('subject', '')} {signer.get('issuer', '')}".lower()
+    return any(safe.lower() in text for safe in TRUST_DAMPEN_SIGNERS)
+
+
+def common_dependency_path(path: str) -> bool:
+    name = Path(path or "").name.lower()
+    return any(marker in name for marker in COMMON_DEPENDENCY_NAMES)
+
+
+def low_signal_path(path: str) -> bool:
+    low = (path or "").lower()
+    return any(marker in low for marker in LOW_SIGNAL_PATH_MARKERS)
+
+
+def known_bad_hash(finding: dict, config: dict) -> bool:
+    digest = (finding.get("sha256") or "").lower()
+    return bool(digest and digest in {str(x).lower() for x in config.get("known_bad_hashes", [])})
+
+
+def real_behavioral_evidence(finding: dict) -> bool:
+    types = set(finding.get("evidence_types", []))
+    if types & REAL_BEHAVIOR_EVIDENCE_TYPES:
+        return True
+    categories = set(finding.get("detection_categories", []))
+    return bool(categories & {"Suspicious startup persistence", "WMI Persistence", "Skript Loader Trace"})
+
+
+def exploit_specific_artifact(finding: dict, config: dict) -> bool:
+    text = " ".join([
+        finding.get("name", ""),
+        finding.get("path", ""),
+        " ".join(finding.get("supporting_evidence", [])),
+    ]).lower()
+    if known_bad_hash(finding, config):
+        return True
+    if any(term in text for term in EXPLOIT_FAMILY_TERMS):
+        return True
+    if any(term in text for term in ["executor", "injector", "exploit", "dllloader", "calibration loader", "unknown updater.exe", "skript loader", "skriptloader", "skript"]):
+        return True
+    name = Path(finding.get("path") or finding.get("name") or "").name.lower()
+    return name in {"loader.js", "rbxscriptsignal.js"}
+
+
 def risky_source_path(path: str) -> bool:
     low = path.lower()
     risky = ["\\appdata\\local\\temp\\", "\\downloads\\", "\\temp\\", "\\appdata\\roaming\\"]
@@ -324,9 +411,21 @@ def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     elif signer.get("status", "").lower() in ["notsigned", "unknown", "missing"]:
         add_score(finding, config["score_rules"]["unsigned_executable"], "Unsigned or unverifiable executable")
     if user_writable_path(norm):
-        add_score(finding, config["score_rules"]["risky_source_path"], "Path is user-writable or commonly abused")
+        amount = config["score_rules"]["risky_source_path"]
+        if low_signal_path(norm):
+            amount = min(amount, 3)
+        add_score(finding, amount, "Path is user-writable or commonly abused" if amount > 3 else "Path is in a known noisy/bundled location; path score dampened")
     if suspicious_name(norm or name, config):
         add_score(finding, config["score_rules"]["suspicious_name"], "Suspicious Roblox exploit/executor-related name")
+    if trusted_dampened_signer(signer):
+        finding["trust_dampened"] = True
+        finding["supporting_evidence"].append("Valid trusted signer; downgraded unless paired with known-bad hash or real behavioral evidence.")
+    if common_dependency_path(norm):
+        finding["common_dependency"] = True
+        finding["supporting_evidence"].append("Common dependency/runtime file; strings alone are not enough to confirm exploitation.")
+    if low_signal_path(norm):
+        finding["low_signal_path"] = True
+        finding["supporting_evidence"].append("Known noisy folder context; path-abuse score is dampened.")
     return finding
 
 
@@ -382,7 +481,7 @@ def detection_type_for_category(category: str) -> str:
 
 
 def confidence_from_score(score: int, classification: str) -> str:
-    if classification == "Confirmed":
+    if classification == "Confirmed Exploit":
         return "high"
     if score >= 50:
         return "medium-high"
@@ -392,7 +491,7 @@ def confidence_from_score(score: int, classification: str) -> str:
 
 
 def review_required_for_type(log_type: str, classification: str) -> bool:
-    return log_type in {"Warning", "Recovery", "Manual Review"} or classification not in {"Confirmed"}
+    return log_type in {"Warning", "Recovery", "Manual Review"} or classification not in {"Confirmed Exploit", "Trusted Safe"}
 
 
 def exploit_family_match(finding: dict, config: dict) -> bool:
@@ -410,11 +509,11 @@ def exploit_family_match(finding: dict, config: dict) -> bool:
 
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
-    if categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES:
+    if known_bad_hash(finding, config):
         return True
-    if "Skript Loader Trace" in categories:
+    if real_behavioral_evidence(finding) and exploit_specific_artifact(finding, config):
         return True
-    if categories & CONFIRMED_EXPLOIT_CATEGORIES and exploit_family_match(finding, config):
+    if (categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES) and exploit_specific_artifact(finding, config):
         return True
     return False
 
@@ -541,32 +640,51 @@ def merge_findings(findings: dict, finding: dict) -> dict:
 
 def categorize_finding(finding: dict, config: dict) -> str:
     types = set(finding.get("evidence_types", []))
+    categories = set(finding.get("detection_categories", []))
     score = finding.get("score", 0)
+    trusted = trusted_dampened_signer(finding.get("signer", {}))
+    dependency = common_dependency_path(finding.get("path", ""))
+    behavior = real_behavioral_evidence(finding)
+    exploit_specific = exploit_specific_artifact(finding, config)
+    if trusted and not behavior and not known_bad_hash(finding, config):
+        return "Trusted Safe" if not categories else "Likely False Positive"
+    if (dependency or finding.get("low_signal_path")) and not behavior and not exploit_specific:
+        return "Likely False Positive" if categories else "Trusted Safe"
     if "possible_context" in types:
-        return "Weak"
+        return "Indicator Found"
     if confirmed_exploit_artifact(finding, config):
-        return "Confirmed"
+        return "Confirmed Exploit"
     if types & {"sysmon_remote_thread", "sysmon_process_access", "suspicious_module_load"}:
-        return "Confirmed" if score >= config["category_thresholds"]["confirmed"] else "Suspicious"
+        return "Confirmed Exploit" if score >= config["category_thresholds"]["confirmed"] and exploit_specific else "Suspicious"
+    if categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES and not exploit_specific:
+        return "Indicator Found"
+    if categories & {"A1", "A2", "A3", "X1", "X2", "RAM Suspicious Indicator"} and not behavior:
+        return "Indicator Found"
+    if "Suspicious DLL Loading" in categories and not ("suspicious_module_load" in types or finding.get("signer", {}).get("status", "").lower() in {"notsigned", "unknown", "missing"}):
+        return "Indicator Found"
     if score >= config["category_thresholds"]["suspicious"]:
         return "Suspicious"
     if score >= config["category_thresholds"]["weak"]:
-        return "Weak"
-    return "Weak"
+        return "Indicator Found"
+    return "Indicator Found"
 
 
 def finalize_findings(findings: list[dict], config: dict) -> list[dict]:
     for f in findings:
         f["score"] = max(0, f.get("score", 0))
         f["classification"] = categorize_finding(f, config)
-        if f["classification"] == "Confirmed" and f["score"] < config["category_thresholds"]["confirmed"]:
+        if f["classification"] == "Confirmed Exploit" and f["score"] < config["category_thresholds"]["confirmed"]:
             add_score(f, config["category_thresholds"]["confirmed"] - f["score"], "Confirmed exploit artifact rule matched")
-        if f["classification"] == "Confirmed":
+        if f["classification"] == "Confirmed Exploit":
             f["attribution_explanation"] = "Confirmed Roblox exploit artifact evidence exists for this item."
         elif f["classification"] == "Suspicious":
             f["attribution_explanation"] = "This artifact is suspicious because it is exploit-related, user-writable, or close in time to Roblox activity, but direct injection proof may be missing."
+        elif f["classification"] == "Likely False Positive":
+            f["attribution_explanation"] = "This looks like a dependency, trusted signed file, or noisy path context. It should not be treated as cheating without behavioral evidence."
+        elif f["classification"] == "Trusted Safe":
+            f["attribution_explanation"] = "This file is trusted/safe in the available evidence."
         else:
-            f["attribution_explanation"] = "This is indirect context only. It should not be treated as confirmed executor evidence by itself."
+            f["attribution_explanation"] = "An indicator was found, but it is not enough to confirm cheating by itself."
     return sorted(findings, key=lambda x: x.get("score", 0), reverse=True)
 
 
@@ -787,10 +905,10 @@ def add_score(finding: dict, amount: int, reason: str):
 def classify(score: int, config: dict) -> str:
     t = config.get("category_thresholds", {"confirmed": 70, "suspicious": 35, "weak": 10})
     if score >= t["confirmed"]:
-        return "Confirmed"
+        return "Confirmed Exploit"
     if score >= t["suspicious"]:
         return "Suspicious"
-    return "Weak"
+    return "Indicator Found"
 
 
 def process_identity(path: str, config: dict) -> dict:
@@ -915,6 +1033,9 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
             f["parent_process"] = d.get("ParentProcessName", f["parent_process"])
             f["supporting_evidence"].append("Security ID 4688 process creation context")
             f["evidence_types"].append("process_execution")
+            if suspicious_name(image, config):
+                f["evidence_types"].append("prefetch")
+                add_detection(f, "Executed Suspicious File", "Suspicious executable process creation observed", "High", 30)
             if near_any_session(ev["time"], sessions):
                 add_score(f, config["score_rules"]["near_roblox_session"], "Security 4688 execution occurred within 30 minutes of a Roblox session")
             if not f["first_seen"] and ev["time"]:
@@ -935,10 +1056,12 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
     for f in findings.values():
         f["score"] = max(0, f["score"])
         f["classification"] = categorize_finding(f, config)
-        if f["classification"] == "Confirmed":
+        if f["classification"] == "Confirmed Exploit":
             f["attribution_explanation"] = "This artifact has direct Roblox process interaction evidence."
         elif f["classification"] == "Suspicious":
             f["attribution_explanation"] = "This artifact is suspicious and Roblox-correlated, but the available logs may not prove injection."
+        elif f["classification"] in {"Trusted Safe", "Likely False Positive"}:
+            f["attribution_explanation"] = "Trusted signer, common dependency, or noisy path context lowered this result."
         else:
             f["attribution_explanation"] = "Available logs do not identify this as confirmed executor evidence; treat as context unless stronger evidence exists."
     return list(findings.values()), timeline
@@ -1533,7 +1656,7 @@ def engine_assessment(finding: dict, config: dict) -> dict:
     score = int(finding.get("score", 0) or 0)
     local_hits = len(categories)
     vt_enabled = bool(config.get("virustotal_api_key"))
-    if finding.get("classification") == "Confirmed":
+    if finding.get("classification") == "Confirmed Exploit":
         detectability = "high"
     elif score >= 50 or categories & GENERIC_DETECTION_CATEGORIES:
         detectability = "medium-high"
@@ -1550,7 +1673,7 @@ def engine_assessment(finding: dict, config: dict) -> dict:
         "detectabilityRange": detectability,
         "virusTotalEnabled": vt_enabled,
         "virusTotalStatus": "configured_not_queried" if vt_enabled else "not_configured",
-        "manualReviewRequired": finding.get("classification") != "Confirmed",
+        "manualReviewRequired": finding.get("classification") not in {"Confirmed Exploit", "Trusted Safe"},
     }
 
 
@@ -1564,8 +1687,8 @@ def antivirus_logs_from_findings(findings: list[dict]) -> list[dict]:
             "detectionName": "; ".join(d.get("category", "") for d in f.get("detections", []) if d.get("type") == "Antivirus") or "Antivirus Detection",
             "antivirusSource": f.get("artifact_source", "Windows Defender"),
             "timestamp": f.get("first_seen", ""),
-            "severity": "High" if f.get("classification") in {"Confirmed", "Suspicious"} else "Medium",
-            "classification": f.get("classification", "Weak"),
+            "severity": "High" if f.get("classification") in {"Confirmed Exploit", "Suspicious"} else "Medium",
+            "classification": f.get("classification", "Indicator Found"),
         })
     return rows
 
@@ -1584,9 +1707,9 @@ def detect_logs_from_report_parts(findings: list[dict], warnings: list[dict], re
                 "evidencePath": f.get("path", ""),
                 "artifactSource": f.get("artifact_source", ""),
                 "timestamp": f.get("first_seen", ""),
-                "manualReviewRequired": review_required_for_type(log_type, f.get("classification", "Weak")),
-                "confidenceLevel": confidence_from_score(f.get("score", 0), f.get("classification", "Weak")),
-                "classification": f.get("classification", "Weak"),
+                "manualReviewRequired": review_required_for_type(log_type, f.get("classification", "Indicator Found")),
+                "confidenceLevel": confidence_from_score(f.get("score", 0), f.get("classification", "Indicator Found")),
+                "classification": f.get("classification", "Indicator Found"),
                 "score": f.get("score", 0),
                 "sha256": f.get("sha256", ""),
                 "signer": f.get("signer", {}),
@@ -1632,9 +1755,9 @@ def detect_logs_from_report_parts(findings: list[dict], warnings: list[dict], re
             "evidencePath": av.get("filePath", ""),
             "artifactSource": av.get("antivirusSource", ""),
             "timestamp": av.get("timestamp", ""),
-            "manualReviewRequired": av.get("classification") != "Confirmed",
+            "manualReviewRequired": av.get("classification") != "Confirmed Exploit",
             "confidenceLevel": "medium",
-            "classification": av.get("classification", "Weak"),
+            "classification": av.get("classification", "Indicator Found"),
             "score": 0,
             "sha256": "",
             "signer": {},
@@ -1645,12 +1768,16 @@ def detect_logs_from_report_parts(findings: list[dict], warnings: list[dict], re
 def determine_overall_category(report: dict) -> str:
     findings = report.get("findings", [])
     quality = report.get("evidence_quality", {})
-    if any(f.get("classification") == "Confirmed" for f in findings):
-        return "Confirmed"
+    if any(f.get("classification") == "Confirmed Exploit" for f in findings):
+        return "Confirmed Exploit"
     if any(f.get("classification") == "Suspicious" for f in findings):
         return "Suspicious"
-    if any(f.get("classification") == "Weak" for f in findings):
-        return "Weak"
+    if any(f.get("classification") == "Indicator Found" for f in findings):
+        return "Indicator Found"
+    if any(f.get("classification") == "Likely False Positive" for f in findings):
+        return "Likely False Positive"
+    if any(f.get("classification") == "Trusted Safe" for f in findings):
+        return "Trusted Safe"
     available = sum(1 for v in quality.values() if v)
     important = [
         quality.get("Roblox logs available"),
@@ -1677,10 +1804,10 @@ def attach_session_status(sessions: list[dict], findings: list[dict]) -> list[di
         for session in sessions:
             if not near_any_session(first_seen, [session], minutes=30):
                 continue
-            class_name = finding.get("classification", "Weak")
-            if class_name == "Confirmed":
-                session["status"] = "Confirmed"
-            elif session.get("status") != "Confirmed" and class_name in {"Suspicious", "Weak"}:
+            class_name = finding.get("classification", "Indicator Found")
+            if class_name == "Confirmed Exploit":
+                session["status"] = "Confirmed Exploit"
+            elif session.get("status") != "Confirmed Exploit" and class_name == "Suspicious":
                 session["status"] = "Suspicious"
             session["linked_detections"].append({
                 "name": finding.get("name", ""),
@@ -1708,13 +1835,13 @@ def confidence_for(overall: str, quality: dict) -> str:
         ]
         if quality.get(key)
     )
-    if overall == "Confirmed":
+    if overall == "Confirmed Exploit":
         return "high"
     if overall == "Suspicious":
         return "medium" if important_available >= 3 else "low"
-    if overall == "Weak":
+    if overall == "Indicator Found":
         return "low"
-    if overall == "Clean-but-limited":
+    if overall in {"Clean-but-limited", "Likely False Positive", "Trusted Safe"}:
         return "limited"
     return "insufficient"
 
@@ -1768,8 +1895,8 @@ def camel_finding(finding: dict) -> dict:
         "path": finding.get("path", ""),
         "sha256": finding.get("sha256", ""),
         "score": finding.get("score", 0),
-        "category": finding.get("classification", "Weak"),
-        "classification": finding.get("classification", "Weak"),
+        "category": finding.get("classification", "Indicator Found"),
+        "classification": finding.get("classification", "Indicator Found"),
         "firstSeen": finding.get("first_seen", ""),
         "artifactSource": finding.get("artifact_source", ""),
         "evidenceTypes": sorted(set(finding.get("evidence_types", []))),
@@ -1845,8 +1972,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "topScore": top_score,
         "systemInfo": system,
         "finalStatement": "No confirmed Roblox injection evidence was found in available logs. Logging coverage may not be sufficient to rule it out."
-        if highest_result not in ["Confirmed", "Suspicious"]
-        else "Confirmed or suspicious Roblox exploit/injection evidence was found in available artifacts.",
+        if highest_result not in ["Confirmed Exploit", "Suspicious"]
+        else "Confirmed exploit or suspicious Roblox exploit/injection evidence was found in available artifacts.",
     }
     return report
 
@@ -1925,8 +2052,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "topScore": top_score,
         "systemInfo": system,
         "finalStatement": "No confirmed Roblox injection evidence was found in available logs. Logging coverage may not be sufficient to rule it out."
-        if highest_result not in ["Confirmed", "Suspicious"]
-        else "Confirmed or suspicious Roblox exploit/injection evidence was found in available artifacts.",
+        if highest_result not in ["Confirmed Exploit", "Suspicious"]
+        else "Confirmed exploit or suspicious Roblox exploit/injection evidence was found in available artifacts.",
     }
 
 
@@ -2008,7 +2135,7 @@ def render_txt(report: dict) -> str:
         f"User ID: {primary_session.get('userId', '')}",
         f"Place ID: {primary_session.get('placeId', '')}",
         f"Risk Level: {report['highestResult']}",
-        f"Injection Evidence: {report['highestResult'] if report['highestResult'] in ['Confirmed', 'Suspicious'] else 'Not confirmed'}",
+        f"Injection Evidence: {report['highestResult'] if report['highestResult'] in ['Confirmed Exploit', 'Suspicious'] else 'Not confirmed'}",
         "",
     ]
     lines += ["Evidence Quality", "----------------"]
@@ -2058,7 +2185,7 @@ def render_txt(report: dict) -> str:
     if not report["findings"]:
         lines += ["No confirmed Roblox injection evidence was found in available logs.", "Logging coverage may not be sufficient to rule it out.", ""]
     for f in sorted(report["findings"], key=lambda x: x["score"], reverse=True):
-        banner = f"\n*** {f['name']} DETECTED! ***" if f["classification"] in ["Confirmed", "Suspicious"] else ""
+        banner = f"\n*** {f['name']} DETECTED! ***" if f["classification"] in ["Confirmed Exploit", "Suspicious"] else ""
         lines += [banner, f"Process: {f['name']}", f"Path: {f['path']}", f"SHA256: {f['sha256']}", f"Signer: {f['signer'].get('status')} {f['signer'].get('subject')}", f"Score: {f['score']}", f"Classification: {f['classification']}", "Score breakdown:"]
         if f.get("detections"):
             lines += ["Detection categories:"]
@@ -2157,7 +2284,7 @@ def render_html(report: dict) -> str:
     for f in sorted(report["findings"], key=lambda x: x["score"], reverse=True):
         grouped[f["classification"]].append(f)
     findings_html = ""
-    for group in ["Confirmed", "Suspicious", "Weak"]:
+    for group in ["Confirmed Exploit", "Suspicious", "Indicator Found", "Likely False Positive", "Trusted Safe"]:
         findings_html += f"<h3>{group}</h3>"
         if not grouped[group]:
             findings_html += "<p class='muted'>None.</p>"
@@ -2181,7 +2308,7 @@ def render_html(report: dict) -> str:
 body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline li{{display:grid;grid-template-columns:170px 1fr 130px;gap:12px;padding:8px 0;border-bottom:1px solid #edf0f3}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}
 </style></head><body><header><h1>{APP_NAME} Report</h1><p>No confirmed result means only that available logs did not prove it. Logging coverage may be incomplete.</p></header><main>
 <section><h2>Summary</h2><div class="summary"><div class="card"><div>Scan Date</div><div class="value">{html.escape(report['scanTime'])}</div></div><div class="card"><div>Highest Result</div><div class="value">{report['highestResult']}</div></div><div class="card"><div>Top Score</div><div class="value">{report.get('topScore', 0)}</div></div><div class="card"><div>Roblox Sessions</div><div class="value">{len(report['sessions'])}</div></div></div></section>
-<section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed','Suspicious'] else 'Not confirmed')}</div></div></div></section>
+<section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed Exploit','Suspicious'] else 'Not confirmed')}</div></div></div></section>
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'])}</section>
 <section><h2>Interaction / Detect Logs</h2><div class="filters">{''.join(f"<span class='pill'>{x}</span>" for x in DETECT_LOG_TYPES)}</div>{html_table(detect_rows, ['Type','Detection','Severity','Confidence','Manual Review','Evidence','Timestamp','Explanation'])}</section>
 <section><h2>Warning Logs</h2><p class="muted">Warnings indicate modifications or behaviors that may reduce confidence or require review. They are not automatically cheating evidence.</p>{html_table(warning_rows, ['Detection','Severity','Confidence','Manual Review','Source','Timestamp','Explanation'])}</section>
