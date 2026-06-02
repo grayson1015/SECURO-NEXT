@@ -159,18 +159,19 @@ class CoreTests(unittest.TestCase):
         config = test_config()
         config["suspicious_name_terms"].append("xeno")
         cases = [
-            ("C:\\Users\\timmy\\Downloads\\Xeno-v1.3.30\\XenoUI.dll", ["DotNetDLL"]),
-            ("C:\\Users\\timmy\\Downloads\\Xeno-v1.3.30\\Xeno.exe", ["Tampered File"]),
-            ("C:\\Users\\timmy\\Downloads\\Xeno-v1.3.30\\zlib1.dll", ["A3"]),
+            ("C:\\Users\\timmy\\Downloads\\Xeno-v1.3.30\\Xeno.exe", ["Tampered File"], "Confirmed Exploit"),
+            ("C:\\Users\\timmy\\Downloads\\Xeno-v1.3.30\\XenoUI.dll", ["DotNetDLL"], "Indicator Found"),
+            ("C:\\Users\\timmy\\Downloads\\Xeno-v1.3.30\\zlib1.dll", ["A3"], "Indicator Found"),
         ]
-        for path, categories in cases:
+        for path, categories, expected in cases:
             finding = checker.make_finding(path, Path(path).name, "unit", config)
             finding["detection_categories"] = categories
             finding["detections"] = [{"category": categories[0], "reason": "fixture", "risk": "High"}]
             finding["score"] = 20
             result = checker.finalize_findings([finding], config)[0]
-            self.assertEqual(result["classification"], "Confirmed Exploit", path)
-            self.assertGreaterEqual(result["score"], config["category_thresholds"]["confirmed"])
+            self.assertEqual(result["classification"], expected, path)
+            if expected == "Confirmed Exploit":
+                self.assertGreaterEqual(result["score"], config["category_thresholds"]["confirmed"])
 
     def test_shellbag_and_recycle_bin_context_stay_possible(self):
         config = test_config()
@@ -219,7 +220,7 @@ class CoreTests(unittest.TestCase):
         checker.add_detection(finding, "Skript Loader Trace", "Known Skript Loader-style trace found", "High", 55)
         result = checker.finalize_findings([finding], config)[0]
         logs = checker.detect_logs_from_report_parts([result], [], [], [], config)
-        self.assertEqual(result["classification"], "Confirmed Exploit")
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
         self.assertTrue(any(log["type"] == "Direct" for log in logs))
 
     def test_a3_alone_is_indicator_found(self):
@@ -261,11 +262,19 @@ class CoreTests(unittest.TestCase):
 
     def test_flagged_item_with_executor_keyword_can_confirm(self):
         config = test_config()
-        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\xeno_executor.exe", "xeno_executor.exe", "unit", config)
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\Xeno.exe", "Xeno.exe", "unit", config)
         checker.add_detection(finding, "A3", "A3 indicator found in flagged artifact", "High", 20)
         result = checker.finalize_findings([finding], config)[0]
         self.assertEqual(result["classification"], "Confirmed Exploit")
         self.assertIn("Executor Keyword Match", result.get("detection_categories", []))
+
+    def test_flagged_item_with_keyword_in_non_exact_exe_name_does_not_confirm(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\xeno_executor.exe", "xeno_executor.exe", "unit", config)
+        checker.add_detection(finding, "A3", "A3 indicator found in flagged artifact", "High", 20)
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+        self.assertNotIn("Executor Keyword Match", result.get("detection_categories", []))
 
     def test_config_executor_keyword_is_second_stage_only(self):
         config = test_config()

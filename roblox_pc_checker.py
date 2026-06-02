@@ -594,21 +594,29 @@ def already_flagged_by_detection(finding: dict) -> bool:
     return bool(non_keyword_types or non_keyword_categories)
 
 
+def normalize_executor_keyword(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def executor_filename_keyword_match(finding: dict, config: dict) -> bool:
+    keywords = config.get("executor_confirmation_keywords") or []
+    normalized_keywords = {normalize_executor_keyword(str(keyword)) for keyword in keywords if str(keyword).strip()}
+    if not normalized_keywords:
+        normalized_keywords = {normalize_executor_keyword(term) for term in EXPLOIT_FAMILY_TERMS}
+    candidates = []
+    for value in [finding.get("name", ""), finding.get("path", "")]:
+        if not value:
+            continue
+        filename = Path(str(value)).name
+        if Path(filename).suffix.lower() == ".exe":
+            candidates.append(Path(filename).stem)
+    return any(normalize_executor_keyword(candidate) in normalized_keywords for candidate in candidates)
+
+
 def executor_keyword_match(finding: dict, config: dict) -> bool:
     if not already_flagged_by_detection(finding):
         return False
-    terms = set(EXPLOIT_FAMILY_TERMS)
-    terms.update(str(t).lower() for t in config.get("suspicious_name_terms", []))
-    terms.update(str(t).lower() for t in config.get("executor_confirmation_keywords", []))
-    terms.update({"executor", "injector", "exploit", "dllloader", "script hub", "calibration loader", "unknown updater"})
-    text = " ".join(
-        [
-            str(finding.get("name", "")),
-            str(finding.get("path", "")),
-            " ".join(str(x) for x in finding.get("supporting_evidence", [])),
-        ]
-    ).lower()
-    return any(term and term in text for term in terms)
+    return executor_filename_keyword_match(finding, config)
 
 
 def apply_executor_keyword_check(finding: dict, config: dict):
@@ -619,11 +627,13 @@ def apply_executor_keyword_check(finding: dict, config: dict):
 
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
+    if not executor_keyword_match(finding, config):
+        return False
     if known_bad_hash(finding, config):
         return True
-    if real_behavioral_evidence(finding) and executor_keyword_match(finding, config):
+    if real_behavioral_evidence(finding):
         return True
-    if (categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES) and executor_keyword_match(finding, config):
+    if categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES:
         return True
     return False
 
