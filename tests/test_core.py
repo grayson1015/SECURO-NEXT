@@ -36,6 +36,7 @@ def test_config():
         },
         "virustotal_api_key": "",
         "ruin_mode_enabled": False,
+        "storage_base_dir": "",
         "known_bad_hashes": [],
         "category_thresholds": {"confirmed": 70, "suspicious": 35, "weak": 10},
         "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation", "Python Software Foundation"],
@@ -249,6 +250,49 @@ class CoreTests(unittest.TestCase):
         checker.add_detection(finding, "Suspicious DLL Loading", "Suspicious DLL name in user-writable path", "High", 35)
         result = checker.finalize_findings([finding], config)[0]
         self.assertIn(result["classification"], {"Indicator Found", "Likely False Positive"})
+
+    def test_keyword_only_item_does_not_confirm(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\xeno_executor.exe", "xeno_executor.exe", "unit", config)
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+        self.assertNotIn("Executor Keyword Match", result.get("detection_categories", []))
+
+    def test_flagged_item_with_executor_keyword_can_confirm(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\xeno_executor.exe", "xeno_executor.exe", "unit", config)
+        checker.add_detection(finding, "A3", "A3 indicator found in flagged artifact", "High", 20)
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertEqual(result["classification"], "Confirmed Exploit")
+        self.assertIn("Executor Keyword Match", result.get("detection_categories", []))
+
+    def test_reports_save_to_securo_storage_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = test_config()
+            config["storage_base_dir"] = tmp
+            report = {
+                "scanTime": dt.datetime.now().astimezone().isoformat(),
+                "hostname": "h",
+                "highestResult": "Indicator Found",
+                "confidence": "low",
+                "evidenceSources": {},
+                "timeline": [],
+                "sessions": [],
+                "findings": [],
+                "detectLogs": [],
+                "warningLogs": [],
+                "recoveryArtifacts": [],
+                "antivirusLogs": [],
+                "engineResults": [],
+                "limitations": [],
+                "finalStatement": "test",
+            }
+            written = checker.save_local_reports(report, config)
+            paths = [Path(p) for p in written]
+            self.assertTrue((Path(tmp) / "Reports").exists())
+            self.assertTrue((Path(tmp) / "History" / "securo_check_history.sqlite").exists())
+            self.assertTrue((Path(tmp) / "Logs" / "application_logs.log").exists())
+            self.assertTrue(any(p.parent.name == "Reports" and p.suffix == ".html" for p in paths))
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json

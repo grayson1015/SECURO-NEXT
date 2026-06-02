@@ -11,10 +11,19 @@ import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
+type TimeRange = "30d" | "14d" | "7d" | "3d";
+const timeRanges: { label: string; value: TimeRange; days: number }[] = [
+  { label: "1 month", value: "30d", days: 30 },
+  { label: "2 weeks", value: "14d", days: 14 },
+  { label: "1 week", value: "7d", days: 7 },
+  { label: "3 days", value: "3d", days: 3 }
+];
+
 export function Dashboard({ initialReports, initialPins }: { initialReports: ReportRow[]; initialPins: PinRow[] }) {
   const [reports, setReports] = useState(initialReports);
   const [pins, setPins] = useState(initialPins);
   const [query, setQuery] = useState("");
+  const [timeRange, setTimeRange] = useState<TimeRange>("7d");
   const [sortKey, setSortKey] = useState<"username" | "userId" | "placeId" | "risk" | "scanTime">("scanTime");
   const [createdPin, setCreatedPin] = useState<PinRow | null>(null);
   const [busy, setBusy] = useState(false);
@@ -28,11 +37,12 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
     return () => window.clearInterval(timer);
   }, []);
 
-  const filtered = useMemo(() => sortReports(filterReports(reports, query), sortKey), [reports, query, sortKey]);
-  const latest = reports[0];
-  const confirmed = latest ? countFindings(latest.report_json, "Confirmed") : 0;
+  const rangedReports = useMemo(() => filterReportsByTimeRange(reports, timeRange), [reports, timeRange]);
+  const filtered = useMemo(() => sortReports(filterReports(rangedReports, query), sortKey), [rangedReports, query, sortKey]);
+  const latest = rangedReports[0];
+  const confirmed = latest ? countFindings(latest.report_json, "Confirmed Exploit") : 0;
   const likely = latest ? countFindings(latest.report_json, "Suspicious") : 0;
-  const possible = latest ? countFindings(latest.report_json, "Weak") : 0;
+  const possible = latest ? countFindings(latest.report_json, "Indicator Found") : 0;
   const sessions = latest?.report_json.sessions.length || 0;
   const coverage = latest ? coveragePercent(latest.report_json.evidenceSources) : 0;
   const packed = latest ? countDetectionCategory(latest.report_json, ["packed", "UPX", "VMProtect", "Themida"]) : 0;
@@ -111,9 +121,23 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
                 <h2 className="text-lg font-semibold">Reports</h2>
                 <p className="text-sm text-zinc-400">Realtime updates appear as soon as Securo uploads.</p>
               </div>
-              <div className="relative w-72 max-w-full">
-                <Search className="absolute left-3 top-2.5 text-zinc-500" size={16} />
-                <Input className="pl-9" placeholder="Search reports" value={query} onChange={(event) => setQuery(event.target.value)} />
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <div className="flex rounded-md border border-border bg-black/20 p-1">
+                  {timeRanges.map((range) => (
+                    <button
+                      key={range.value}
+                      className={`rounded px-3 py-1.5 text-xs font-semibold ${timeRange === range.value ? "bg-primary text-black" : "text-zinc-400 hover:text-white"}`}
+                      type="button"
+                      onClick={() => setTimeRange(range.value)}
+                    >
+                      {range.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="relative w-72 max-w-full">
+                  <Search className="absolute left-3 top-2.5 text-zinc-500" size={16} />
+                  <Input className="pl-9" placeholder="Search reports" value={query} onChange={(event) => setQuery(event.target.value)} />
+                </div>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -168,9 +192,9 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
             <Card>
               <CardTitle>Risk Section</CardTitle>
               <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-                <Risk label="High" value={reports.filter((r) => r.risk_level === "High").length} />
-                <Risk label="Medium" value={reports.filter((r) => r.risk_level === "Medium").length} />
-                <Risk label="Low" value={reports.filter((r) => r.risk_level === "Low").length} />
+                <Risk label="High" value={rangedReports.filter((r) => r.risk_level === "High").length} />
+                <Risk label="Medium" value={rangedReports.filter((r) => r.risk_level === "Medium").length} />
+                <Risk label="Low" value={rangedReports.filter((r) => r.risk_level === "Low").length} />
               </div>
             </Card>
             <Card>
@@ -199,6 +223,15 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
       </div>
     </main>
   );
+}
+
+function filterReportsByTimeRange(reports: ReportRow[], range: TimeRange) {
+  const selected = timeRanges.find((item) => item.value === range) || timeRanges[2];
+  const cutoff = Date.now() - selected.days * 24 * 60 * 60 * 1000;
+  return reports.filter((report) => {
+    const value = new Date(report.scan_time || report.uploaded_at || "").getTime();
+    return Number.isFinite(value) && value >= cutoff;
+  });
 }
 
 function Stat({ icon, title, value }: { icon: React.ReactNode; title: string; value: string }) {

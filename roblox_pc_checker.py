@@ -70,6 +70,7 @@ SPECIFIC_DETECTION_CATEGORIES = {
     "RAM Suspicious Indicator",
     "Game Instance Modification",
     "ActivitiesCache Disabled",
+    "Executor Keyword Match",
 }
 WARNING_DETECTION_CATEGORIES = {
     "Virtualization Check",
@@ -96,6 +97,9 @@ EXPLOIT_FAMILY_TERMS = {
     "sirhurt",
     "oxygen",
     "vega",
+    "skript",
+    "skriptloader",
+    "skript loader",
 }
 VIRTUALIZATION_TERMS = ("qemu", "vmware", "sandboxie", "parallels", "virtualbox", "virtual pc", "vbox")
 NETWORK_PATH_PREFIXES = ("\\\\", "file://")
@@ -188,7 +192,60 @@ def load_config() -> dict:
         config = {}
     config.setdefault("api_base_url", DEFAULT_API_BASE_URL)
     config.setdefault("scan_days", 7)
+    config.setdefault("storage_base_dir", "")
     return config
+
+
+def default_storage_root() -> Path:
+    user_profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
+    documents = user_profile / "Documents"
+    return documents / "Securo"
+
+
+def storage_root(config: dict) -> Path:
+    configured = str(config.get("storage_base_dir") or "").strip()
+    if configured:
+        return Path(os.path.expandvars(configured)).expanduser()
+    return default_storage_root()
+
+
+def ensure_storage_dirs(config: dict) -> dict[str, Path]:
+    root = storage_root(config)
+    dirs = {
+        "root": root,
+        "reports": root / "Reports",
+        "history": root / "History",
+        "logs": root / "Logs",
+    }
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+def app_log_path(config: dict) -> Path:
+    return ensure_storage_dirs(config)["logs"] / "application_logs.log"
+
+
+def write_app_log(config: dict, message: str):
+    try:
+        path = app_log_path(config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now().isoformat(sep=" ", timespec="seconds")
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"{stamp} {message}\n")
+    except Exception:
+        pass
+
+
+def open_folder(path: Path):
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception:
+        pass
 
 
 def now_stamp() -> str:
@@ -214,7 +271,22 @@ def parse_iso_event_time(value: str):
 
 def run_command(args, timeout=20) -> str:
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, errors="replace")
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        p = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            errors="replace",
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
         return (p.stdout or "") + (p.stderr or "")
     except Exception as exc:
         return f"COMMAND_ERROR: {exc}"
@@ -404,7 +476,7 @@ def make_finding(path: str, name: str, source: str, config: dict) -> dict:
         "detections": [],
         "artifact_source": source,
         "attribution_explanation": "",
-        "classification": "Weak",
+        "classification": "Indicator Found",
     }
     if is_known_safe_signer(signer, config):
         add_score(finding, config["score_rules"]["known_safe_signer"], "Signed by known-safe signer")
@@ -415,8 +487,6 @@ def make_finding(path: str, name: str, source: str, config: dict) -> dict:
         if low_signal_path(norm):
             amount = min(amount, 3)
         add_score(finding, amount, "Path is user-writable or commonly abused" if amount > 3 else "Path is in a known noisy/bundled location; path score dampened")
-    if suspicious_name(norm or name, config):
-        add_score(finding, config["score_rules"]["suspicious_name"], "Suspicious Roblox exploit/executor-related name")
     if trusted_dampened_signer(signer):
         finding["trust_dampened"] = True
         finding["supporting_evidence"].append("Valid trusted signer; downgraded unless paired with known-bad hash or real behavioral evidence.")
@@ -507,13 +577,43 @@ def exploit_family_match(finding: dict, config: dict) -> bool:
     return any(term and term in text for term in terms)
 
 
+def already_flagged_by_detection(finding: dict) -> bool:
+    categories = set(finding.get("detection_categories", []))
+    types = set(finding.get("evidence_types", []))
+    non_keyword_types = types - {"executor_keyword"}
+    non_keyword_categories = categories - {"Executor Keyword Match"}
+    return bool(non_keyword_types or non_keyword_categories)
+
+
+def executor_keyword_match(finding: dict, config: dict) -> bool:
+    if not already_flagged_by_detection(finding):
+        return False
+    terms = set(EXPLOIT_FAMILY_TERMS)
+    terms.update(str(t).lower() for t in config.get("suspicious_name_terms", []))
+    terms.update({"executor", "injector", "exploit", "dllloader", "script hub", "calibration loader", "unknown updater"})
+    text = " ".join(
+        [
+            str(finding.get("name", "")),
+            str(finding.get("path", "")),
+            " ".join(str(x) for x in finding.get("supporting_evidence", [])),
+        ]
+    ).lower()
+    return any(term and term in text for term in terms)
+
+
+def apply_executor_keyword_check(finding: dict, config: dict):
+    if executor_keyword_match(finding, config):
+        add_detection(finding, "Executor Keyword Match", "Executor-related keyword found on an already-flagged artifact", "Medium", config["score_rules"].get("suspicious_name", 10))
+        finding["evidence_types"].append("executor_keyword")
+
+
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
     if known_bad_hash(finding, config):
         return True
-    if real_behavioral_evidence(finding) and exploit_specific_artifact(finding, config):
+    if real_behavioral_evidence(finding) and executor_keyword_match(finding, config):
         return True
-    if (categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES) and exploit_specific_artifact(finding, config):
+    if (categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES) and executor_keyword_match(finding, config):
         return True
     return False
 
@@ -671,6 +771,7 @@ def categorize_finding(finding: dict, config: dict) -> str:
 
 def finalize_findings(findings: list[dict], config: dict) -> list[dict]:
     for f in findings:
+        apply_executor_keyword_check(f, config)
         f["score"] = max(0, f.get("score", 0))
         f["classification"] = categorize_finding(f, config)
         if f["classification"] == "Confirmed Exploit" and f["score"] < config["category_thresholds"]["confirmed"]:
@@ -961,9 +1062,11 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
                 "score_breakdown": [],
                 "supporting_evidence": [],
                 "evidence_types": [],
+                "detection_categories": [],
+                "detections": [],
                 "artifact_source": "event_log",
                 "attribution_explanation": "",
-                "classification": "Weak",
+                "classification": "Indicator Found",
             }
             if ident["known_safe_signer"]:
                 add_score(findings[key], config["score_rules"]["known_safe_signer"], "Signed by known-safe signer")
@@ -971,8 +1074,15 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
                 add_score(findings[key], config["score_rules"]["unsigned_executable"], "Unsigned or unverifiable executable")
             if risky_source_path(ident["path"]):
                 add_score(findings[key], config["score_rules"]["risky_source_path"], "Executable path is in AppData, Temp, or Downloads")
-            if suspicious_name(ident["path"] or fallback_name, config):
-                add_score(findings[key], config["score_rules"]["suspicious_name"], "Suspicious executor-style name")
+            if trusted_dampened_signer(ident["signer"]):
+                findings[key]["trust_dampened"] = True
+                findings[key]["supporting_evidence"].append("Valid trusted signer; downgraded unless paired with known-bad hash or real behavioral evidence.")
+            if common_dependency_path(ident["path"]):
+                findings[key]["common_dependency"] = True
+                findings[key]["supporting_evidence"].append("Common dependency/runtime file; strings alone are not enough to confirm exploitation.")
+            if low_signal_path(ident["path"]):
+                findings[key]["low_signal_path"] = True
+                findings[key]["supporting_evidence"].append("Known noisy folder context; path-abuse score is dampened.")
         return findings[key]
 
     for ev in sysmon_events:
@@ -1170,13 +1280,17 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
                 if max(times) < cut:
                     continue
                 path_text = str(path)
-                if not (suspicious_extension(path_text, config) and suspicious_text(path_text, config)):
+                if not suspicious_extension(path_text, config):
                     continue
                 finding = make_finding(path_text, filename, "file_system", config)
                 inspect_file_indicators(path_text, finding)
+                near_session = any(near_any_session(t, sessions) for t in times)
+                structurally_flagged = bool(finding.get("detection_categories")) or near_session or common_dependency_path(path_text) or low_signal_path(path_text)
+                if not structurally_flagged:
+                    continue
                 finding["first_seen"] = min(times).isoformat(sep=" ", timespec="seconds")
-                add_score(finding, config["score_rules"]["file_artifact"], "Suspicious file artifact found in common user/system location")
-                if any(near_any_session(t, sessions) for t in times):
+                add_score(finding, config["score_rules"]["file_artifact"], "Tracked file artifact found in common user/system location")
+                if near_session:
                     add_score(finding, config["score_rules"]["near_roblox_session"], "File timestamp is within 30 minutes of Roblox activity")
                 finding["supporting_evidence"].append(
                     f"created={times[0].isoformat(sep=' ', timespec='seconds')} modified={times[1].isoformat(sep=' ', timespec='seconds')} accessed={times[2].isoformat(sep=' ', timespec='seconds')}"
@@ -1437,12 +1551,12 @@ def collect_powershell_history(days: int, config: dict, sessions: list[dict]) ->
         if mtime < cutoff(days):
             continue
         for i, line in enumerate(lines, start=1):
-            if not (download_terms.search(line) and suspicious_text(line, config)):
+            if not download_terms.search(line):
                 continue
             name = f"PowerShell history line {i}"
             finding = make_finding(str(hist), name, "powershell_history", config)
             finding["first_seen"] = mtime.isoformat(sep=" ", timespec="seconds")
-            add_score(finding, config["score_rules"]["powershell_download_execute"], "PowerShell history contains suspicious download/execute pattern")
+            add_score(finding, config["score_rules"]["powershell_download_execute"], "PowerShell history contains download/execute pattern")
             if near_any_session(mtime, sessions):
                 add_score(finding, config["score_rules"]["near_roblox_session"], "PowerShell history timestamp is within 30 minutes of Roblox activity")
             finding["supporting_evidence"].append(f"{hist}:{i}: {line[:500]}")
@@ -2057,24 +2171,27 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     }
 
 
-def save_local_reports(report: dict, out_dir: Path, html_only=False, json_only=False) -> list[Path]:
-    base = out_dir / f"securo_check_{now_stamp()}"
+def save_local_reports(report: dict, config: dict, html_only=False, json_only=False) -> list[Path]:
+    dirs = ensure_storage_dirs(config)
+    report_base = dirs["reports"] / f"securo_check_{now_stamp()}"
     written = []
     if not json_only:
-        html_path = base.with_suffix(".html")
+        html_path = report_base.with_suffix(".html")
         html_path.write_text(render_html(report), encoding="utf-8")
         written.append(html_path)
     if json_only:
-        json_path = base.with_suffix(".json")
+        json_path = report_base.with_suffix(".json")
         json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         written.append(json_path)
     elif not html_only:
-        json_path = base.with_suffix(".json")
+        json_path = report_base.with_suffix(".json")
         json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        txt_path = base.with_suffix(".txt")
+        txt_path = report_base.with_suffix(".txt")
         txt_path.write_text(render_txt(report), encoding="utf-8")
-        save_sqlite(out_dir / "securo_check_history.sqlite", report)
-        written += [json_path, txt_path, out_dir / "securo_check_history.sqlite"]
+        history_path = dirs["history"] / "securo_check_history.sqlite"
+        save_sqlite(history_path, report)
+        written += [json_path, txt_path, history_path]
+    write_app_log(config, f"Saved scan outputs: {', '.join(str(path) for path in written)}")
     return written
 
 
@@ -2384,7 +2501,7 @@ def parse_args():
     p.add_argument("--local-only", action="store_true", help="Do not verify PIN or upload; create local reports only")
     p.add_argument("--html-only", action="store_true", help="Only write HTML report")
     p.add_argument("--json-only", action="store_true", help="Only write JSON report")
-    p.add_argument("--portable", action="store_true", help="Save reports next to executable")
+    p.add_argument("--portable", action="store_true", help="Legacy flag; reports still save to the configured Securo storage folder")
     p.add_argument("--no-color", action="store_true", help="Disable color output")
     p.add_argument("--verbose", action="store_true", help="Print extra progress")
     p.add_argument("--yes", action="store_true", help="Skip interactive consent prompt")
@@ -2401,6 +2518,7 @@ class SecuroApp:
         self.upload_token = ""
         self.drag_x = 0
         self.drag_y = 0
+        self.storage_dirs = ensure_storage_dirs(config)
 
         root.title("Securo")
         root.geometry("600x400")
@@ -2434,7 +2552,7 @@ class SecuroApp:
             cursor="hand2",
         ).pack(side="right")
 
-        self.card = tk.Frame(self.window, bg="#111111", padx=30, pady=24)
+        self.card = tk.Frame(self.window, bg="#111111", padx=30, pady=20)
         self.card.place(relx=0.5, rely=0.54, anchor="center", width=520, height=330)
 
         self.logo = tk.Canvas(self.card, width=64, height=64, bg="#111111", highlightthickness=0)
@@ -2443,7 +2561,7 @@ class SecuroApp:
         self.logo.pack(pady=(0, 8))
 
         tk.Label(self.card, text="Securo", bg="#111111", fg="#FFFFFF", font=("Segoe UI", 24, "bold")).pack()
-        tk.Label(self.card, text="Enter your check PIN", bg="#111111", fg="#A1A1AA", font=("Segoe UI", 11)).pack(pady=(2, 18))
+        tk.Label(self.card, text="Enter your check PIN", bg="#111111", fg="#A1A1AA", font=("Segoe UI", 11)).pack(pady=(2, 12))
 
         self.pin_var = tk.StringVar()
         self.pin_wrap = tk.Frame(self.card, bg="#0A0A0A", highlightbackground="#252525", highlightcolor="#00D26A", highlightthickness=1)
@@ -2480,9 +2598,40 @@ class SecuroApp:
         )
         self.start_button.pack(pady=(16, 12))
 
+        folder_buttons = tk.Frame(self.card, bg="#111111")
+        folder_buttons.pack(fill="x", pady=(0, 8))
+        tk.Button(
+            folder_buttons,
+            text="Open Reports",
+            command=lambda: open_folder(self.storage_dirs["reports"]),
+            bg="#1F2937",
+            fg="#FFFFFF",
+            activebackground="#263244",
+            activeforeground="#FFFFFF",
+            relief="flat",
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            padx=12,
+            pady=5,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        tk.Button(
+            folder_buttons,
+            text="Open History",
+            command=lambda: open_folder(self.storage_dirs["history"]),
+            bg="#1F2937",
+            fg="#FFFFFF",
+            activebackground="#263244",
+            activeforeground="#FFFFFF",
+            relief="flat",
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            padx=12,
+            pady=5,
+        ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
         self.status = tk.Text(
             self.card,
-            height=5,
+            height=4,
             bg="#0A0A0A",
             fg="#D4D4D8",
             relief="flat",
@@ -2498,7 +2647,7 @@ class SecuroApp:
         self.details_visible = False
         self.details = tk.Label(
             self.card,
-            text=f"API: {self.api_base_url or 'not configured'}",
+            text=f"API: {self.api_base_url or 'not configured'}\nStorage: {self.storage_dirs['root']}",
             bg="#111111",
             fg="#71717A",
             font=("Segoe UI", 8),
@@ -2565,6 +2714,7 @@ class SecuroApp:
 
     def worker(self, pin: str):
         try:
+            write_app_log(self.config, "Scan started from GUI")
             self.log("Calling POST /api/connect-pin...")
             verified, verify_result = verify_pin(self.api_base_url, pin)
             if not verified:
@@ -2577,21 +2727,23 @@ class SecuroApp:
             self.upload_token = verify_result["uploadToken"]
 
             report = build_scan_report_with_progress(self.days, self.config, self.log)
-            out_dir = app_dir() if getattr(sys, "frozen", False) else Path.cwd()
-            written = save_local_reports(report, out_dir)
+            written = save_local_reports(report, self.config)
             for path in written:
-                self.log(f"Saved local report: {path.name}")
+                self.log(f"Saved: {path}")
 
             self.log("Calling POST /api/upload-report...")
             uploaded, upload_message = upload_report(self.api_base_url, self.session_id, self.upload_token, report)
             if uploaded:
                 self.log("Report uploaded successfully")
+                write_app_log(self.config, "Report uploaded successfully")
                 self.root.after(0, self.show_close)
             else:
                 self.log(f"Upload failed: {upload_message}")
+                write_app_log(self.config, f"Upload failed: {upload_message}")
                 self.set_busy(False)
         except Exception as exc:
             self.log(f"Error: {exc}")
+            write_app_log(self.config, f"Error: {exc}")
             self.set_busy(False)
 
     def show_close(self):
@@ -2639,10 +2791,10 @@ def cli_main(args):
     if args.verbose:
         print("Collecting system info, Roblox logs, event logs, Prefetch, files, Defender, persistence, PowerShell, and browser artifacts...")
     print("scan started")
+    write_app_log(config, "Scan started from CLI")
     report = build_scan_report(days, config, verbose=args.verbose)
     print("scan completed")
-    out_dir = app_dir() if args.portable or getattr(sys, "frozen", False) else Path.cwd()
-    written = save_local_reports(report, out_dir, html_only=args.html_only, json_only=args.json_only)
+    written = save_local_reports(report, config, html_only=args.html_only, json_only=args.json_only)
     print("Scan complete.")
     for path in written:
         print(f"Wrote: {path}")
