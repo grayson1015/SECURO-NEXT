@@ -1,7 +1,8 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Download } from "lucide-react";
+import { ArrowLeft, Clock, Download } from "lucide-react";
 import type { ReportRow } from "@/lib/types";
 import { countFindings } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
@@ -12,14 +13,26 @@ import { Card, CardTitle, CardValue } from "@/components/ui/card";
 export function ReportDetail({ report }: { report: ReportRow }) {
   const data = report.report_json;
   const primary = data.sessions[0] || {};
-  const detectionFindings = data.findings.filter((finding) => (finding.detections || []).length || (finding.detectionCategories || []).length);
+  const [timeRange, setTimeRange] = useState("7");
+  const detectionFindings = useMemo(
+    () => data.findings.filter((finding) => (finding.detections || []).length || (finding.detectionCategories || []).length),
+    [data.findings]
+  );
+  const extraEvidence = useMemo(() => reportEvidenceGroups(data), [data]);
+  const filteredTimeline = useMemo(() => filterTimedItems(data.timeline, timeRange, (item) => item.time), [data.timeline, timeRange]);
+  const filteredFindings = useMemo(() => filterTimedItems(data.findings, timeRange, (item) => item.firstSeen), [data.findings, timeRange]);
+  const filteredDetections = useMemo(() => filterTimedItems(detectionFindings, timeRange, (item) => item.firstSeen), [detectionFindings, timeRange]);
+  const filteredSessions = useMemo(() => filterTimedItems(data.sessions, timeRange, (item) => item.launchTime || item.exitTime), [data.sessions, timeRange]);
+  const filteredEvidence = useMemo(
+    () => extraEvidence.map((group) => ({
+      ...group,
+      items: filterTimedItems(group.items, timeRange, (item) => evidenceTimestamp(item))
+    })),
+    [extraEvidence, timeRange]
+  );
 
   function exportHtml() {
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
-    <style>body{font-family:Segoe UI,Arial;background:#07100b;color:#eefaf1;padding:24px}section{border:1px solid #264234;border-radius:8px;padding:16px;margin:12px 0}pre{white-space:pre-wrap;background:#050807;padding:12px;border-radius:8px}</style>
-    </head><body><h1>Securo Report</h1><section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
-    <section><h2>Findings</h2>${data.findings.map((f) => `<p><b>${escape(f.name || "Finding")}</b> ${escape(f.classification || f.category || "")} ${Number(f.score || 0)}</p>`).join("")}</section>
-    <section><h2>Raw report</h2><pre>${escape(JSON.stringify(data, null, 2))}</pre></section></body></html>`;
+    const html = buildExportHtml(report);
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -63,10 +76,44 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           <Card><CardTitle>Possible</CardTitle><CardValue>{countFindings(data, "Weak")}</CardValue></Card>
         </section>
 
+        <Card className="mt-5 border-primary/30">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="flex items-center gap-2 text-lg font-semibold"><Clock size={18} className="text-primary" />Report time range</h2>
+              <p className="mt-1 text-sm text-zinc-400">Filter this report's sessions, timeline, files, process activity, and evidence sections.</p>
+            </div>
+            <select
+              className="h-10 rounded-md border border-border bg-black/30 px-3 text-sm text-white outline-none"
+              value={timeRange}
+              onChange={(event) => setTimeRange(event.target.value)}
+            >
+              <option value="30">1 month</option>
+              <option value="14">2 weeks</option>
+              <option value="7">1 week</option>
+              <option value="3">3 days</option>
+              <option value="all">All logs</option>
+            </select>
+          </div>
+        </Card>
+
+        <Card className="mt-5">
+          <h2 className="mb-4 text-lg font-semibold">Timeline</h2>
+          <div className="space-y-2">
+            {filteredTimeline.map((event, index) => (
+              <div key={`${event.time}-${event.text}-${index}`} className="grid gap-2 rounded-md border border-border bg-black/20 p-3 text-sm md:grid-cols-[170px_1fr_150px]">
+                <div className="text-zinc-400">{formatDate(event.time)}</div>
+                <div>{event.text || "Timeline event"}</div>
+                <div className="text-zinc-500">{event.source || "Evidence"}</div>
+              </div>
+            ))}
+            {!filteredTimeline.length ? <p className="text-sm text-zinc-500">No timeline entries in this time range.</p> : null}
+          </div>
+        </Card>
+
         <Card className="mt-5">
           <h2 className="mb-4 text-lg font-semibold">Findings</h2>
           <div className="mb-4 space-y-3">
-            {detectionFindings.map((finding, index) => (
+            {filteredDetections.map((finding, index) => (
               <div key={`${finding.name}-warning-${index}`} className="rounded-md border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-100">
                 <h3 className="font-semibold text-red-200">{(finding.detections || [])[0]?.category || (finding.detectionCategories || [])[0] || "Detection"} detected</h3>
                 <div>File: {finding.name || "Unknown"}</div>
@@ -83,7 +130,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 <tr className="border-b border-border"><th className="py-3">Name</th><th>Class</th><th>Score</th><th>Path</th></tr>
               </thead>
               <tbody>
-                {data.findings.map((finding, index) => (
+                {filteredFindings.map((finding, index) => (
                   <tr key={`${finding.name}-${index}`} className="border-b border-border/70">
                     <td className="py-3 font-medium">{finding.name || "Finding"}</td>
                     <td>{finding.classification || finding.category || "Unknown"}</td>
@@ -91,6 +138,9 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                     <td className="max-w-xl truncate text-zinc-400">{finding.path || ""}</td>
                   </tr>
                 ))}
+                {!filteredFindings.length ? (
+                  <tr><td className="py-4 text-zinc-500" colSpan={4}>No findings in this time range.</td></tr>
+                ) : null}
               </tbody>
             </table>
           </div>
@@ -99,7 +149,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
         <Card className="mt-5">
           <h2 className="mb-4 text-lg font-semibold">Session Information</h2>
           <div className="grid gap-3 md:grid-cols-2">
-            {data.sessions.map((session, index) => (
+            {filteredSessions.map((session, index) => (
               <div key={index} className={`rounded-md border p-3 text-sm ${session.status === "Suspicious" || session.status === "Confirmed" ? "border-red-500/50 bg-red-500/10 text-red-100" : "border-border bg-black/20"}`}>
                 <div className="font-semibold">{session.username || "Unknown user"}</div>
                 <div className="text-zinc-400">Display Name: {session.displayName || ""}</div>
@@ -116,6 +166,28 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 ))}
               </div>
             ))}
+            {!filteredSessions.length ? <p className="text-sm text-zinc-500">No sessions in this time range.</p> : null}
+          </div>
+        </Card>
+
+        <Card className="mt-5">
+          <h2 className="mb-4 text-lg font-semibold">Detailed Evidence</h2>
+          <div className="space-y-3">
+            {filteredEvidence.map((group) => (
+              <details key={group.title} open className="rounded-md border border-border bg-black/20 p-3">
+                <summary className="cursor-pointer font-semibold">{group.title} ({group.items.length})</summary>
+                <div className="mt-3 space-y-2">
+                  {group.items.map((item, index) => (
+                    <div key={index} className="rounded-md border border-border/70 bg-black/20 p-3 text-sm">
+                      <div className="mb-1 text-xs text-zinc-500">{formatDate(evidenceTimestamp(item))}</div>
+                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words bg-transparent p-0 text-xs text-zinc-300">{JSON.stringify(item, null, 2)}</pre>
+                    </div>
+                  ))}
+                  {!group.items.length ? <p className="text-sm text-zinc-500">No entries in this time range.</p> : null}
+                </div>
+              </details>
+            ))}
+            {!filteredEvidence.length ? <p className="text-sm text-zinc-500">No detailed evidence sections were included in this report.</p> : null}
           </div>
         </Card>
 
@@ -135,6 +207,97 @@ function Summary({ label, value }: { label: string; value: string }) {
       <div className="mt-1 break-words font-semibold">{value || "Unknown"}</div>
     </div>
   );
+}
+
+type EvidenceGroup = {
+  title: string;
+  items: Record<string, unknown>[];
+};
+
+function filterTimedItems<T>(items: T[], range: string, getTimestamp: (item: T) => unknown) {
+  if (range === "all") return items;
+
+  const days = Number(range);
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+
+  return items.filter((item) => {
+    const timestamp = parseTimestamp(getTimestamp(item));
+    if (!timestamp) return true;
+    return timestamp.getTime() >= cutoff;
+  });
+}
+
+function parseTimestamp(value: unknown) {
+  if (!value) return null;
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function evidenceTimestamp(item: Record<string, unknown>) {
+  const value = item.timestamp || item.time || item.firstSeen || item.first_seen || item.createdAt || item.created_at || item.modifiedAt || item.modified_at || item.activated_at || item.last_seen_at || "";
+  return value ? String(value) : "";
+}
+
+function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
+  const raw = data as Record<string, unknown>;
+  const groups: Array<[string, unknown]> = [
+    ["Detect Logs", raw.detectLogs || raw.detect_logs],
+    ["Warning Logs", raw.warningLogs || raw.warning_logs],
+    ["Recovery", raw.recoveryArtifacts || raw.recovery_artifacts || raw.recoveredFiles || raw.recovered_files],
+    ["Antivirus Logs", raw.antivirusLogs || raw.antivirus_logs],
+    ["Engine Results", raw.engineResults || raw.engine_results],
+    ["Evidence Sources", Object.entries(data.evidenceSources || {}).map(([source, value]) => ({ source, value }))],
+    ["Limitations", (data.limitations || []).map((text) => ({ text }))]
+  ];
+
+  return groups
+    .map(([title, value]) => ({
+      title,
+      items: Array.isArray(value) ? (value.filter((item) => typeof item === "object" && item !== null) as Record<string, unknown>[]) : []
+    }))
+    .filter((group) => group.items.length);
+}
+
+function buildExportHtml(report: ReportRow) {
+  const data = report.report_json;
+  const evidenceGroups = reportEvidenceGroups(data);
+  const entry = (timestamp: unknown, content: string, tag = "div") => {
+    const stamp = parseTimestamp(timestamp)?.toISOString() || "";
+    return `<${tag} class="report-entry"${stamp ? ` data-timestamp="${escape(stamp)}"` : ""}>${content}</${tag}>`;
+  };
+  const evidence = evidenceGroups.map((group) => `
+    <section><h2>${escape(group.title)}</h2>
+    ${group.items.map((item) => entry(evidenceTimestamp(item), `<pre>${escape(JSON.stringify(item, null, 2))}</pre>`)).join("") || "<p>No entries.</p>"}
+    </section>
+  `).join("");
+
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
+    <style>
+      body{font-family:Segoe UI,Arial;background:#07100b;color:#eefaf1;padding:24px}
+      section{border:1px solid #264234;border-radius:8px;padding:16px;margin:12px 0}
+      pre{white-space:pre-wrap;word-break:break-word;background:#050807;padding:12px;border-radius:8px;max-height:420px;overflow:auto}
+      table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #264234;padding:8px;text-align:left;vertical-align:top}
+      .controls{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+      select{background:#050807;color:#eefaf1;border:1px solid #264234;border-radius:6px;padding:8px 10px}
+      .report-entry{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 0}
+      .hidden-by-time{display:none!important}
+    </style>
+    </head><body>
+    <h1>Securo Report</h1>
+    <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
+    <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
+    <section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<b>${escape(formatDate(event.time))}</b> ${escape(event.text || "")} <small>${escape(event.source || "")}</small>`)).join("") || "<p>No timeline entries.</p>"}</section>
+    <section><h2>Sessions</h2>${data.sessions.map((session) => entry(session.launchTime || session.exitTime, `<p><b>${escape(session.username || "Unknown user")}</b></p><p>User ID: ${escape(session.userId || "")}</p><p>Place: ${escape(session.placeId || session.gameId || "")}</p><p>Duration: ${escape(session.duration || "unknown")}</p><p>Status: ${escape(session.status || "Clean")}</p>`)).join("") || "<p>No sessions.</p>"}</section>
+    <section><h2>Findings</h2>${data.findings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`)).join("") || "<p>No findings.</p>"}</section>
+    ${evidence}
+    <section><h2>Raw report</h2><pre>${escape(JSON.stringify(data, null, 2))}</pre></section>
+    <script>
+      function parseEntryTime(entry){var value=entry.getAttribute("data-timestamp");if(!value)return null;var time=Date.parse(value);return Number.isNaN(time)?null:time}
+      function applyReportTimeFilter(){var select=document.getElementById("report-time-filter");var selected=select?select.value:"7";var cutoff=selected==="all"?0:Date.now()-(Number(selected)*24*60*60*1000);document.querySelectorAll(".report-entry").forEach(function(entry){var time=parseEntryTime(entry);var show=selected==="all"||!time||time>=cutoff;entry.classList.toggle("hidden-by-time",!show)})}
+      document.getElementById("report-time-filter").addEventListener("change",applyReportTimeFilter);applyReportTimeFilter();
+    </script>
+    </body></html>`;
 }
 
 function escape(value: unknown) {
