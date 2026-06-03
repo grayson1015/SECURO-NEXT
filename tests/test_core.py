@@ -167,11 +167,14 @@ class CoreTests(unittest.TestCase):
             finding = checker.make_finding(path, Path(path).name, "unit", config)
             finding["detection_categories"] = categories
             finding["detections"] = [{"category": categories[0], "reason": "fixture", "risk": "High"}]
-            finding["score"] = 20
+            finding["supporting_evidence"] = ["fixture supporting evidence"]
+            finding["first_seen"] = "2026-06-02 12:00:00"
+            finding["score"] = config["category_thresholds"]["confirmed"] if expected == "Confirmed Exploit" else 20
             result = checker.finalize_findings([finding], config)[0]
             self.assertEqual(result["classification"], expected, path)
             if expected == "Confirmed Exploit":
                 self.assertGreaterEqual(result["score"], config["category_thresholds"]["confirmed"])
+                self.assertEqual(result["confidence_level"], "Confirmed")
 
     def test_shellbag_and_recycle_bin_context_stay_possible(self):
         config = test_config()
@@ -232,9 +235,18 @@ class CoreTests(unittest.TestCase):
         result = checker.finalize_findings([finding], config)[0]
         self.assertEqual(result["classification"], "Indicator Found")
 
-    def test_trusted_signed_dependency_downgrades(self):
+    def test_securo_internal_components_are_suppressed(self):
         config = test_config()
+        config["storage_base_dir"] = "C:\\Users\\timmy\\Documents\\Securo"
         finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\SECURO\\_internal\\python312.dll", "python312.dll", "unit", config)
+        checker.add_detection(finding, "A3", "generic string fixture", "High", 100)
+        self.assertTrue(finding["suppressed"])
+        self.assertEqual(finding["suppression_reason"], "Internal Securo Component")
+        self.assertEqual(checker.finalize_findings([finding], config), [])
+
+    def test_trusted_signed_dependency_downgrades_outside_securo(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\OtherApp\\python312.dll", "python312.dll", "unit", config)
         finding["signer"] = {"status": "Valid", "subject": "CN=Python Software Foundation", "issuer": "CN=Trusted CA"}
         finding["detection_categories"] = ["A3", "RAM Suspicious Indicator"]
         finding["detections"] = [
@@ -264,6 +276,8 @@ class CoreTests(unittest.TestCase):
         config = test_config()
         finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\Xeno.exe", "Xeno.exe", "unit", config)
         checker.add_detection(finding, "A3", "A3 indicator found in flagged artifact", "High", 20)
+        finding["first_seen"] = "2026-06-02 12:00:00"
+        finding["score"] = config["category_thresholds"]["confirmed"]
         result = checker.finalize_findings([finding], config)[0]
         self.assertEqual(result["classification"], "Confirmed Exploit")
         self.assertIn("Executor Keyword Match", result.get("detection_categories", []))
@@ -285,9 +299,113 @@ class CoreTests(unittest.TestCase):
 
         flagged = checker.make_finding("C:\\Users\\timmy\\Downloads\\Potassium.exe", "Potassium.exe", "unit", config)
         checker.add_detection(flagged, "A3", "A3 indicator found in flagged artifact", "High", 20)
+        flagged["first_seen"] = "2026-06-02 12:00:00"
+        flagged["score"] = config["category_thresholds"]["confirmed"]
         flagged_result = checker.finalize_findings([flagged], config)[0]
         self.assertEqual(flagged_result["classification"], "Confirmed Exploit")
         self.assertIn("Executor Keyword Match", flagged_result.get("detection_categories", []))
+
+    def test_common_runtime_dependencies_never_confirm_from_score(self):
+        config = test_config()
+        for name in ["sqlite3.dll", "libcrypto-3-x64.dll", "python312.dll", "python3.dll", "libffi-8.dll", "vcruntime140.dll", "msvcp140.dll"]:
+            path = f"C:\\Users\\timmy\\Downloads\\OtherApp\\{name}"
+            finding = checker.make_finding(path, name, "unit", config)
+            checker.add_detection(finding, "A3", "generic dependency string fixture", "High", 100)
+            finding["first_seen"] = "2026-06-02 12:00:00"
+            finding["supporting_evidence"].append("fixture supporting evidence")
+            finding["score"] = 500
+            result = checker.finalize_findings([finding], config)[0]
+            self.assertNotEqual(result["classification"], "Confirmed Exploit", name)
+            self.assertNotEqual(result["confidence_level"], "Confirmed", name)
+
+    def test_os_allowlisted_runtime_never_confirms(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Windows\\System32\\python3.dll", "python3.dll", "unit", config)
+        checker.add_detection(finding, "A3", "generic system dependency string fixture", "High", 100)
+        finding["first_seen"] = "2026-06-02 12:00:00"
+        finding["score"] = 500
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+
+    def test_allowlisted_runtime_with_strong_behavior_stays_visible_not_confirmed(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\OtherApp\\sqlite3.dll", "sqlite3.dll", "unit", config)
+        checker.add_detection(finding, "Suspicious DLL Loading", "DLL loaded into Roblox from suspicious context", "High", 35)
+        finding["evidence_types"].append("suspicious_module_load")
+        finding["first_seen"] = "2026-06-02 12:00:00"
+        finding["score"] = 500
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertEqual(result["classification"], "Suspicious")
+        self.assertEqual(result["confidence_level"], "Likely")
+
+    def test_trusted_razer_app_does_not_confirm_from_score_or_heuristic(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Program Files\\Razer\\RazerAppEngine\\RazerAppEngine.exe", "RazerAppEngine.exe", "unit", config)
+        finding["signer"] = {"status": "Valid", "subject": "CN=Razer", "issuer": "CN=Trusted CA"}
+        checker.add_detection(finding, "Generic Packed File", "High entropy executable content", "High", 100)
+        finding["first_seen"] = "2026-06-02 12:00:00"
+        finding["score"] = 500
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+        self.assertNotEqual(result["confidence_level"], "Confirmed")
+
+    def test_svchost_does_not_confirm_without_tamper_evidence(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Windows\\System32\\svchost.exe", "svchost.exe", "unit", config)
+        finding["signer"] = {"status": "Valid", "subject": "CN=Microsoft Windows", "issuer": "CN=Microsoft Corporation"}
+        checker.add_detection(finding, "RAM Suspicious Indicator", "Generic API string fixture", "High", 100)
+        finding["evidence_types"].append("sysmon_process_access")
+        finding["first_seen"] = "2026-06-02 12:00:00"
+        finding["score"] = 500
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+        self.assertNotEqual(result["confidence_level"], "Confirmed")
+
+    def test_forensic_correlation_requires_artifact_overlap_not_name_only(self):
+        config = test_config()
+        session = {"start_time": "2026-06-02 14:21:00", "end_time": "2026-06-02 14:40:00"}
+        name_only = checker.make_finding("C:\\Users\\timmy\\Downloads\\Xeno.exe", "Xeno.exe", "file_system", config)
+        name_only["first_seen"] = "2026-06-02 14:22:00"
+        name_only["supporting_evidence"].append("Name-only fixture")
+        finalized = checker.finalize_findings([name_only], config)
+        correlations = checker.build_forensic_correlation_findings(finalized, [], [session], config)
+        self.assertFalse(correlations)
+
+    def test_forensic_correlation_builds_executed_then_deleted_story(self):
+        config = test_config()
+        session = {"start_time": "2026-06-02 14:21:00", "end_time": "2026-06-02 14:40:00"}
+        executed = checker.make_finding("C:\\Users\\timmy\\Downloads\\tool.exe", "tool.exe", "prefetch", config)
+        executed["first_seen"] = "2026-06-02 14:22:00"
+        executed["evidence_types"].append("prefetch_execution")
+        checker.add_detection(executed, "Executed Suspicious File", "Prefetch execution fixture", "High", 25)
+        deleted = checker.make_possible_context_finding("C:\\Users\\timmy\\Downloads\\tool.exe", "tool.exe", "Recycle Bin", "Recycle Bin deletion fixture", dt.datetime(2026, 6, 2, 14, 27), config)
+        deleted["evidence_types"].append("recovery")
+        checker.add_detection(deleted, "Suspicious File Deletion", "Deleted suspicious file metadata fixture", "Medium", 20)
+        finalized = checker.finalize_findings([executed, deleted], config)
+        timeline = [
+            {"time": "2026-06-02 14:21:00", "source": "Roblox log", "text": "Roblox launched"},
+            {"time": "2026-06-02 14:22:00", "source": "Prefetch", "text": "tool.exe executed"},
+            {"time": "2026-06-02 14:27:00", "source": "Recycle Bin", "text": "tool.exe deleted"},
+        ]
+        correlations = checker.build_forensic_correlation_findings(finalized, timeline, [session], config)
+        names = {item["name"] for item in correlations}
+        self.assertIn("Executed-Then-Deleted Application", names)
+        story = next(item for item in correlations if item["name"] == "Executed-Then-Deleted Application")
+        self.assertGreaterEqual(story["evidence_score_contribution"], 32)
+        self.assertTrue(story["event_timeline"])
+
+    def test_forensic_correlation_marks_dll_injection_critical_from_sysmon(self):
+        config = test_config()
+        session = {"start_time": "2026-06-02 14:21:00", "end_time": "2026-06-02 14:40:00"}
+        dll = checker.make_finding("C:\\Users\\timmy\\AppData\\Local\\Temp\\module.dll", "module.dll", "event_log", config)
+        dll["first_seen"] = "2026-06-02 14:22:00"
+        dll["evidence_types"].extend(["sysmon_remote_thread", "suspicious_module_load"])
+        checker.add_detection(dll, "Suspicious DLL Loading", "Sysmon DLL/injection fixture", "High", 50)
+        finalized = checker.finalize_findings([dll], config)
+        correlations = checker.build_forensic_correlation_findings(finalized, [], [session], config)
+        story = next(item for item in correlations if item["name"] == "Possible DLL Injection Activity")
+        self.assertEqual(story["forensic_confidence"], "Critical")
+        self.assertTrue(any("remote-thread" in text.lower() for text in story["supporting_evidence"]))
 
     def test_reports_save_to_securo_storage_folders(self):
         with tempfile.TemporaryDirectory() as tmp:

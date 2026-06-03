@@ -56,6 +56,16 @@ GENERIC_DETECTION_CATEGORIES = {
     "Untrusted File",
 }
 SPECIFIC_DETECTION_CATEGORIES = {
+    "Possible Roblox Exploit Execution",
+    "Possible Game Instance Modification",
+    "Possible DLL Injection Activity",
+    "Possible FastFlag Modifications",
+    "Possible Alternate Roblox Account Usage",
+    "Executed-Then-Deleted Application",
+    "Suspicious Archive-To-Execution Chain",
+    "Suspicious External Drive Execution",
+    "Packed Or Obfuscated Executable",
+    "File Tampering Or Integrity Violation",
     "Generic Bypass Method",
     "Tampered File",
     "Suspicious DLL Deletion",
@@ -230,6 +240,8 @@ REAL_BEHAVIOR_EVIDENCE_TYPES = {
     "persistence",
     "powershell_history",
     "prefetch",
+    "prefetch_execution",
+    "process_execution",
     "known_cheat_artifact",
 }
 EVENT_NS = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
@@ -940,6 +952,8 @@ def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
 
 
 def finding_confidence_level(finding: dict) -> str:
+    if finding.get("forensic_confidence"):
+        return confidence_to_legacy(finding.get("forensic_confidence", "Low"))
     if finding.get("classification") == "Confirmed Exploit":
         return "Confirmed"
     categories = set(finding.get("detection_categories", []))
@@ -1656,9 +1670,10 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
 
 
 def make_possible_context_finding(path_text: str, name: str, source: str, reason: str, when: dt.datetime | None, config: dict) -> dict:
+    looks_like_path = bool(re.match(r"^[a-z]:[\\/]", str(path_text), re.I) or str(path_text).startswith(("\\\\", "/", "~")) or "\\" in str(path_text) or "/" in str(path_text))
     finding = {
         "name": name or Path(path_text).name or source,
-        "path": normalize_path(path_text) if path_text and "://" not in path_text else path_text,
+        "path": normalize_path(path_text) if path_text and "://" not in path_text and looks_like_path else path_text,
         "sha256": "",
         "signer": {"status": "not checked", "subject": "", "issuer": ""},
         "parent_process": "",
@@ -2119,6 +2134,238 @@ def combine_findings(groups: list[list[dict]], config: dict) -> list[dict]:
     return finalize_findings(list(combined.values()), config)
 
 
+def finding_event_time(finding: dict):
+    return parse_dt(finding.get("first_seen"))
+
+
+def finding_near_roblox(finding: dict, sessions: list[dict]) -> bool:
+    when = finding_event_time(finding)
+    return bool(when and near_any_session(when, sessions, minutes=30))
+
+
+def finding_matches(finding: dict, evidence_types: set[str] | None = None, categories: set[str] | None = None) -> bool:
+    types = set(finding.get("evidence_types", []))
+    cats = set(finding.get("detection_categories", []))
+    return bool((evidence_types and types & evidence_types) or (categories and cats & categories))
+
+
+def correlation_confidence(score: int, artifact_count: int, critical=False) -> str:
+    if critical or score >= 60 or artifact_count >= 5:
+        return "Critical"
+    if score >= 36 or artifact_count >= 4:
+        return "High"
+    if score >= 18 or artifact_count >= 2:
+        return "Medium"
+    return "Low"
+
+
+def confidence_to_legacy(confidence: str) -> str:
+    if confidence == "Critical":
+        return "Confirmed"
+    if confidence == "High":
+        return "Likely"
+    return "Possible"
+
+
+def correlation_timeline(events: list[dict], source_findings: list[dict], sessions: list[dict], limit=8) -> list[dict]:
+    source_terms = {str(f.get("name", "")).lower() for f in source_findings if f.get("name")}
+    source_terms.update(str(f.get("path", "")).lower() for f in source_findings if f.get("path"))
+    source_times = [finding_event_time(f) for f in source_findings if finding_event_time(f)]
+    selected = []
+    for event in events:
+        text = " ".join(str(event.get(k, "")) for k in ["source", "text"]).lower()
+        when = parse_dt(event.get("time"))
+        matched_text = any(term and term in text for term in source_terms)
+        matched_time = when and (near_any_session(when, sessions, minutes=30) or any(abs((when - t).total_seconds()) <= 30 * 60 for t in source_times))
+        if matched_text or matched_time:
+            selected.append({
+                "time": event.get("time", ""),
+                "source": event.get("source", ""),
+                "text": event.get("text", ""),
+            })
+    if not selected:
+        for f in source_findings:
+            if f.get("first_seen"):
+                selected.append({"time": f.get("first_seen", ""), "source": f.get("artifact_source", "artifact"), "text": f.get("name") or f.get("path", "")})
+    return dedupe_timeline(selected)[:limit]
+
+
+def make_correlation_finding(name: str, evidence_category: str, score: int, evidence: list[str], source_findings: list[dict], events: list[dict], config: dict, critical=False) -> dict:
+    source_findings = [f for f in source_findings if f and not f.get("suppressed") and not securo_internal_path(f.get("path", ""), config)]
+    if not source_findings and not evidence:
+        return {}
+    confidence = correlation_confidence(score, len(evidence), critical=critical)
+    first_seen = first_time(*[f.get("first_seen") for f in source_findings], *[e.get("time") for e in events])
+    supporting_artifacts = []
+    for f in source_findings:
+        label = f.get("path") or f.get("name") or f.get("artifact_source", "")
+        if label and label not in supporting_artifacts:
+            supporting_artifacts.append(label)
+    detection = {
+        "category": name,
+        "type": "Specific",
+        "reason": "; ".join(evidence[:4]),
+        "risk": "High" if confidence in {"High", "Critical"} else "Medium",
+    }
+    return {
+        "name": name,
+        "path": "Forensic artifact correlation",
+        "sha256": "",
+        "signer": {"status": "not checked", "subject": "", "issuer": ""},
+        "parent_process": "",
+        "target_process": ROBLOX_EXE,
+        "first_seen": first_seen,
+        "score": score,
+        "score_breakdown": [{"points": score, "reason": f"{name}: evidence-backed artifact correlation"}],
+        "supporting_evidence": evidence + supporting_artifacts[:12],
+        "supporting_artifacts": supporting_artifacts[:20],
+        "evidence_types": ["forensic_correlation", evidence_category],
+        "detection_categories": [name],
+        "detections": [detection],
+        "artifact_source": "forensic_correlation",
+        "attribution_explanation": "This finding is based on multiple Windows artifacts lining up in time. It does not rely on a filename, hash, or single keyword by itself.",
+        "classification": "Suspicious" if confidence in {"High", "Critical"} else "Indicator Found",
+        "confidence_level": confidence_to_legacy(confidence),
+        "forensic_confidence": confidence,
+        "evidence_category": evidence_category,
+        "evidence_score_contribution": score,
+        "event_timeline": events,
+        "correlation_finding": True,
+        "suppressed": False,
+        "suppression_reason": "",
+    }
+
+
+def build_forensic_correlation_findings(findings: list[dict], timeline: list[dict], sessions: list[dict], config: dict) -> list[dict]:
+    # Correlation findings are scenario-based. They require multiple artifacts to line up, not a single name/string.
+    visible = [f for f in findings if not f.get("suppressed") and not securo_internal_path(f.get("path", ""), config)]
+    near_session = [f for f in visible if finding_near_roblox(f, sessions)]
+    process_exec = [f for f in visible if finding_matches(f, {"process_execution", "prefetch_execution", "powershell_history"})]
+    dll_activity = [f for f in visible if finding_matches(f, {"suspicious_module_load", "sysmon_remote_thread", "sysmon_process_access", "ram_indicator"}, {"Suspicious DLL Loading", "RAM Suspicious Indicator"})]
+    deleted = [f for f in visible if finding_matches(f, {"recovery", "possible_context"}, {"Recycle Bin", "Recovered File Metadata", "Suspicious File Deletion", "Suspicious DLL Deletion"})]
+    archive = [f for f in visible if finding_matches(f, {"archive_artifact", "browser_download"}, {"RAR File Execution"})]
+    external = [f for f in visible if finding_matches(f, {"external_device"}, {"External Device Execution"})]
+    packed = [f for f in visible if finding_matches(f, {"packed", "dotnet"}, {"UPX Packer", "Generic Packed File", "Suspicious Net File", "DotNetExecutable", "DotNetDLL"})]
+    tampered = [f for f in visible if finding_matches(f, {"modified_extension", "bypass_method"}, {"Tampered File", "Modified File Extension", "Generic Bypass Method"})]
+    defender = [f for f in visible if finding_matches(f, {"defender_detection", "defender_history"}, {"Windows Defender", "Antivirus Detection"})]
+
+    results = []
+    session_exec = [f for f in process_exec if f in near_session]
+    session_dll = [f for f in dll_activity if f in near_session or finding_matches(f, {"suspicious_module_load", "sysmon_remote_thread", "sysmon_process_access"})]
+
+    if session_exec and (session_dll or deleted or defender or packed):
+        sources = session_exec[:4] + session_dll[:3] + deleted[:2] + defender[:2]
+        evidence = ["Executable activity occurred during or near a Roblox session"]
+        if session_dll:
+            evidence.append("DLL/process-access activity was observed in the same Roblox window")
+        if deleted:
+            evidence.append("Deletion or recovery metadata exists for related suspicious artifacts")
+        if defender:
+            evidence.append("Antivirus/Defender telemetry exists near the same activity")
+        if packed:
+            evidence.append("Packed or obfuscated executable traits were observed")
+        events = correlation_timeline(timeline, sources, sessions)
+        results.append(make_correlation_finding("Possible Roblox Exploit Execution", "Roblox exploit execution", 14 + len(evidence) * 8, evidence, sources, events, config))
+
+    if session_dll:
+        sources = session_dll[:6]
+        categories = set().union(*(set(f.get("evidence_types", [])) for f in sources))
+        evidence = ["DLL/process interaction evidence was observed against Roblox or during a Roblox session"]
+        if "sysmon_remote_thread" in categories:
+            evidence.append("Sysmon remote-thread evidence targeted Roblox")
+        if "sysmon_process_access" in categories:
+            evidence.append("Sysmon process-access evidence targeted Roblox")
+        if "suspicious_module_load" in categories:
+            evidence.append("Module-load evidence showed a DLL loaded into Roblox from a risky location")
+        events = correlation_timeline(timeline, sources, sessions)
+        results.append(make_correlation_finding("Possible DLL Injection Activity", "DLL injection activity", 18 + len(evidence) * 10, evidence, sources, events, config, critical="sysmon_remote_thread" in categories))
+
+    session_game_mods = [f for f in visible if f in near_session and finding_matches(f, {"ruin_mode"}, {"Game Instance Modification"})]
+    if session_game_mods:
+        evidence = ["Game instance modification artifact was observed near game activity", "Manual review is required because mods can be legitimate or malicious depending on context"]
+        events = correlation_timeline(timeline, session_game_mods, sessions)
+        results.append(make_correlation_finding("Possible Game Instance Modification", "game instance modification", 24, evidence, session_game_mods, events, config))
+
+    fastflag_evidence = []
+    fastflag_events = []
+    for session in sessions:
+        lines = session.get("load_client_settings", []) or []
+        if lines:
+            fastflag_evidence.append(f"Roblox log recorded LoadClientSettings activity for user {session.get('user_id') or 'unknown'}")
+            fastflag_events.append({"time": session.get("start_time", ""), "source": "Roblox log", "text": "; ".join(str(x)[:120] for x in lines[:3])})
+    client_settings = [f for f in visible if "clientsettings" in (f.get("path", "") + f.get("name", "")).lower() or "fastflag" in " ".join(f.get("supporting_evidence", [])).lower()]
+    if fastflag_evidence or client_settings:
+        evidence = fastflag_evidence[:3] or ["ClientSettings/FastFlag-related artifact was observed"]
+        if client_settings:
+            evidence.append("ClientSettings/FastFlag file artifact exists in scanned evidence")
+        events = dedupe_timeline(fastflag_events + correlation_timeline(timeline, client_settings, sessions))
+        results.append(make_correlation_finding("Possible FastFlag Modifications", "FastFlag modifications", 12 + len(evidence) * 6, evidence, client_settings, events, config))
+
+    users = {(s.get("user_id") or "", (s.get("username") or "Unknown").lower()) for s in sessions if s.get("user_id") or s.get("username")}
+    user_ids = {u for u, _ in users if u}
+    if len(user_ids) > 1 or len(users) > 1:
+        evidence = [f"Multiple Roblox account identities were observed in logs: {len(users)} account entries"]
+        events = [{"time": s.get("start_time", ""), "source": "Roblox log", "text": f"Account observed user={s.get('username') or 'Unknown'} id={s.get('user_id') or 'unknown'} place={s.get('place_id') or 'unknown'}"} for s in sessions if s.get("user_id") or s.get("username")]
+        results.append(make_correlation_finding("Possible Alternate Roblox Account Usage", "alternate Roblox account usage", 10 + min(len(users), 5) * 4, evidence, [], dedupe_timeline(events), config))
+
+    if session_exec and deleted:
+        sources = session_exec[:4] + deleted[:4]
+        evidence = ["Execution evidence exists for a suspicious application", "Deletion/recovery metadata exists after or near execution"]
+        events = correlation_timeline(timeline, sources, sessions)
+        results.append(make_correlation_finding("Executed-Then-Deleted Application", "executed-then-deleted application", 32, evidence, sources, events, config))
+
+    if archive and session_exec:
+        sources = archive[:3] + session_exec[:4]
+        evidence = ["Archive/download artifact was observed", "Executable activity occurred during or near the same Roblox session"]
+        events = correlation_timeline(timeline, sources, sessions)
+        results.append(make_correlation_finding("Suspicious Archive-To-Execution Chain", "archive-to-execution chain", 28, evidence, sources, events, config))
+
+    if external:
+        sources = external[:5]
+        evidence = ["Executable or suspicious artifact was observed on an external/removable-drive style path"]
+        if any(f in near_session for f in external):
+            evidence.append("External-drive artifact timestamp is close to Roblox activity")
+        events = correlation_timeline(timeline, sources, sessions)
+        results.append(make_correlation_finding("Suspicious External Drive Execution", "external drive execution", 18 + len(evidence) * 6, evidence, sources, events, config))
+
+    if packed:
+        sources = packed[:6]
+        evidence = ["Packed/obfuscated executable traits were observed"]
+        if any(f in near_session for f in packed):
+            evidence.append("Packed artifact timestamp is close to Roblox activity")
+        if any(f in process_exec for f in packed):
+            evidence.append("Packed artifact also has execution evidence")
+        events = correlation_timeline(timeline, sources, sessions)
+        results.append(make_correlation_finding("Packed Or Obfuscated Executable", "packed or obfuscated executable", 16 + len(evidence) * 7, evidence, sources, events, config))
+
+    if tampered:
+        sources = tampered[:6]
+        evidence = ["File tampering, modified extension, or bypass/integrity indicator was observed"]
+        if any(f in near_session for f in tampered):
+            evidence.append("Tampering/integrity artifact timestamp is close to Roblox activity")
+        events = correlation_timeline(timeline, sources, sessions)
+        results.append(make_correlation_finding("File Tampering Or Integrity Violation", "file tampering and integrity violation", 20 + len(evidence) * 8, evidence, sources, events, config))
+
+    return [r for r in results if r]
+
+
+def correlation_findings_for_report(findings: list[dict]) -> list[dict]:
+    rows = []
+    for f in findings:
+        if not f.get("correlation_finding"):
+            continue
+        rows.append({
+            "name": f.get("name", ""),
+            "evidenceCategory": f.get("evidence_category", ""),
+            "confidenceLevel": f.get("forensic_confidence", ""),
+            "evidenceScoreContribution": f.get("evidence_score_contribution", f.get("score", 0)),
+            "supportingArtifacts": f.get("supporting_artifacts", []),
+            "supportingEvidence": f.get("supporting_evidence", []),
+            "timeline": f.get("event_timeline", []),
+        })
+    return rows
+
+
 def engine_assessment(finding: dict, config: dict) -> dict:
     categories = set(finding.get("detection_categories", []))
     score = int(finding.get("score", 0) or 0)
@@ -2377,6 +2624,12 @@ def camel_finding(finding: dict) -> dict:
         "scoreBreakdown": finding.get("score_breakdown", []),
         "supportingEvidence": finding.get("supporting_evidence", [])[:30],
         "attributionExplanation": finding.get("attribution_explanation", ""),
+        "evidenceCategory": finding.get("evidence_category", ""),
+        "forensicConfidence": finding.get("forensic_confidence", ""),
+        "evidenceScoreContribution": finding.get("evidence_score_contribution", 0),
+        "supportingArtifacts": finding.get("supporting_artifacts", []),
+        "eventTimeline": finding.get("event_timeline", []),
+        "correlationFinding": bool(finding.get("correlation_finding")),
     }
 
 
@@ -2394,16 +2647,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
     warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
-    findings = combine_findings(
-        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
-        config,
-    )
-    antivirus_logs = antivirus_logs_from_findings(findings)
-    detect_logs = detect_logs_from_report_parts(findings, warning_logs, recovery_artifacts, antivirus_logs, config)
-    engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
-    sessions_raw = attach_session_status(sessions_raw, findings)
-    quality = evidence_quality(days)
-    timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(
+    raw_timeline = (
         roblox_timeline
         + process_timeline
         + prefetch_timeline
@@ -2416,7 +2660,20 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + recycle_timeline
         + recovery_timeline
         + warning_timeline
-    ), config), findings)
+    )
+    findings = combine_findings(
+        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
+        config,
+    )
+    correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
+    if correlation_findings:
+        findings = combine_findings([findings, correlation_findings], config)
+    antivirus_logs = antivirus_logs_from_findings(findings)
+    detect_logs = detect_logs_from_report_parts(findings, warning_logs, recovery_artifacts, antivirus_logs, config)
+    engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
+    sessions_raw = attach_session_status(sessions_raw, findings)
+    quality = evidence_quality(days)
+    timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -2432,6 +2689,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "sessions": [camel_session(s) for s in sessions_raw],
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
+        "correlationFindings": correlation_findings_for_report(findings),
         "warningLogs": warning_logs,
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
@@ -2474,16 +2732,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     progress("Checking warning indicators...")
     warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
     progress("Building report...")
-    findings = combine_findings(
-        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
-        config,
-    )
-    antivirus_logs = antivirus_logs_from_findings(findings)
-    detect_logs = detect_logs_from_report_parts(findings, warning_logs, recovery_artifacts, antivirus_logs, config)
-    engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
-    sessions_raw = attach_session_status(sessions_raw, findings)
-    quality = evidence_quality(days)
-    timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(
+    raw_timeline = (
         roblox_timeline
         + process_timeline
         + prefetch_timeline
@@ -2496,7 +2745,20 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + recycle_timeline
         + recovery_timeline
         + warning_timeline
-    ), config), findings)
+    )
+    findings = combine_findings(
+        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
+        config,
+    )
+    correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
+    if correlation_findings:
+        findings = combine_findings([findings, correlation_findings], config)
+    antivirus_logs = antivirus_logs_from_findings(findings)
+    detect_logs = detect_logs_from_report_parts(findings, warning_logs, recovery_artifacts, antivirus_logs, config)
+    engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
+    sessions_raw = attach_session_status(sessions_raw, findings)
+    quality = evidence_quality(days)
+    timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -2512,6 +2774,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "sessions": [camel_session(s) for s in sessions_raw],
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
+        "correlationFindings": correlation_findings_for_report(findings),
         "warningLogs": warning_logs,
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
@@ -2651,6 +2914,22 @@ def render_txt(report: dict) -> str:
             f"  Explanation: {d.get('explanation')}",
         ]
     lines.append("")
+    lines += ["Forensic Correlation Findings", "-----------------------------"]
+    if not report.get("correlationFindings"):
+        lines.append("No cross-artifact correlation findings were generated.")
+    for item in report.get("correlationFindings", []):
+        lines += [
+            item.get("name", "Correlation Finding"),
+            f"Confidence: {item.get('confidenceLevel')}",
+            f"Evidence Score: +{item.get('evidenceScoreContribution', 0)}",
+            f"Evidence Category: {item.get('evidenceCategory')}",
+            "Evidence:",
+        ]
+        lines += [f"  - {x}" for x in item.get("supportingEvidence", [])[:8]]
+        lines += ["Timeline:"]
+        for event in item.get("timeline", [])[:8]:
+            lines.append(f"  {event.get('time')} {event.get('source')}: {event.get('text')}")
+        lines.append("")
     lines += ["Warning Logs", "------------"]
     if not report.get("warningLogs"):
         lines.append("No warning logs found.")
@@ -2786,6 +3065,27 @@ def render_html(report: dict) -> str:
         "VirusTotal": e.get("virusTotalStatus", ""),
         "Manual Review": "yes" if e.get("manualReviewRequired") else "no",
     } for e in report.get("engineResults", [])[:60]]
+    correlation_html = ""
+    if not report.get("correlationFindings"):
+        correlation_html = "<p class='muted'>No cross-artifact correlation findings were generated.</p>"
+    for item in report.get("correlationFindings", []):
+        confidence = item.get("confidenceLevel", "Low")
+        confidence_class = {"Critical": "confirmed", "High": "likely", "Medium": "possible", "Low": "possible"}.get(confidence, "possible")
+        evidence = "".join(f"<li>{html.escape(str(x))}</li>" for x in item.get("supportingEvidence", [])[:10])
+        artifacts = "".join(f"<li>{html.escape(str(x))}</li>" for x in item.get("supportingArtifacts", [])[:10])
+        events = "".join(
+            f"<li class='report-entry'{html_data_timestamp(e.get('time'))}><time>{html.escape(str(e.get('time', '')))}</time><span>{html.escape(str(e.get('text', '')))}</span><small>{html.escape(str(e.get('source', '')))}</small></li>"
+            for e in item.get("timeline", [])[:8]
+        )
+        correlation_html += (
+            f"<details class='report-entry finding-card confidence-{html.escape(confidence_class)}' open{html_data_timestamp((item.get('timeline') or [{}])[0].get('time'))}>"
+            f"<summary>{html.escape(item.get('name', 'Correlation Finding'))} - {html.escape(confidence)} - +{html.escape(str(item.get('evidenceScoreContribution', 0)))} points</summary>"
+            f"<p><b>Evidence category:</b> {html.escape(item.get('evidenceCategory', ''))}</p>"
+            f"<h4>Evidence</h4><ul>{evidence}</ul>"
+            f"<h4>Supporting artifacts</h4><ul>{artifacts or '<li>Timeline/log correlation only</li>'}</ul>"
+            f"<h4>Timeline</h4><ul class='timeline'>{events or '<li>No dedicated timeline events.</li>'}</ul>"
+            f"</details>"
+        )
     primary_session = report["sessions"][0] if report["sessions"] else {}
     timeline = "".join(f"<li class='report-entry confidence-{html.escape(str(e.get('confidence', 'Possible')).lower())}'{html_data_timestamp(e.get('time'))}><time>{html.escape(e['time'])}</time><span>{html.escape(e['text'])}</span><small>{html.escape(e['source'])}</small></li>" for e in report["timeline"])
     quality = "".join(f"<li><span>{html.escape(k)}</span><b class='{str(v).lower()}'>{'yes' if v else 'no'}</b></li>" for k, v in report["evidenceSources"].items())
@@ -2821,6 +3121,7 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><div class="report-controls"><div><h2>Report Time Range</h2><p class="muted">Filter visible saved report entries without rescanning.</p></div><label for="report-time-filter">Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></div></section>
 <section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed Exploit','Suspicious'] else 'Not confirmed')}</div></div></div></section>
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'], 'First Seen')}</section>
+<section><h2>Forensic Correlation Findings</h2><p class="muted">These findings are built from multiple artifacts lining up in time, not from a single filename, hash, or keyword.</p>{correlation_html}</section>
 <section><h2>Interaction / Detect Logs</h2><div class="filters">{''.join(f"<span class='pill'>{x}</span>" for x in DETECT_LOG_TYPES)}</div>{html_table(detect_rows, ['Type','Detection','Severity','Confidence','Manual Review','Evidence','Timestamp','Explanation'], 'Timestamp')}</section>
 <section><h2>Warning Logs</h2><p class="muted">Warnings indicate modifications or behaviors that may reduce confidence or require review. They are not automatically cheating evidence.</p>{html_table(warning_rows, ['Detection','Severity','Confidence','Manual Review','Source','Timestamp','Explanation'], 'Timestamp')}</section>
 <section><h2>Recovery</h2>{html_table(recovery_rows, ['Name','Path','Source','Timestamp','Manual Review'], 'Timestamp')}</section>
