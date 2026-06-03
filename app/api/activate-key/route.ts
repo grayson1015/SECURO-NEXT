@@ -8,7 +8,7 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json().catch(() => null);
   const key = String(body?.key || "").trim().toUpperCase();
-  if (!/^SECURO-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) {
+  if (!/^(SECURO|SEC-MVP)-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) {
     return NextResponse.json({ ok: false, error: "invalid_or_used_key" }, { status: 400 });
   }
 

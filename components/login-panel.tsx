@@ -112,7 +112,7 @@ export function LoginPanel() {
           </Button>
 
           <p className="text-xs leading-5 text-zinc-500">
-            Access is controlled by your email and Securo invite key.
+            Access is controlled by your email and Securo invite key. Business licenses can be shared by up to 20 approved emails.
           </p>
 
           {message ? (

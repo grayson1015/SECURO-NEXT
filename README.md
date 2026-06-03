@@ -43,3 +43,15 @@ The scanner never reports a PC as clean just because no injector was found. It r
 No confirmed Roblox injection evidence was found in available logs.
 Logging coverage may not be sufficient to rule it out.
 ```
+
+## Business License
+
+Run `supabase/schema.sql` in Supabase to add business license support.
+
+Included business key:
+
+```txt
+SEC-MVP-V7K2-M9Q4-X3P8
+```
+
+Business keys allow up to 20 unique emails. Owners can view used slots and revoke an email slot from `/admin`.

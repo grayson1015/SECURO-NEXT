@@ -91,4 +91,23 @@ export type AccessKeyRow = {
   assigned_user_id: string | null;
   used_at: string | null;
   created_at: string;
+  license_type?: "standard" | "business";
+  max_emails?: number;
+  expires_at?: string | null;
+};
+
+export type BusinessLicenseRow = {
+  key_code: string;
+  license_type: "business";
+  max_emails: number;
+  emails_used: number;
+  created_at: string;
+  expires_at: string | null;
+};
+
+export type BusinessLicenseUserRow = {
+  license_key: string;
+  email: string;
+  activated_at: string;
+  last_seen_at: string;
 };

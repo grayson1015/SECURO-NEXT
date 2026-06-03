@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
 
   if (
     !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ||
-    !/^SECURO-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)
+    !/^(SECURO|SEC-MVP)-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)
   ) {
     return NextResponse.json(
       { ok: false, error: "invalid_email_or_key" },
