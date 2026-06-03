@@ -5,6 +5,7 @@ export type TimelineEvent = {
   time?: string;
   source?: string;
   text?: string;
+  confidence?: "Possible" | "Likely" | "Confirmed" | string;
 };
 
 export type SecuroSession = {
@@ -30,6 +31,7 @@ export type SecuroFinding = {
   score?: number;
   category?: string;
   classification?: string;
+  confidenceLevel?: "Possible" | "Likely" | "Confirmed" | string;
   firstSeen?: string;
   evidenceTypes?: string[];
   detectionCategories?: string[];

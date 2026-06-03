@@ -21,6 +21,11 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const extraEvidence = useMemo(() => reportEvidenceGroups(data), [data]);
   const filteredTimeline = useMemo(() => filterTimedItems(data.timeline, timeRange, (item) => item.time), [data.timeline, timeRange]);
   const filteredFindings = useMemo(() => filterTimedItems(data.findings, timeRange, (item) => item.firstSeen), [data.findings, timeRange]);
+  const groupedFindings = useMemo(() => ({
+    Confirmed: filteredFindings.filter((finding) => findingConfidence(finding) === "Confirmed"),
+    Likely: filteredFindings.filter((finding) => findingConfidence(finding) === "Likely"),
+    Possible: filteredFindings.filter((finding) => findingConfidence(finding) === "Possible")
+  }), [filteredFindings]);
   const filteredDetections = useMemo(() => filterTimedItems(detectionFindings, timeRange, (item) => item.firstSeen), [detectionFindings, timeRange]);
   const filteredSessions = useMemo(() => filterTimedItems(data.sessions, timeRange, (item) => item.launchTime || item.exitTime), [data.sessions, timeRange]);
   const filteredEvidence = useMemo(
@@ -102,7 +107,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             {filteredTimeline.map((event, index) => (
               <div
                 key={`${event.time}-${event.text}-${index}`}
-                className="grid max-w-full gap-3 overflow-hidden rounded-md border border-border bg-black/20 p-3 text-sm md:grid-cols-[160px_minmax(0,1fr)_180px] md:gap-4"
+                className={`grid max-w-full gap-3 overflow-hidden rounded-md border p-3 text-sm md:grid-cols-[160px_minmax(0,1fr)_180px] md:gap-4 ${confidenceClasses(event.confidence || "Possible")}`}
               >
                 <div className="text-zinc-400">{formatDate(event.time)}</div>
                 <div className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{event.text || "Timeline event"}</div>
@@ -128,24 +133,25 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             ))}
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="text-xs uppercase text-zinc-500">
-                <tr className="border-b border-border"><th className="py-3">Name</th><th>Class</th><th>Score</th><th>Path</th></tr>
-              </thead>
-              <tbody>
-                {filteredFindings.map((finding, index) => (
-                  <tr key={`${finding.name}-${index}`} className="border-b border-border/70">
-                    <td className="py-3 font-medium">{finding.name || "Finding"}</td>
-                    <td>{finding.classification || finding.category || "Unknown"}</td>
-                    <td>{Number(finding.score || 0)}</td>
-                    <td className="max-w-xl truncate text-zinc-400">{finding.path || ""}</td>
-                  </tr>
-                ))}
-                {!filteredFindings.length ? (
-                  <tr><td className="py-4 text-zinc-500" colSpan={4}>No findings in this time range.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
+            {(["Confirmed", "Likely", "Possible"] as const).map((group) => (
+              <section key={group} className="mb-5">
+                <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">{group} Findings</h3>
+                <div className="space-y-3">
+                  {groupedFindings[group].map((finding, index) => (
+                    <div key={`${group}-${finding.name}-${index}`} className={`rounded-md border p-4 text-sm ${confidenceClasses(group)}`}>
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="font-semibold">{finding.name || "Finding"}</div>
+                        <div className="rounded-full border border-current/30 px-2 py-0.5 text-xs">{group}</div>
+                      </div>
+                      <div className="mt-2 text-zinc-300">Class: {finding.classification || finding.category || "Unknown"}</div>
+                      <div className="text-zinc-300">Score: {Number(finding.score || 0)}</div>
+                      <div className="mt-2 min-w-0 break-words text-zinc-400 [overflow-wrap:anywhere]">{finding.path || ""}</div>
+                    </div>
+                  ))}
+                  {!groupedFindings[group].length ? <p className="text-sm text-zinc-500">None.</p> : null}
+                </div>
+              </section>
+            ))}
           </div>
         </Card>
 
@@ -240,6 +246,18 @@ function parseTimestamp(value: unknown) {
 function evidenceTimestamp(item: Record<string, unknown>) {
   const value = item.timestamp || item.time || item.firstSeen || item.first_seen || item.createdAt || item.created_at || item.modifiedAt || item.modified_at || item.activated_at || item.last_seen_at || "";
   return value ? String(value) : "";
+}
+
+function findingConfidence(finding: { confidenceLevel?: string; classification?: string; score?: number }) {
+  if (finding.confidenceLevel === "Confirmed" || finding.classification === "Confirmed Exploit") return "Confirmed";
+  if (finding.confidenceLevel === "Likely" || finding.classification === "Suspicious" || Number(finding.score || 0) >= 50) return "Likely";
+  return "Possible";
+}
+
+function confidenceClasses(confidence: string) {
+  if (confidence === "Confirmed") return "border-red-500/50 bg-red-500/10 text-red-100";
+  if (confidence === "Likely") return "border-yellow-500/50 bg-yellow-500/10 text-yellow-100";
+  return "border-zinc-700 bg-black/20 text-zinc-200";
 }
 
 function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {

@@ -218,6 +218,93 @@ def storage_root(config: dict) -> Path:
     return default_storage_root()
 
 
+def path_starts_with(path: str, root: Path) -> bool:
+    if not path or "://" in path:
+        return False
+    try:
+        candidate = str(Path(os.path.expandvars(path)).resolve()).lower()
+        base = str(root.resolve()).lower()
+    except Exception:
+        candidate = os.path.normcase(os.path.abspath(os.path.expandvars(path)))
+        base = os.path.normcase(os.path.abspath(str(root)))
+    return candidate == base or candidate.startswith(base.rstrip("\\/") + os.sep)
+
+
+def securo_internal_roots(config: dict | None = None) -> list[Path]:
+    roots = [app_dir()]
+    frozen_internal = Path(getattr(sys, "_MEIPASS", ""))
+    if str(frozen_internal):
+        roots.append(frozen_internal)
+    local = os.environ.get("LOCALAPPDATA", "")
+    roaming = os.environ.get("APPDATA", "")
+    program_files = os.environ.get("ProgramFiles", "")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
+    for base in [local, roaming, program_files, program_files_x86]:
+        if base:
+            roots.append(Path(base) / APP_NAME)
+    if config is not None:
+        roots.append(storage_root(config))
+    unique = []
+    seen = set()
+    for root in roots:
+        if not root:
+            continue
+        try:
+            key = str(root.resolve()).lower()
+        except Exception:
+            key = os.path.normcase(os.path.abspath(str(root)))
+        if key not in seen:
+            unique.append(root)
+            seen.add(key)
+    return unique
+
+
+def securo_internal_path(path: str, config: dict | None = None) -> bool:
+    if not path:
+        return False
+    lowered = str(path).lower()
+    looks_like_path = bool(re.match(r"^[a-z]:[\\/]", str(path), re.I) or str(path).startswith(("\\\\", "/", "~")) or "\\" in str(path) or "/" in str(path))
+    internal_names = (
+        "sqlite3.dll",
+        "libcrypto-3-x64.dll",
+        "libssl-3-x64.dll",
+        "python312.dll",
+        "python3.dll",
+        "vcruntime140.dll",
+        "base_library.zip",
+        "robloxpcactivitychecker.exe",
+        "securochecker.exe",
+    )
+    if any(name in lowered for name in internal_names) and ("\\securo" in lowered or "\\_internal\\" in lowered):
+        return True
+    if not looks_like_path:
+        return False
+    try:
+        exists_or_marked = Path(os.path.expandvars(str(path))).exists() or "\\securo" in lowered or "/securo" in lowered or "\\_internal\\" in lowered or "/_internal/" in lowered
+    except OSError:
+        exists_or_marked = "\\securo" in lowered or "/securo" in lowered or "\\_internal\\" in lowered or "/_internal/" in lowered
+    if not exists_or_marked:
+        return False
+    return any(path_starts_with(path, root) for root in securo_internal_roots(config))
+
+
+def internal_securo_text(text: str, config: dict | None = None) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    if any(name in lowered for name in ("sqlite3.dll", "libcrypto-3-x64.dll", "python312.dll", "vcruntime140.dll", "robloxpcactivitychecker.exe", "securochecker.exe")):
+        return True
+    for root in securo_internal_roots(config):
+        root_text = str(root).lower()
+        if root_text and root_text in lowered:
+            return True
+    return False
+
+
+def filter_customer_timeline(timeline: list[dict], config: dict) -> list[dict]:
+    return [event for event in timeline if not internal_securo_text(" ".join(str(v) for v in event.values()), config)]
+
+
 def ensure_storage_dirs(config: dict) -> dict[str, Path]:
     root = storage_root(config)
     dirs = {
@@ -468,6 +555,7 @@ def first_time(*values) -> str:
 
 def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     norm = path if "://" in (path or "") else (normalize_path(path) if path else "")
+    suppressed = securo_internal_path(norm, config)
     signer = signer_info(norm) if Path(norm).suffix.lower() in [".exe", ".dll"] else {"status": "not checked", "subject": "", "issuer": ""}
     finding = {
         "name": Path(norm).name if norm else name,
@@ -486,7 +574,12 @@ def make_finding(path: str, name: str, source: str, config: dict) -> dict:
         "artifact_source": source,
         "attribution_explanation": "",
         "classification": "Indicator Found",
+        "confidence_level": "Possible",
+        "suppressed": suppressed,
+        "suppression_reason": "Internal Securo Component" if suppressed else "",
     }
+    if suppressed:
+        return finding
     if is_known_safe_signer(signer, config):
         add_score(finding, config["score_rules"]["known_safe_signer"], "Signed by known-safe signer")
     elif signer.get("status", "").lower() in ["notsigned", "unknown", "missing"]:
@@ -532,6 +625,8 @@ def shannon_entropy(data: bytes) -> float:
 
 
 def add_detection(finding: dict, category: str, reason: str, risk="Medium", points=20):
+    if finding.get("suppressed"):
+        return
     finding.setdefault("detection_categories", [])
     finding.setdefault("detections", [])
     detection_type = detection_type_for_category(category)
@@ -561,12 +656,12 @@ def detection_type_for_category(category: str) -> str:
 
 def confidence_from_score(score: int, classification: str) -> str:
     if classification == "Confirmed Exploit":
-        return "high"
+        return "Confirmed"
     if score >= 50:
-        return "medium-high"
+        return "Likely"
     if score >= 25:
-        return "medium"
-    return "low"
+        return "Likely"
+    return "Possible"
 
 
 def review_required_for_type(log_type: str, classification: str) -> bool:
@@ -625,9 +720,23 @@ def apply_executor_keyword_check(finding: dict, config: dict):
         finding["evidence_types"].append("executor_keyword")
 
 
+def has_supporting_artifact(finding: dict) -> bool:
+    return bool(finding.get("supporting_evidence") or finding.get("detections") or finding.get("sha256"))
+
+
+def has_timeline_anchor(finding: dict) -> bool:
+    return bool(finding.get("first_seen") or finding.get("evidence_types"))
+
+
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
     if not executor_keyword_match(finding, config):
+        return False
+    if not already_flagged_by_detection(finding):
+        return False
+    if not has_supporting_artifact(finding):
+        return False
+    if not has_timeline_anchor(finding):
         return False
     if known_bad_hash(finding, config):
         return True
@@ -636,6 +745,17 @@ def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     if categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES:
         return True
     return False
+
+
+def finding_confidence_level(finding: dict) -> str:
+    if finding.get("classification") == "Confirmed Exploit":
+        return "Confirmed"
+    categories = set(finding.get("detection_categories", []))
+    evidence_types = set(finding.get("evidence_types", []))
+    evidence_count = len(categories) + len(evidence_types) + min(len(finding.get("supporting_evidence", [])), 3)
+    if finding.get("classification") == "Suspicious" or evidence_count >= 3 or finding.get("score", 0) >= 50:
+        return "Likely"
+    return "Possible"
 
 
 def inspect_file_indicators(path: str, finding: dict):
@@ -738,6 +858,8 @@ def inspect_file_indicators(path: str, finding: dict):
 
 
 def merge_findings(findings: dict, finding: dict) -> dict:
+    if finding.get("suppressed"):
+        return finding
     key = (finding.get("path") or finding.get("name") or "unknown").lower()
     if key not in findings:
         findings[key] = finding
@@ -790,7 +912,8 @@ def categorize_finding(finding: dict, config: dict) -> str:
 
 
 def finalize_findings(findings: list[dict], config: dict) -> list[dict]:
-    for f in findings:
+    visible = [f for f in findings if not f.get("suppressed") and not securo_internal_path(f.get("path", ""), config)]
+    for f in visible:
         apply_executor_keyword_check(f, config)
         f["score"] = max(0, f.get("score", 0))
         f["classification"] = categorize_finding(f, config)
@@ -806,7 +929,8 @@ def finalize_findings(findings: list[dict], config: dict) -> list[dict]:
             f["attribution_explanation"] = "This file is trusted/safe in the available evidence."
         else:
             f["attribution_explanation"] = "An indicator was found, but it is not enough to confirm cheating by itself."
-    return sorted(findings, key=lambda x: x.get("score", 0), reverse=True)
+        f["confidence_level"] = finding_confidence_level(f)
+    return sorted(visible, key=lambda x: x.get("score", 0), reverse=True)
 
 
 def get_common_roblox_log_dirs() -> list[Path]:
@@ -1019,6 +1143,8 @@ def evidence_quality(days: int) -> dict:
 
 
 def add_score(finding: dict, amount: int, reason: str):
+    if finding.get("suppressed"):
+        return
     finding["score"] += amount
     finding["score_breakdown"].append({"points": amount, "reason": reason})
 
@@ -1070,6 +1196,7 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
         ident = process_identity(path, config)
         key = ident["path"] or fallback_name
         if key not in findings:
+            suppressed = securo_internal_path(ident["path"], config)
             findings[key] = {
                 "name": ident["name"] or fallback_name,
                 "path": ident["path"],
@@ -1087,7 +1214,12 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
                 "artifact_source": "event_log",
                 "attribution_explanation": "",
                 "classification": "Indicator Found",
+                "confidence_level": "Possible",
+                "suppressed": suppressed,
+                "suppression_reason": "Internal Securo Component" if suppressed else "",
             }
+            if suppressed:
+                return findings[key]
             if ident["known_safe_signer"]:
                 add_score(findings[key], config["score_rules"]["known_safe_signer"], "Signed by known-safe signer")
             if ident["signer"].get("status", "").lower() in ["notsigned", "unknown", "missing"]:
@@ -1281,6 +1413,9 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
     for root in scan_roots():
         for dirpath, dirnames, filenames in os.walk(root, topdown=True):
             dirnames[:] = [d for d in dirnames if d.lower() not in {"node_modules", ".git", "windowsapps", "packages"}]
+            dirnames[:] = [d for d in dirnames if not securo_internal_path(str(Path(dirpath) / d), config)]
+            if securo_internal_path(dirpath, config):
+                continue
             if seen_files > max_files:
                 break
             for filename in filenames:
@@ -1300,6 +1435,8 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
                 if max(times) < cut:
                     continue
                 path_text = str(path)
+                if securo_internal_path(path_text, config):
+                    continue
                 if not suspicious_extension(path_text, config):
                     continue
                 finding = make_finding(path_text, filename, "file_system", config)
@@ -2031,6 +2168,7 @@ def camel_finding(finding: dict) -> dict:
         "score": finding.get("score", 0),
         "category": finding.get("classification", "Indicator Found"),
         "classification": finding.get("classification", "Indicator Found"),
+        "confidenceLevel": finding.get("confidence_level", finding_confidence_level(finding)),
         "firstSeen": finding.get("first_seen", ""),
         "artifactSource": finding.get("artifact_source", ""),
         "evidenceTypes": sorted(set(finding.get("evidence_types", []))),
@@ -2068,7 +2206,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
-    timeline = dedupe_timeline(
+    timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(
         roblox_timeline
         + process_timeline
         + prefetch_timeline
@@ -2081,7 +2219,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + recycle_timeline
         + recovery_timeline
         + warning_timeline
-    )
+    ), config), findings)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -2148,7 +2286,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
-    timeline = dedupe_timeline(
+    timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(
         roblox_timeline
         + process_timeline
         + prefetch_timeline
@@ -2161,7 +2299,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + recycle_timeline
         + recovery_timeline
         + warning_timeline
-    )
+    ), config), findings)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -2247,6 +2385,31 @@ def dedupe_timeline(events: list[dict]) -> list[dict]:
         seen.add(key)
         clean.append(e)
     return sorted(clean, key=lambda x: x["time"])
+
+
+def confidence_for_classification(classification: str) -> str:
+    if classification == "Confirmed Exploit":
+        return "Confirmed"
+    if classification == "Suspicious":
+        return "Likely"
+    return "Possible"
+
+
+def annotate_timeline_confidence(timeline: list[dict], findings: list[dict]) -> list[dict]:
+    enriched = []
+    for event in timeline:
+        text = " ".join(str(v) for v in event.values()).lower()
+        confidence = "Possible"
+        for finding in findings:
+            name = str(finding.get("name", "")).lower()
+            path = str(finding.get("path", "")).lower()
+            if (name and name in text) or (path and path in text):
+                confidence = finding.get("confidence_level") or confidence_for_classification(finding.get("classification", "Indicator Found"))
+                break
+        item = dict(event)
+        item["confidence"] = confidence
+        enriched.append(item)
+    return enriched
 
 
 def save_sqlite(path: Path, report: dict):
@@ -2427,14 +2590,15 @@ def render_html(report: dict) -> str:
         "Manual Review": "yes" if e.get("manualReviewRequired") else "no",
     } for e in report.get("engineResults", [])[:60]]
     primary_session = report["sessions"][0] if report["sessions"] else {}
-    timeline = "".join(f"<li class='report-entry'{html_data_timestamp(e.get('time'))}><time>{html.escape(e['time'])}</time><span>{html.escape(e['text'])}</span><small>{html.escape(e['source'])}</small></li>" for e in report["timeline"])
+    timeline = "".join(f"<li class='report-entry confidence-{html.escape(str(e.get('confidence', 'Possible')).lower())}'{html_data_timestamp(e.get('time'))}><time>{html.escape(e['time'])}</time><span>{html.escape(e['text'])}</span><small>{html.escape(e['source'])}</small></li>" for e in report["timeline"])
     quality = "".join(f"<li><span>{html.escape(k)}</span><b class='{str(v).lower()}'>{'yes' if v else 'no'}</b></li>" for k, v in report["evidenceSources"].items())
     grouped = defaultdict(list)
     for f in sorted(report["findings"], key=lambda x: x["score"], reverse=True):
-        grouped[f["classification"]].append(f)
+        grouped[f.get("confidenceLevel") or confidence_for_classification(f["classification"])].append(f)
     findings_html = ""
-    for group in ["Confirmed Exploit", "Suspicious", "Indicator Found", "Likely False Positive", "Trusted Safe"]:
-        findings_html += f"<h3>{group}</h3>"
+    group_labels = [("Confirmed", "Confirmed Findings"), ("Likely", "Likely Findings"), ("Possible", "Possible Findings")]
+    for group, label in group_labels:
+        findings_html += f"<h3>{label}</h3>"
         if not grouped[group]:
             findings_html += "<p class='muted'>None.</p>"
             continue
@@ -2445,7 +2609,7 @@ def render_html(report: dict) -> str:
                 f"<div class='warn'><h4>{html.escape(d.get('category', 'Detection'))}</h4><p><b>File:</b> {html.escape(f['name'])}</p><p><b>Path:</b> {html.escape(f['path'])}</p><p><b>Detection:</b> {html.escape(d.get('category', ''))}</p><p><b>Reason:</b> {html.escape(d.get('reason', ''))}</p><p><b>Risk:</b> {html.escape(d.get('risk', ''))}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><p><b>First seen:</b> {html.escape(f['firstSeen'])}</p></div>"
                 for d in f.get("detections", [])
             )
-            findings_html += f"<details class='report-entry' open{html_data_timestamp(f.get('firstSeen'))}><summary>{html.escape(f['name'])} - {f['score']} points</summary>{warnings}<p><b>Path:</b> {html.escape(f['path'])}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><h4>Score</h4><ul>{breakdown}</ul><h4>Evidence</h4><ul>{evidence}</ul><p>{html.escape(f['attributionExplanation'])}</p></details>"
+            findings_html += f"<details class='report-entry finding-card confidence-{html.escape(group.lower())}' open{html_data_timestamp(f.get('firstSeen'))}><summary>{html.escape(f['name'])} - {html.escape(group)} - {f['score']} points</summary>{warnings}<p><b>Path:</b> {html.escape(f['path'])}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><h4>Score</h4><ul>{breakdown}</ul><h4>Evidence</h4><ul>{evidence}</ul><p>{html.escape(f['attributionExplanation'])}</p></details>"
     session_cards = "".join(
         f"<div class='session report-entry {html.escape((s.get('status') or 'Clean').lower())}'{html_data_timestamp(s.get('launchTime'))}><h3>{html.escape(s.get('username') or 'Unknown')}</h3><p><b>Display Name:</b> {html.escape(s.get('displayName', ''))}</p><p><b>User ID:</b> {html.escape(s.get('userId', ''))}</p><p><b>Place ID:</b> {html.escape(s.get('placeId', ''))}</p><p><b>Job ID:</b> {html.escape(s.get('jobId', ''))}</p><p><b>Duration:</b> {html.escape(s.get('duration', 'unknown'))}</p><p><b>Status:</b> {html.escape(s.get('status', 'Clean'))}</p>{''.join('<p><b>Detection:</b> ' + html.escape(d.get('name','')) + ' ' + html.escape(d.get('path','')) + '</p>' for d in s.get('linkedDetections', []))}</div>"
         for s in report["sessions"]
@@ -2454,7 +2618,7 @@ def render_html(report: dict) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
 <style>
-body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline li{{display:grid;grid-template-columns:170px 1fr 130px;gap:12px;padding:8px 0;border-bottom:1px solid #edf0f3}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}.report-controls{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}.report-controls label{{font-weight:700}}.report-controls select{{border:1px solid #cfd6df;border-radius:6px;background:white;padding:8px 10px;font:inherit}}.hidden-by-time{{display:none!important}}
+body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}.report-controls{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}.report-controls label{{font-weight:700}}.report-controls select{{border:1px solid #cfd6df;border-radius:6px;background:white;padding:8px 10px;font:inherit}}.hidden-by-time{{display:none!important}}
 </style></head><body><header><h1>{APP_NAME} Report</h1><p>No confirmed result means only that available logs did not prove it. Logging coverage may be incomplete.</p></header><main>
 <section><h2>Summary</h2><div class="summary"><div class="card"><div>Scan Date</div><div class="value">{html.escape(report['scanTime'])}</div></div><div class="card"><div>Highest Result</div><div class="value">{report['highestResult']}</div></div><div class="card"><div>Top Score</div><div class="value">{report.get('topScore', 0)}</div></div><div class="card"><div>Roblox Sessions</div><div class="value">{len(report['sessions'])}</div></div></div></section>
 <section><div class="report-controls"><div><h2>Report Time Range</h2><p class="muted">Filter visible saved report entries without rescanning.</p></div><label for="report-time-filter">Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></div></section>
