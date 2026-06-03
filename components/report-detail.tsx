@@ -100,10 +100,13 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           <h2 className="mb-4 text-lg font-semibold">Timeline</h2>
           <div className="space-y-2">
             {filteredTimeline.map((event, index) => (
-              <div key={`${event.time}-${event.text}-${index}`} className="grid gap-2 rounded-md border border-border bg-black/20 p-3 text-sm md:grid-cols-[170px_1fr_150px]">
+              <div
+                key={`${event.time}-${event.text}-${index}`}
+                className="grid max-w-full gap-3 overflow-hidden rounded-md border border-border bg-black/20 p-3 text-sm md:grid-cols-[160px_minmax(0,1fr)_180px] md:gap-4"
+              >
                 <div className="text-zinc-400">{formatDate(event.time)}</div>
-                <div>{event.text || "Timeline event"}</div>
-                <div className="text-zinc-500">{event.source || "Evidence"}</div>
+                <div className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{event.text || "Timeline event"}</div>
+                <div className="text-zinc-500 md:whitespace-nowrap">{event.source || "Evidence"}</div>
               </div>
             ))}
             {!filteredTimeline.length ? <p className="text-sm text-zinc-500">No timeline entries in this time range.</p> : null}
@@ -281,13 +284,17 @@ function buildExportHtml(report: ReportRow) {
       .controls{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
       select{background:#050807;color:#eefaf1;border:1px solid #264234;border-radius:6px;padding:8px 10px}
       .report-entry{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 0}
+      .timeline-entry{display:grid;grid-template-columns:160px minmax(0,1fr) 180px;gap:16px;align-items:start;overflow:hidden}
+      .timeline-message{min-width:0;overflow-wrap:anywhere;word-break:break-word;white-space:normal}
+      .timeline-source{white-space:nowrap;color:#8b93a7}
       .hidden-by-time{display:none!important}
+      @media(max-width:720px){.timeline-entry{grid-template-columns:1fr}.timeline-source{white-space:normal}}
     </style>
     </head><body>
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
     <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
-    <section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<b>${escape(formatDate(event.time))}</b> ${escape(event.text || "")} <small>${escape(event.source || "")}</small>`)).join("") || "<p>No timeline entries.</p>"}</section>
+    <section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section>
     <section><h2>Sessions</h2>${data.sessions.map((session) => entry(session.launchTime || session.exitTime, `<p><b>${escape(session.username || "Unknown user")}</b></p><p>User ID: ${escape(session.userId || "")}</p><p>Place: ${escape(session.placeId || session.gameId || "")}</p><p>Duration: ${escape(session.duration || "unknown")}</p><p>Status: ${escape(session.status || "Clean")}</p>`)).join("") || "<p>No sessions.</p>"}</section>
     <section><h2>Findings</h2>${data.findings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`)).join("") || "<p>No findings.</p>"}</section>
     ${evidence}
