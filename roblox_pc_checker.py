@@ -121,6 +121,13 @@ TRUST_DAMPEN_SIGNERS = (
     "Razer",
     "Corsair",
     "NVIDIA Corporation",
+    "Advanced Micro Devices",
+    "AMD",
+    "Google LLC",
+    "Discord Inc.",
+    "Valve Corp.",
+    "Valve",
+    "Valve Corporation",
     "MeldaProduction",
     "Spotify",
     "Proton",
@@ -129,10 +136,12 @@ TRUST_DAMPEN_SIGNERS = (
 COMMON_DEPENDENCY_NAMES = (
     "sqlite3.dll",
     "libcrypto",
+    "libssl",
     "python312.dll",
     "python3.dll",
     "libffi",
     "vcruntime",
+    "msvcp140.dll",
     "api-ms-win",
     "webview2loader.dll",
     "base_library.zip",
@@ -145,6 +154,40 @@ LOW_SIGNAL_PATH_MARKERS = (
     "\\roblox\\downloads\\",
     "\\_internal\\",
 )
+MAINSTREAM_SOFTWARE_PATH_MARKERS = (
+    "\\spotify\\",
+    "\\google\\chrome\\",
+    "\\microsoft\\edge\\",
+    "\\discord\\",
+    "\\steam\\",
+    "\\steamapps\\",
+    "\\nvidia corporation\\",
+    "\\nvidia\\",
+    "\\amd\\",
+    "\\roblox\\",
+    "\\microsoft\\",
+)
+ALLOWLIST_STRONG_BEHAVIOR_TYPES = {
+    "sysmon_remote_thread",
+    "sysmon_process_access",
+    "suspicious_module_load",
+    "persistence",
+    "defender_detection",
+    "modified_extension",
+    "network_artifact",
+    "external_device",
+}
+ALLOWLIST_STRONG_BEHAVIOR_CATEGORIES = {
+    "Tampered File",
+    "Suspicious DLL Deletion",
+    "Suspicious File Deletion",
+    "Suspicious File Modification",
+    "Modified File Extension",
+    "Executed Suspicious File",
+    "Network File Execution",
+    "External Device Execution",
+    "Generic Bypass Method",
+}
 REAL_BEHAVIOR_EVIDENCE_TYPES = {
     "sysmon_remote_thread",
     "sysmon_process_access",
@@ -446,6 +489,53 @@ def common_dependency_path(path: str) -> bool:
     return any(marker in name for marker in COMMON_DEPENDENCY_NAMES)
 
 
+def mainstream_software_path(path: str) -> bool:
+    low = normalize_path(path).lower() if path else ""
+    return any(marker in low for marker in MAINSTREAM_SOFTWARE_PATH_MARKERS)
+
+
+def operating_system_allowlisted_path(path: str) -> bool:
+    if not path or "://" in path:
+        return False
+    low = normalize_path(path).lower()
+    windir = os.environ.get("WINDIR", "C:\\Windows").lower()
+    program_files = [os.environ.get("ProgramFiles", "C:\\Program Files"), os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")]
+    if low.startswith(windir.rstrip("\\/") + os.sep.lower()):
+        return True
+    system_roots = ("\\windows\\system32\\", "\\windows\\syswow64\\", "\\windows\\winsxs\\")
+    if any(marker in low for marker in system_roots):
+        return True
+    legitimate_program_roots = ("\\microsoft\\", "\\windows defender\\", "\\microsoft edge\\", "\\roblox\\versions\\")
+    return any(low.startswith(str(root).lower().rstrip("\\/") + os.sep.lower()) and any(marker in low for marker in legitimate_program_roots) for root in program_files if root)
+
+
+def strong_allowlisted_behavior(finding: dict) -> bool:
+    types = set(finding.get("evidence_types", []))
+    categories = set(finding.get("detection_categories", []))
+    if types & ALLOWLIST_STRONG_BEHAVIOR_TYPES:
+        return True
+    if categories & ALLOWLIST_STRONG_BEHAVIOR_CATEGORIES:
+        return True
+    evidence_text = " ".join(str(x) for x in finding.get("supporting_evidence", [])).lower()
+    behavior_terms = ("deleted", "deletion", "tamper", "wmi", "startup", "remote thread", "process access", "loaded into roblox", "defender")
+    return any(term in evidence_text for term in behavior_terms)
+
+
+def allowlisted_finding(finding: dict, config: dict) -> bool:
+    path = finding.get("path", "")
+    if finding.get("suppressed") or securo_internal_path(path, config):
+        return True
+    if common_dependency_path(path) or finding.get("common_dependency"):
+        return True
+    if operating_system_allowlisted_path(path):
+        return True
+    if mainstream_software_path(path):
+        return True
+    if trusted_dampened_signer(finding.get("signer", {})) and not known_bad_hash(finding, config):
+        return True
+    return False
+
+
 def low_signal_path(path: str) -> bool:
     low = (path or "").lower()
     return any(marker in low for marker in LOW_SIGNAL_PATH_MARKERS)
@@ -728,21 +818,37 @@ def has_timeline_anchor(finding: dict) -> bool:
     return bool(finding.get("first_seen") or finding.get("evidence_types"))
 
 
-def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
-    categories = set(finding.get("detection_categories", []))
-    if not executor_keyword_match(finding, config):
-        return False
-    if not already_flagged_by_detection(finding):
+def detection_triggered(finding: dict) -> bool:
+    return bool(finding.get("detection_categories") or finding.get("detections") or finding.get("evidence_types"))
+
+
+def confirmation_threshold_reached(finding: dict, config: dict) -> bool:
+    return int(finding.get("score", 0) or 0) >= int(config.get("category_thresholds", {}).get("confirmed", 70))
+
+
+def confirmed_verification_gate(finding: dict, config: dict) -> bool:
+    if not detection_triggered(finding):
         return False
     if not has_supporting_artifact(finding):
         return False
+    if allowlisted_finding(finding, config):
+        return False
+    if not confirmation_threshold_reached(finding, config):
+        return False
     if not has_timeline_anchor(finding):
+        return False
+    return True
+
+
+def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
+    categories = set(finding.get("detection_categories", []))
+    if not confirmed_verification_gate(finding, config):
         return False
     if known_bad_hash(finding, config):
         return True
     if real_behavioral_evidence(finding):
         return True
-    if categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES:
+    if executor_keyword_match(finding, config) and (categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES):
         return True
     return False
 
@@ -888,6 +994,11 @@ def categorize_finding(finding: dict, config: dict) -> str:
     dependency = common_dependency_path(finding.get("path", ""))
     behavior = real_behavioral_evidence(finding)
     exploit_specific = exploit_specific_artifact(finding, config)
+    allowlisted = allowlisted_finding(finding, config)
+    if allowlisted and not strong_allowlisted_behavior(finding):
+        return "Likely False Positive" if categories or types else "Trusted Safe"
+    if allowlisted and strong_allowlisted_behavior(finding):
+        return "Suspicious"
     if trusted and not behavior and not known_bad_hash(finding, config):
         return "Trusted Safe" if not categories else "Likely False Positive"
     if (dependency or finding.get("low_signal_path")) and not behavior and not exploit_specific:
@@ -897,7 +1008,7 @@ def categorize_finding(finding: dict, config: dict) -> str:
     if confirmed_exploit_artifact(finding, config):
         return "Confirmed Exploit"
     if types & {"sysmon_remote_thread", "sysmon_process_access", "suspicious_module_load"}:
-        return "Confirmed Exploit" if score >= config["category_thresholds"]["confirmed"] and exploit_specific else "Suspicious"
+        return "Confirmed Exploit" if confirmed_exploit_artifact(finding, config) else "Suspicious"
     if categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES and not exploit_specific:
         return "Indicator Found"
     if categories & {"A1", "A2", "A3", "X1", "X2", "RAM Suspicious Indicator"} and not behavior:

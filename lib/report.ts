@@ -29,9 +29,29 @@ export function riskFromScore(score: number, reported: string) {
 
 export function countFindings(report: SecuroReportJson, label: string) {
   return report.findings.filter((finding) => {
+    if (isSecuroSuppressedFinding(finding)) return false;
     const className = finding.classification || finding.category || "";
+    const requested = label.toLowerCase();
+    if ((requested === "confirmed exploit" || requested === "confirmed") && isMainstreamOrRuntimeFinding(finding)) {
+      return false;
+    }
+    if (requested === "suspicious" && isMainstreamOrRuntimeFinding(finding) && className.toLowerCase() === "confirmed exploit") {
+      return true;
+    }
     return className.toLowerCase() === label.toLowerCase();
   }).length;
+}
+
+function isSecuroSuppressedFinding(finding: { name?: string; path?: string }) {
+  const text = `${finding.name || ""} ${finding.path || ""}`.toLowerCase();
+  return text.includes("\\securo") || text.includes("/securo") || text.includes("_internal");
+}
+
+function isMainstreamOrRuntimeFinding(finding: { name?: string; path?: string }) {
+  const text = `${finding.name || ""} ${finding.path || ""}`.toLowerCase();
+  const runtime = ["sqlite3.dll", "libcrypto", "libssl", "python312.dll", "python3.dll", "libffi", "vcruntime", "msvcp140.dll", "api-ms-win", "webview2loader.dll", "base_library.zip"];
+  const mainstream = ["spotify", "chrome", "discord", "steam", "roblox", "microsoft", "nvidia", "amd", "edge"];
+  return runtime.some((name) => text.includes(name)) || mainstream.some((name) => text.includes(name));
 }
 
 export function filterReports(reports: ReportRow[], query: string) {
