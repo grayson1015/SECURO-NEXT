@@ -32,6 +32,10 @@ export function countFindings(report: SecuroReportJson, label: string) {
     if (isSecuroSuppressedFinding(finding)) return false;
     const className = finding.classification || finding.category || "";
     const requested = label.toLowerCase();
+    const confidence = findingConfidence(finding).toLowerCase();
+    if (requested === "confirmed" || requested === "likely" || requested === "possible") {
+      return confidence === requested;
+    }
     if ((requested === "confirmed exploit" || requested === "confirmed") && isMainstreamOrRuntimeFinding(finding)) {
       return false;
     }
@@ -40,6 +44,15 @@ export function countFindings(report: SecuroReportJson, label: string) {
     }
     return className.toLowerCase() === label.toLowerCase();
   }).length;
+}
+
+function findingConfidence(finding: { name?: string; path?: string; confidenceLevel?: string; classification?: string; score?: number }) {
+  if (isMainstreamOrRuntimeFinding(finding) && (finding.confidenceLevel === "Confirmed" || finding.classification === "Confirmed Exploit")) {
+    return Number(finding.score || 0) >= 50 ? "Likely" : "Possible";
+  }
+  if (finding.confidenceLevel === "Confirmed" || finding.classification === "Confirmed Exploit") return "Confirmed";
+  if (finding.confidenceLevel === "Likely" || finding.classification === "Suspicious" || Number(finding.score || 0) >= 50) return "Likely";
+  return "Possible";
 }
 
 function isSecuroSuppressedFinding(finding: { name?: string; path?: string }) {

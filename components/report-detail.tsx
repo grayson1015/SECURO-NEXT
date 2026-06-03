@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Clock, Download } from "lucide-react";
-import type { ReportRow } from "@/lib/types";
+import type { ReportRow, SecuroFinding } from "@/lib/types";
 import { countFindings } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -78,8 +78,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
 
         <section className="mt-5 grid gap-4 md:grid-cols-3">
           <Card><CardTitle>Confirmed</CardTitle><CardValue>{countFindings(data, "Confirmed")}</CardValue></Card>
-          <Card><CardTitle>Likely</CardTitle><CardValue>{countFindings(data, "Suspicious")}</CardValue></Card>
-          <Card><CardTitle>Possible</CardTitle><CardValue>{countFindings(data, "Weak")}</CardValue></Card>
+          <Card><CardTitle>Likely</CardTitle><CardValue>{countFindings(data, "Likely")}</CardValue></Card>
+          <Card><CardTitle>Possible</CardTitle><CardValue>{countFindings(data, "Possible")}</CardValue></Card>
         </section>
 
         <Card className="mt-5 border-primary/30">
@@ -249,7 +249,7 @@ function evidenceTimestamp(item: Record<string, unknown>) {
   return value ? String(value) : "";
 }
 
-function findingConfidence(finding: { confidenceLevel?: string; classification?: string; score?: number }) {
+function findingConfidence(finding: SecuroFinding) {
   if (isMainstreamOrRuntimeFinding(finding) && (finding.confidenceLevel === "Confirmed" || finding.classification === "Confirmed Exploit")) {
     return Number(finding.score || 0) >= 50 ? "Likely" : "Possible";
   }

@@ -40,9 +40,9 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
   const rangedReports = useMemo(() => filterReportsByTimeRange(reports, timeRange), [reports, timeRange]);
   const filtered = useMemo(() => sortReports(filterReports(rangedReports, query), sortKey), [rangedReports, query, sortKey]);
   const latest = rangedReports[0];
-  const confirmed = latest ? countFindings(latest.report_json, "Confirmed Exploit") : 0;
-  const likely = latest ? countFindings(latest.report_json, "Suspicious") : 0;
-  const possible = latest ? countFindings(latest.report_json, "Indicator Found") : 0;
+  const confirmed = latest ? countFindings(latest.report_json, "Confirmed") : 0;
+  const likely = latest ? countFindings(latest.report_json, "Likely") : 0;
+  const possible = latest ? countFindings(latest.report_json, "Possible") : 0;
   const sessions = latest?.report_json.sessions.length || 0;
   const coverage = latest ? coveragePercent(latest.report_json.evidenceSources) : 0;
   const packed = latest ? countDetectionCategory(latest.report_json, ["packed", "UPX", "VMProtect", "Themida"]) : 0;
