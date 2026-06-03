@@ -278,8 +278,10 @@ function isMainstreamOrRuntimeFinding(finding: { name?: string; path?: string })
     "webview2loader.dll",
     "base_library.zip"
   ];
-  const mainstream = ["spotify", "chrome", "discord", "steam", "roblox", "microsoft", "nvidia", "amd", "edge"];
-  return commonRuntime.some((name) => text.includes(name)) || mainstream.some((name) => text.includes(name));
+  const mainstream = ["spotify", "chrome", "discord", "steam", "roblox", "microsoft", "nvidia", "amd", "edge", "razer", "logitech", "corsair", "steelseries", "mozilla", "firefox", "intel"];
+  const protectedSystem = ["svchost.exe", "explorer.exe", "winlogon.exe", "csrss.exe", "dwm.exe", "taskhostw.exe", "runtimebroker.exe", "searchhost.exe", "startmenuexperiencehost.exe"];
+  const trustedLocation = text.includes("c:\\windows\\") || text.includes("c:\\program files\\") || text.includes("c:\\program files (x86)\\");
+  return trustedLocation || commonRuntime.some((name) => text.includes(name)) || mainstream.some((name) => text.includes(name)) || protectedSystem.some((name) => text.includes(name));
 }
 
 function confidenceClasses(confidence: string) {

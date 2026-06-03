@@ -63,8 +63,10 @@ function isSecuroSuppressedFinding(finding: { name?: string; path?: string }) {
 function isMainstreamOrRuntimeFinding(finding: { name?: string; path?: string }) {
   const text = `${finding.name || ""} ${finding.path || ""}`.toLowerCase();
   const runtime = ["sqlite3.dll", "libcrypto", "libssl", "python312.dll", "python3.dll", "libffi", "vcruntime", "msvcp140.dll", "api-ms-win", "webview2loader.dll", "base_library.zip"];
-  const mainstream = ["spotify", "chrome", "discord", "steam", "roblox", "microsoft", "nvidia", "amd", "edge"];
-  return runtime.some((name) => text.includes(name)) || mainstream.some((name) => text.includes(name));
+  const mainstream = ["spotify", "chrome", "discord", "steam", "roblox", "microsoft", "nvidia", "amd", "edge", "razer", "logitech", "corsair", "steelseries", "mozilla", "firefox", "intel"];
+  const protectedSystem = ["svchost.exe", "explorer.exe", "winlogon.exe", "csrss.exe", "dwm.exe", "taskhostw.exe", "runtimebroker.exe", "searchhost.exe", "startmenuexperiencehost.exe"];
+  const trustedLocation = text.includes("c:\\windows\\") || text.includes("c:\\program files\\") || text.includes("c:\\program files (x86)\\");
+  return trustedLocation || runtime.some((name) => text.includes(name)) || mainstream.some((name) => text.includes(name)) || protectedSystem.some((name) => text.includes(name));
 }
 
 export function filterReports(reports: ReportRow[], query: string) {

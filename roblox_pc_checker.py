@@ -117,13 +117,18 @@ TRUST_DAMPEN_SIGNERS = (
     "Roblox Corporation",
     "Microsoft Corporation",
     "Microsoft Windows",
+    "Intel",
+    "Intel Corporation",
     "Logitech",
     "Razer",
     "Corsair",
+    "SteelSeries",
     "NVIDIA Corporation",
     "Advanced Micro Devices",
     "AMD",
     "Google LLC",
+    "Google",
+    "Mozilla",
     "Discord Inc.",
     "Valve Corp.",
     "Valve",
@@ -159,6 +164,10 @@ MAINSTREAM_SOFTWARE_PATH_MARKERS = (
     "\\google\\chrome\\",
     "\\microsoft\\edge\\",
     "\\discord\\",
+    "\\razer\\",
+    "\\logitech\\",
+    "\\corsair\\",
+    "\\steelseries\\",
     "\\steam\\",
     "\\steamapps\\",
     "\\nvidia corporation\\",
@@ -166,7 +175,19 @@ MAINSTREAM_SOFTWARE_PATH_MARKERS = (
     "\\amd\\",
     "\\roblox\\",
     "\\microsoft\\",
+    "\\mozilla firefox\\",
 )
+PROTECTED_SYSTEM_PROCESS_NAMES = {
+    "svchost.exe",
+    "explorer.exe",
+    "winlogon.exe",
+    "csrss.exe",
+    "dwm.exe",
+    "taskhostw.exe",
+    "runtimebroker.exe",
+    "searchhost.exe",
+    "startmenuexperiencehost.exe",
+}
 ALLOWLIST_STRONG_BEHAVIOR_TYPES = {
     "sysmon_remote_thread",
     "sysmon_process_access",
@@ -186,6 +207,20 @@ ALLOWLIST_STRONG_BEHAVIOR_CATEGORIES = {
     "Executed Suspicious File",
     "Network File Execution",
     "External Device Execution",
+    "Generic Bypass Method",
+}
+TRUSTED_CONFIRMATION_TYPES = {
+    "sysmon_remote_thread",
+    "sysmon_process_access",
+    "suspicious_module_load",
+    "persistence",
+}
+TRUSTED_CONFIRMATION_CATEGORIES = {
+    "Tampered File",
+    "Suspicious DLL Deletion",
+    "Suspicious File Deletion",
+    "Suspicious File Modification",
+    "Modified File Extension",
     "Generic Bypass Method",
 }
 REAL_BEHAVIOR_EVIDENCE_TYPES = {
@@ -494,6 +529,22 @@ def mainstream_software_path(path: str) -> bool:
     return any(marker in low for marker in MAINSTREAM_SOFTWARE_PATH_MARKERS)
 
 
+def trusted_location_path(path: str) -> bool:
+    if not path or "://" in path:
+        return False
+    low = normalize_path(path).lower()
+    trusted_roots = [
+        os.environ.get("WINDIR", "C:\\Windows"),
+        os.environ.get("ProgramFiles", "C:\\Program Files"),
+        os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+    ]
+    return any(low.startswith(str(root).lower().rstrip("\\/") + os.sep.lower()) for root in trusted_roots if root)
+
+
+def protected_system_process_name(path_or_name: str) -> bool:
+    return Path(path_or_name or "").name.lower() in PROTECTED_SYSTEM_PROCESS_NAMES
+
+
 def operating_system_allowlisted_path(path: str) -> bool:
     if not path or "://" in path:
         return False
@@ -521,11 +572,44 @@ def strong_allowlisted_behavior(finding: dict) -> bool:
     return any(term in evidence_text for term in behavior_terms)
 
 
+def trusted_confirmation_behavior(finding: dict, config: dict) -> bool:
+    if known_bad_hash(finding, config):
+        return True
+    types = set(finding.get("evidence_types", []))
+    categories = set(finding.get("detection_categories", []))
+    if types & TRUSTED_CONFIRMATION_TYPES:
+        return True
+    if categories & TRUSTED_CONFIRMATION_CATEGORIES:
+        return True
+    signer_status = (finding.get("signer", {}) or {}).get("status", "").lower()
+    if signer_status in {"hashmismatch", "nottrusted", "unknownerror"}:
+        return True
+    evidence_text = " ".join(str(x) for x in finding.get("supporting_evidence", [])).lower()
+    return any(term in evidence_text for term in ("remote thread", "process access", "loaded into roblox", "tamper", "hash mismatch", "signature"))
+
+
+def protected_system_confirmation_behavior(finding: dict, config: dict) -> bool:
+    if known_bad_hash(finding, config):
+        return True
+    categories = set(finding.get("detection_categories", []))
+    if categories & {"Tampered File", "Modified File Extension", "Suspicious File Modification"}:
+        return True
+    signer_status = (finding.get("signer", {}) or {}).get("status", "").lower()
+    if signer_status in {"hashmismatch", "nottrusted", "unknownerror"}:
+        return True
+    evidence_text = " ".join(str(x) for x in finding.get("supporting_evidence", [])).lower()
+    return any(term in evidence_text for term in ("tamper", "hash mismatch", "signature", "modified"))
+
+
 def allowlisted_finding(finding: dict, config: dict) -> bool:
     path = finding.get("path", "")
     if finding.get("suppressed") or securo_internal_path(path, config):
         return True
+    if protected_system_process_name(path or finding.get("name", "")):
+        return True
     if common_dependency_path(path) or finding.get("common_dependency"):
+        return True
+    if trusted_location_path(path):
         return True
     if operating_system_allowlisted_path(path):
         return True
@@ -831,7 +915,9 @@ def confirmed_verification_gate(finding: dict, config: dict) -> bool:
         return False
     if not has_supporting_artifact(finding):
         return False
-    if allowlisted_finding(finding, config):
+    if protected_system_process_name(finding.get("path") or finding.get("name", "")) and not protected_system_confirmation_behavior(finding, config):
+        return False
+    if allowlisted_finding(finding, config) and not trusted_confirmation_behavior(finding, config):
         return False
     if not confirmation_threshold_reached(finding, config):
         return False
