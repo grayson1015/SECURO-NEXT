@@ -21,7 +21,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   );
   const extraEvidence = useMemo(() => reportEvidenceGroups(data), [data]);
   const filteredTimeline = useMemo(() => filterTimedItems(data.timeline, timeRange, (item) => item.time), [data.timeline, timeRange]);
-  const filteredFindings = useMemo(() => filterTimedItems(visibleFindings, timeRange, (item) => item.firstSeen), [visibleFindings, timeRange]);
+  const filteredFindings = useMemo(() => filterFindingsForPanel(visibleFindings, timeRange), [visibleFindings, timeRange]);
   const groupedFindings = useMemo(() => ({
     Confirmed: filteredFindings.filter((finding) => findingConfidence(finding) === "Confirmed"),
     Likely: filteredFindings.filter((finding) => findingConfidence(finding) === "Likely"),
@@ -237,6 +237,13 @@ function filterTimedItems<T>(items: T[], range: string, getTimestamp: (item: T) 
   });
 }
 
+function filterFindingsForPanel(findings: SecuroFinding[], range: string) {
+  if (range === "all") return findings;
+  const filtered = filterTimedItems(findings, range, (item) => item.firstSeen);
+  const included = new Set(filtered);
+  return findings.filter((finding) => included.has(finding) || isConfirmedFinding(finding));
+}
+
 function parseTimestamp(value: unknown) {
   if (!value) return null;
   const date = new Date(String(value));
@@ -256,6 +263,10 @@ function findingConfidence(finding: SecuroFinding) {
   if (finding.confidenceLevel === "Confirmed" || finding.classification === "Confirmed Exploit") return "Confirmed";
   if (finding.confidenceLevel === "Likely" || finding.classification === "Suspicious" || Number(finding.score || 0) >= 50) return "Likely";
   return "Possible";
+}
+
+function isConfirmedFinding(finding: SecuroFinding) {
+  return findingConfidence(finding) === "Confirmed";
 }
 
 function isSecuroSuppressedFinding(finding: { name?: string; path?: string }) {
@@ -314,9 +325,9 @@ function buildExportHtml(report: ReportRow) {
   const data = report.report_json;
   const visibleFindings = data.findings.filter((finding) => !isSecuroSuppressedFinding(finding));
   const evidenceGroups = reportEvidenceGroups(data);
-  const entry = (timestamp: unknown, content: string, tag = "div") => {
+  const entry = (timestamp: unknown, content: string, tag = "div", keepVisible = false) => {
     const stamp = parseTimestamp(timestamp)?.toISOString() || "";
-    return `<${tag} class="report-entry"${stamp ? ` data-timestamp="${escape(stamp)}"` : ""}>${content}</${tag}>`;
+    return `<${tag} class="report-entry"${stamp ? ` data-timestamp="${escape(stamp)}"` : ""}${keepVisible ? ` data-keep-visible="true"` : ""}>${content}</${tag}>`;
   };
   const evidence = evidenceGroups.map((group) => `
     <section><h2>${escape(group.title)}</h2>
@@ -345,12 +356,12 @@ function buildExportHtml(report: ReportRow) {
     <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
     <section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section>
     <section><h2>Sessions</h2>${data.sessions.map((session) => entry(session.launchTime || session.exitTime, `<p><b>${escape(session.username || "Unknown user")}</b></p><p>User ID: ${escape(session.userId || "")}</p><p>Place: ${escape(session.placeId || session.gameId || "")}</p><p>Duration: ${escape(session.duration || "unknown")}</p><p>Status: ${escape(session.status || "Clean")}</p>`)).join("") || "<p>No sessions.</p>"}</section>
-    <section><h2>Findings</h2>${visibleFindings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`)).join("") || "<p>No findings.</p>"}</section>
+    <section><h2>Findings</h2>${visibleFindings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`, "div", isConfirmedFinding(finding))).join("") || "<p>No findings.</p>"}</section>
     ${evidence}
     <section><h2>Raw report</h2><pre>${escape(JSON.stringify(data, null, 2))}</pre></section>
     <script>
       function parseEntryTime(entry){var value=entry.getAttribute("data-timestamp");if(!value)return null;var time=Date.parse(value);return Number.isNaN(time)?null:time}
-      function applyReportTimeFilter(){var select=document.getElementById("report-time-filter");var selected=select?select.value:"7";var cutoff=selected==="all"?0:Date.now()-(Number(selected)*24*60*60*1000);document.querySelectorAll(".report-entry").forEach(function(entry){var time=parseEntryTime(entry);var show=selected==="all"||!time||time>=cutoff;entry.classList.toggle("hidden-by-time",!show)})}
+      function applyReportTimeFilter(){var select=document.getElementById("report-time-filter");var selected=select?select.value:"7";var cutoff=selected==="all"?0:Date.now()-(Number(selected)*24*60*60*1000);document.querySelectorAll(".report-entry").forEach(function(entry){var keepVisible=entry.getAttribute("data-keep-visible")==="true";var time=parseEntryTime(entry);var show=keepVisible||selected==="all"||!time||time>=cutoff;entry.classList.toggle("hidden-by-time",!show)})}
       document.getElementById("report-time-filter").addEventListener("change",applyReportTimeFilter);applyReportTimeFilter();
     </script>
     </body></html>`;

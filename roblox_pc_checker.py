@@ -3121,7 +3121,8 @@ def render_html(report: dict) -> str:
                 f"<div class='warn'><h4>{html.escape(d.get('category', 'Detection'))}</h4><p><b>File:</b> {html.escape(f['name'])}</p><p><b>Path:</b> {html.escape(f['path'])}</p><p><b>Detection:</b> {html.escape(d.get('category', ''))}</p><p><b>Reason:</b> {html.escape(d.get('reason', ''))}</p><p><b>Risk:</b> {html.escape(d.get('risk', ''))}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><p><b>First seen:</b> {html.escape(f['firstSeen'])}</p></div>"
                 for d in f.get("detections", [])
             )
-            findings_html += f"<details class='report-entry finding-card confidence-{html.escape(group.lower())}' open{html_data_timestamp(f.get('firstSeen'))}><summary>{html.escape(f['name'])} - {html.escape(group)} - {f['score']} points</summary>{warnings}<p><b>Path:</b> {html.escape(f['path'])}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><h4>Score</h4><ul>{breakdown}</ul><h4>Evidence</h4><ul>{evidence}</ul><p>{html.escape(f['attributionExplanation'])}</p></details>"
+            keep_visible = " data-keep-visible='true'" if group == "Confirmed" else ""
+            findings_html += f"<details class='report-entry finding-card confidence-{html.escape(group.lower())}' open{html_data_timestamp(f.get('firstSeen'))}{keep_visible}><summary>{html.escape(f['name'])} - {html.escape(group)} - {f['score']} points</summary>{warnings}<p><b>Path:</b> {html.escape(f['path'])}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><h4>Score</h4><ul>{breakdown}</ul><h4>Evidence</h4><ul>{evidence}</ul><p>{html.escape(f['attributionExplanation'])}</p></details>"
     session_cards = "".join(
         f"<div class='session report-entry {html.escape((s.get('status') or 'Clean').lower())}'{html_data_timestamp(s.get('launchTime'))}><h3>{html.escape(s.get('username') or 'Unknown')}</h3><p><b>Display Name:</b> {html.escape(s.get('displayName', ''))}</p><p><b>User ID:</b> {html.escape(s.get('userId', ''))}</p><p><b>Place ID:</b> {html.escape(s.get('placeId', ''))}</p><p><b>Job ID:</b> {html.escape(s.get('jobId', ''))}</p><p><b>Duration:</b> {html.escape(s.get('duration', 'unknown'))}</p><p><b>Status:</b> {html.escape(s.get('status', 'Clean'))}</p>{''.join('<p><b>Detection:</b> ' + html.escape(d.get('name','')) + ' ' + html.escape(d.get('path','')) + '</p>' for d in s.get('linkedDetections', []))}</div>"
         for s in report["sessions"]
@@ -3166,6 +3167,10 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
       cutoff.setDate(cutoff.getDate() - Number(selected));
     }}
     document.querySelectorAll(".report-entry").forEach(function(entry) {{
+      if (entry.getAttribute("data-keep-visible") === "true") {{
+        entry.classList.remove("hidden-by-time");
+        return;
+      }}
       if (selected === "all") {{
         entry.classList.remove("hidden-by-time");
         return;
@@ -3264,6 +3269,9 @@ class SecuroApp:
         self.days = days
         self.session_id = ""
         self.upload_token = ""
+        self.running = False
+        self.last_status_message = ""
+        self.last_status_time = dt.datetime.min
         self.drag_x = 0
         self.drag_y = 0
         self.storage_dirs = ensure_storage_dirs(config)
@@ -3434,9 +3442,23 @@ class SecuroApp:
             self.details_visible = True
 
     def log(self, message: str):
-        self.root.after(0, self._append_status, message)
+        now = dt.datetime.now()
+        if message == self.last_status_message and (now - self.last_status_time).total_seconds() < 0.5:
+            return
+        self.last_status_message = message
+        self.last_status_time = now
+        self.safe_after(self._append_status, message)
+
+    def safe_after(self, callback, *args):
+        try:
+            if self.root.winfo_exists():
+                self.root.after(0, callback, *args)
+        except Exception:
+            pass
 
     def _append_status(self, message: str):
+        if not self.status.winfo_exists():
+            return
         self.status.configure(state="normal")
         self.status.insert("end", message + "\n")
         self.status.see("end")
@@ -3444,12 +3466,16 @@ class SecuroApp:
 
     def set_busy(self, busy: bool):
         def apply():
+            if not self.start_button.winfo_exists() or not self.pin_entry.winfo_exists():
+                return
             self.start_button.configure(state="disabled" if busy else "normal")
             self.pin_entry.configure(state="disabled" if busy else "normal")
 
-        self.root.after(0, apply)
+        self.safe_after(apply)
 
     def start_scan(self):
+        if self.running:
+            return
         pin = self.pin_var.get().strip()
         if not re.fullmatch(r"\d{6}", pin):
             messagebox.showerror("Securo", "Enter a valid 6-digit PIN.")
@@ -3457,6 +3483,9 @@ class SecuroApp:
         if not self.api_base_url:
             messagebox.showerror("Securo", "Missing api_base_url in config.json.")
             return
+        self.running = True
+        self.start_button.configure(state="disabled")
+        self.pin_entry.configure(state="disabled")
         self.set_busy(True)
         threading.Thread(target=self.worker, args=(pin,), daemon=True).start()
 
@@ -3467,6 +3496,7 @@ class SecuroApp:
             verified, verify_result = verify_pin(self.api_base_url, pin)
             if not verified:
                 self.log(f"Invalid or expired PIN: {verify_result}")
+                self.running = False
                 self.set_busy(False)
                 return
 
@@ -3484,17 +3514,20 @@ class SecuroApp:
             if uploaded:
                 self.log("Report uploaded successfully")
                 write_app_log(self.config, "Report uploaded successfully")
-                self.root.after(0, self.show_close)
+                self.safe_after(self.show_close)
             else:
                 self.log(f"Upload failed: {upload_message}")
                 write_app_log(self.config, f"Upload failed: {upload_message}")
+                self.running = False
                 self.set_busy(False)
         except Exception as exc:
             self.log(f"Error: {exc}")
             write_app_log(self.config, f"Error: {exc}")
+            self.running = False
             self.set_busy(False)
 
     def show_close(self):
+        self.running = False
         self.close_button.pack(pady=(10, 0))
 
 
