@@ -305,6 +305,19 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(flagged_result["classification"], "Confirmed Exploit")
         self.assertIn("Executor Keyword Match", flagged_result.get("detection_categories", []))
 
+    def test_engine_detected_executor_filename_confirms(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Desktop\\OpXOyuApWKTlFzrV (2)\\Potassium.exe", "Potassium.exe", "file_system", config)
+        checker.add_detection(finding, "DotNetExecutable", "C#/.NET assembly metadata found", "Medium", 25)
+        checker.add_detection(finding, "Generic Packed File", "High entropy unsigned executable content", "High", 35)
+        checker.add_detection(finding, "A1", "A1 indicator found in file metadata/content", "Medium", 20)
+        finding["first_seen"] = "2026-06-04 12:00:00"
+        finding["score"] = 455
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertEqual(result["classification"], "Confirmed Exploit")
+        self.assertEqual(result["confidence_level"], "Confirmed")
+        self.assertIn("Executor Keyword Match", result.get("detection_categories", []))
+
     def test_common_runtime_dependencies_never_confirm_from_score(self):
         config = test_config()
         for name in ["sqlite3.dll", "libcrypto-3-x64.dll", "python312.dll", "python3.dll", "libffi-8.dll", "vcruntime140.dll", "msvcp140.dll"]:

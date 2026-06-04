@@ -938,6 +938,19 @@ def confirmed_verification_gate(finding: dict, config: dict) -> bool:
     return True
 
 
+def engine_detected_executor_artifact(finding: dict, config: dict) -> bool:
+    if not executor_keyword_match(finding, config):
+        return False
+    categories = set(finding.get("detection_categories", [])) - {"Executor Keyword Match"}
+    detections = [d for d in finding.get("detections", []) if d.get("category") != "Executor Keyword Match"]
+    local_engine_hits = len(categories) + len(detections)
+    score = int(finding.get("score", 0) or 0)
+    suspicious_threshold = int(config.get("category_thresholds", {}).get("suspicious", 35))
+    if local_engine_hits >= 2:
+        return True
+    return bool(local_engine_hits >= 1 and score >= suspicious_threshold)
+
+
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
     if not confirmed_verification_gate(finding, config):
@@ -945,6 +958,8 @@ def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     if known_bad_hash(finding, config):
         return True
     if real_behavioral_evidence(finding):
+        return True
+    if engine_detected_executor_artifact(finding, config):
         return True
     if executor_keyword_match(finding, config) and (categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES):
         return True
