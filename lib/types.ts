@@ -69,6 +69,7 @@ export type PinRow = {
   files_scanned?: number | null;
   last_successful_operation?: string | null;
   status_updated_at?: string | null;
+  diagnostics?: Record<string, unknown> | null;
 };
 
 export type ReportRow = {
@@ -82,6 +83,36 @@ export type ReportRow = {
   risk_level: string;
   evidence_score: number;
   report_json: SecuroReportJson;
+};
+
+export type ReportSummaryRow = {
+  id: string;
+  pin_id: string;
+  owner_user_id: string | null;
+  owner_email?: string | null;
+  uploaded_at: string;
+  hostname: string;
+  scan_time: string;
+  risk_level: string;
+  evidence_score: number;
+  username?: string | null;
+  display_name?: string | null;
+  user_id?: string | null;
+  place_id?: string | null;
+  game_id?: string | null;
+  job_id?: string | null;
+  duration?: string | null;
+  session_status?: string | null;
+  sessions_count: number;
+  findings_count: number;
+  confirmed_count: number;
+  likely_count: number;
+  possible_count: number;
+  packed_count: number;
+  dotnet_count: number;
+  autoit_count: number;
+  tampered_count: number;
+  evidence_coverage: number;
 };
 
 export type AllowedUserRow = {

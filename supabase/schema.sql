@@ -426,14 +426,43 @@ begin
 end;
 $$;
 
+drop function if exists public.list_pins_by_key(text, text);
+
 create or replace function public.list_pins_by_key(input_email text, input_key text)
-returns table(id uuid, pin_code text, owner_user_id uuid, owner_email text, status text, created_at timestamptz, expires_at timestamptz)
+returns table(
+  id uuid,
+  pin_code text,
+  owner_user_id uuid,
+  owner_email text,
+  status text,
+  created_at timestamptz,
+  expires_at timestamptz,
+  scan_stage text,
+  scan_progress integer,
+  files_scanned integer,
+  last_successful_operation text,
+  diagnostics jsonb,
+  status_updated_at timestamptz
+)
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select p.id, p.pin_code, p.owner_user_id, p.owner_email, p.status, p.created_at, p.expires_at
+  select
+    p.id,
+    p.pin_code,
+    p.owner_user_id,
+    p.owner_email,
+    p.status,
+    p.created_at,
+    p.expires_at,
+    p.scan_stage,
+    p.scan_progress,
+    p.files_scanned,
+    p.last_successful_operation,
+    p.diagnostics,
+    p.status_updated_at
   from public.pins p
   where public.validate_key_session(input_email, input_key)
     and lower(p.owner_email) = lower(input_email)
@@ -453,6 +482,112 @@ as $$
   where public.validate_key_session(input_email, input_key)
     and lower(r.owner_email) = lower(input_email)
   order by r.uploaded_at desc;
+$$;
+
+create or replace function public.list_report_summaries_by_key(input_email text, input_key text, input_limit integer default 100)
+returns table(
+  id uuid,
+  pin_id uuid,
+  owner_user_id uuid,
+  owner_email text,
+  uploaded_at timestamptz,
+  hostname text,
+  scan_time timestamptz,
+  risk_level text,
+  evidence_score integer,
+  username text,
+  display_name text,
+  user_id text,
+  place_id text,
+  game_id text,
+  job_id text,
+  duration text,
+  session_status text,
+  sessions_count integer,
+  findings_count integer,
+  confirmed_count integer,
+  likely_count integer,
+  possible_count integer,
+  packed_count integer,
+  dotnet_count integer,
+  autoit_count integer,
+  tampered_count integer,
+  evidence_coverage integer
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    r.id,
+    r.pin_id,
+    r.owner_user_id,
+    r.owner_email,
+    r.uploaded_at,
+    r.hostname,
+    r.scan_time,
+    r.risk_level,
+    r.evidence_score,
+    r.report_json #>> '{sessions,0,username}' as username,
+    r.report_json #>> '{sessions,0,displayName}' as display_name,
+    r.report_json #>> '{sessions,0,userId}' as user_id,
+    r.report_json #>> '{sessions,0,placeId}' as place_id,
+    r.report_json #>> '{sessions,0,gameId}' as game_id,
+    r.report_json #>> '{sessions,0,jobId}' as job_id,
+    r.report_json #>> '{sessions,0,duration}' as duration,
+    r.report_json #>> '{sessions,0,status}' as session_status,
+    jsonb_array_length(coalesce(r.report_json->'sessions', '[]'::jsonb))::integer as sessions_count,
+    jsonb_array_length(coalesce(r.report_json->'findings', '[]'::jsonb))::integer as findings_count,
+    (
+      select count(*)::integer
+      from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) f
+      where lower(coalesce(f->>'confidenceLevel', '')) = 'confirmed'
+        or lower(coalesce(f->>'classification', '')) = 'confirmed exploit'
+    ) as confirmed_count,
+    (
+      select count(*)::integer
+      from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) f
+      where lower(coalesce(f->>'confidenceLevel', '')) = 'likely'
+        or lower(coalesce(f->>'classification', '')) = 'suspicious'
+    ) as likely_count,
+    (
+      select count(*)::integer
+      from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) f
+      where lower(coalesce(f->>'confidenceLevel', 'possible')) = 'possible'
+        and lower(coalesce(f->>'classification', '')) <> 'confirmed exploit'
+    ) as possible_count,
+    (
+      select count(*)::integer
+      from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) f
+      where lower(f::text) like any(array['%packed%', '%upx%', '%vmprotect%', '%themida%'])
+    ) as packed_count,
+    (
+      select count(*)::integer
+      from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) f
+      where lower(f::text) like any(array['%dotnet%', '%suspicious net file%'])
+    ) as dotnet_count,
+    (
+      select count(*)::integer
+      from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) f
+      where lower(f::text) like any(array['%autoit%', '%autohotkey%'])
+    ) as autoit_count,
+    (
+      select count(*)::integer
+      from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) f
+      where lower(f::text) like '%tampered file%'
+    ) as tampered_count,
+    coalesce((
+      select round(100.0 * count(*) filter (
+        where value not in ('false'::jsonb, 'null'::jsonb, '0'::jsonb, '""'::jsonb)
+      ) / nullif(count(*), 0))::integer
+      from jsonb_each(coalesce(r.report_json->'evidenceSources', '{}'::jsonb))
+    ), 0) as evidence_coverage
+  from public.reports r
+  where public.validate_key_session(input_email, input_key)
+    and lower(r.owner_email) = lower(input_email)
+  order by r.uploaded_at desc
+  limit least(greatest(coalesce(input_limit, 100), 1), 250);
 $$;
 
 create or replace function public.get_report_by_key(input_email text, input_key text, input_report_id uuid)
@@ -555,6 +690,7 @@ grant execute on function public.validate_key_session(text, text) to anon, authe
 grant execute on function public.create_pin_by_key(text, text, text, timestamptz) to anon, authenticated;
 grant execute on function public.list_pins_by_key(text, text) to anon, authenticated;
 grant execute on function public.list_reports_by_key(text, text) to anon, authenticated;
+grant execute on function public.list_report_summaries_by_key(text, text, integer) to anon, authenticated;
 grant execute on function public.get_report_by_key(text, text, uuid) to anon, authenticated;
 
 create or replace function public.is_securo_owner()

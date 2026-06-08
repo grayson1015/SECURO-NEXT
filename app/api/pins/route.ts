@@ -15,7 +15,8 @@ export async function GET() {
   const pins = (data || []).map((pin: Record<string, unknown>) => ({
     ...pin,
     pin_code: pin.pin_code || pin.pin || pin.pinCode || "",
-    status: pin.status || "queued"
+    status: pin.status || "queued",
+    diagnostics: pin.diagnostics || {}
   }));
   return NextResponse.json({ ok: true, pins });
 }

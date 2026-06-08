@@ -1,4 +1,4 @@
-import type { ReportRow, SecuroReportJson } from "@/lib/types";
+import type { ReportRow, ReportSummaryRow, SecuroReportJson } from "@/lib/types";
 
 export function validateReportJson(report: unknown): report is SecuroReportJson {
   if (!report || typeof report !== "object") return false;
@@ -87,6 +87,27 @@ export function filterReports(reports: ReportRow[], query: string) {
         session.gameId,
         session.jobId
       ])
+    ].join(" ").toLowerCase();
+    return text.includes(needle);
+  });
+}
+
+export function filterReportSummaries(reports: ReportSummaryRow[], query: string) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return reports;
+  return reports.filter((report) => {
+    const text = [
+      report.hostname,
+      report.risk_level,
+      report.evidence_score,
+      report.username,
+      report.display_name,
+      report.user_id,
+      report.place_id,
+      report.game_id,
+      report.job_id,
+      report.duration,
+      report.session_status
     ].join(" ").toLowerCase();
     return text.includes(needle);
   });
