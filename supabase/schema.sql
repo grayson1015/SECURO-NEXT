@@ -57,7 +57,7 @@ create table if not exists public.pins (
   pin_code text not null,
   owner_user_id uuid references auth.users(id) on delete cascade,
   owner_email text,
-  status text not null default 'pending' check (status in ('pending', 'connected', 'completed')),
+  status text not null default 'queued' check (status in ('queued', 'scanning', 'completed', 'failed', 'timeout')),
   created_at timestamptz not null default now(),
   expires_at timestamptz not null default now() + interval '15 minutes'
 );
@@ -79,6 +79,21 @@ alter table public.pins alter column owner_user_id drop not null;
 alter table public.reports alter column owner_user_id drop not null;
 alter table public.pins add column if not exists owner_email text;
 alter table public.reports add column if not exists owner_email text;
+alter table public.pins add column if not exists scan_stage text;
+alter table public.pins add column if not exists scan_progress integer not null default 0;
+alter table public.pins add column if not exists files_scanned integer not null default 0;
+alter table public.pins add column if not exists last_successful_operation text;
+alter table public.pins add column if not exists diagnostics jsonb not null default '{}'::jsonb;
+alter table public.pins add column if not exists status_updated_at timestamptz not null default now();
+alter table public.pins alter column status set default 'queued';
+update public.pins set status = 'queued' where status = 'pending';
+update public.pins set status = 'scanning' where status = 'connected';
+do $$
+begin
+  alter table public.pins drop constraint if exists pins_status_check;
+  alter table public.pins
+    add constraint pins_status_check check (status in ('queued', 'scanning', 'completed', 'failed', 'timeout'));
+end $$;
 
 create index if not exists pins_owner_status_idx on public.pins(owner_user_id, status, created_at desc);
 create index if not exists pins_pin_code_status_idx on public.pins(pin_code, status, expires_at);
@@ -235,7 +250,7 @@ begin
   into matched_pin
   from public.pins
   where pin_code = input_pin
-    and status = 'pending'
+    and status = 'queued'
     and expires_at > now()
   order by created_at desc
   limit 1;
@@ -246,10 +261,55 @@ begin
   end if;
 
   update public.pins
-  set status = 'connected'
+  set status = 'scanning'
   where id = matched_pin.id;
 
   return query select true, null::text, matched_pin.id;
+end;
+$$;
+
+create or replace function public.update_pin_scan_status(
+  input_pin text,
+  input_status text,
+  input_diagnostics jsonb default '{}'::jsonb
+)
+returns table(ok boolean, error text)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  matched_pin public.pins;
+begin
+  if input_status not in ('queued', 'scanning', 'completed', 'failed', 'timeout') then
+    return query select false, 'invalid_status';
+    return;
+  end if;
+
+  select *
+  into matched_pin
+  from public.pins
+  where pin_code = input_pin
+    and status in ('queued', 'scanning', 'completed', 'failed', 'timeout')
+  order by created_at desc
+  limit 1;
+
+  if matched_pin.id is null then
+    return query select false, 'invalid_or_expired_pin';
+    return;
+  end if;
+
+  update public.pins
+  set status = input_status,
+      scan_stage = coalesce(input_diagnostics->>'stage', scan_stage),
+      scan_progress = coalesce(nullif(input_diagnostics->>'progressPercent', '')::integer, scan_progress),
+      files_scanned = coalesce(nullif(input_diagnostics->>'filesScanned', '')::integer, files_scanned),
+      last_successful_operation = coalesce(input_diagnostics->>'lastSuccessfulOperation', last_successful_operation),
+      diagnostics = coalesce(input_diagnostics, '{}'::jsonb),
+      status_updated_at = now()
+  where id = matched_pin.id;
+
+  return query select true, null::text;
 end;
 $$;
 
@@ -361,7 +421,7 @@ begin
 
   return query
   insert into public.pins(pin_code, owner_email, status, expires_at)
-  values (input_pin, lower(input_email), 'pending', input_expires_at)
+  values (input_pin, lower(input_email), 'queued', input_expires_at)
   returning pins.id, pins.pin_code, pins.owner_user_id, pins.owner_email, pins.status, pins.created_at, pins.expires_at;
 end;
 $$;
@@ -444,8 +504,11 @@ begin
   into matched_pin
   from public.pins
   where pin_code = input_pin
-    and status in ('pending', 'connected')
-    and expires_at > now()
+    and status in ('queued', 'scanning')
+    and (
+      (status = 'queued' and expires_at > now())
+      or status = 'scanning'
+    )
   order by created_at desc
   limit 1;
 
@@ -485,6 +548,7 @@ end;
 $$;
 
 grant execute on function public.connect_pin(text) to anon, authenticated;
+grant execute on function public.update_pin_scan_status(text, text, jsonb) to anon, authenticated;
 grant execute on function public.upload_report_by_pin(text, text, text, integer, jsonb) to anon, authenticated;
 grant execute on function public.key_login(text, text) to anon, authenticated;
 grant execute on function public.validate_key_session(text, text) to anon, authenticated;

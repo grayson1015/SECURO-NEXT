@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
     pin: {
       ...result,
       pin_code: result.pin_code || pin,
-      status: result.status || "pending",
+      status: result.status || "queued",
       expires_at: result.expires_at || expiresAt
     }
   });

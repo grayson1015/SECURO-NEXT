@@ -277,7 +277,7 @@ function normalizePin(pin: Partial<PinRow> & Record<string, unknown>): PinRow {
     pin_code: displayPin(pin),
     owner_user_id: (pin.owner_user_id as string | null) || null,
     owner_email: (pin.owner_email as string | null) || null,
-    status: (pin.status as PinRow["status"]) || "pending",
+    status: ((pin.status || "queued") as PinRow["status"]),
     created_at: String(pin.created_at || new Date().toISOString()),
     expires_at: String(pin.expires_at || new Date(Date.now() + 15 * 60 * 1000).toISOString())
   };

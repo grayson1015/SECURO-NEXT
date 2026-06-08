@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -502,6 +503,34 @@ class CoreTests(unittest.TestCase):
             checker.post_json = original
         self.assertFalse(ok)
         self.assertIn("network down", result)
+
+    def test_diagnostic_report_schema_for_failed_scan(self):
+        config = test_config()
+        diag = checker.ScanDiagnostics(config)
+        diag.progress("Checking file artifacts", stage="Checking file artifacts", percent=34, files_scanned=1500)
+        report = checker.diagnostic_report("timeout", "unit timeout", diag, config)
+        self.assertEqual(report["scanStatus"], "timeout")
+        self.assertIn("scanTime", report)
+        self.assertIn("findings", report)
+        self.assertIn("limitations", report)
+        self.assertTrue(report["warningLogs"])
+        self.assertEqual(report["diagnostics"]["filesScanned"], 1500)
+
+    def test_run_scan_with_timeout_returns_terminal_report(self):
+        config = test_config()
+        original = checker.build_scan_report_with_progress
+        try:
+            def slow_scan(days, cfg, progress):
+                time.sleep(2)
+                return {}
+
+            checker.build_scan_report_with_progress = slow_scan
+            status, report = checker.run_scan_with_timeout(7, config, lambda message: None, timeout_seconds=1)
+        finally:
+            checker.build_scan_report_with_progress = original
+        self.assertEqual(status, "timeout")
+        self.assertEqual(report["scanStatus"], "timeout")
+        self.assertIn("Last successful operation", " ".join(report["limitations"]))
 
 
 if __name__ == "__main__":

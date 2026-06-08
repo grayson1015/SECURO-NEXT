@@ -7,6 +7,7 @@ import json
 import math
 import os
 import platform
+import queue
 import re
 import shutil
 import socket
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -291,6 +293,7 @@ def load_config() -> dict:
         config = {}
     config.setdefault("api_base_url", DEFAULT_API_BASE_URL)
     config.setdefault("scan_days", 7)
+    config.setdefault("scan_timeout_seconds", 900)
     config.setdefault("storage_base_dir", "")
     return config
 
@@ -1629,7 +1632,7 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
     return list(findings.values()), timeline
 
 
-def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbose=False) -> tuple[list[dict], list[dict]]:
+def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbose=False, progress=None) -> tuple[list[dict], list[dict]]:
     # File-system artifacts are indirect: they show exploit-like files existed, especially near Roblox play sessions.
     findings = {}
     timeline = []
@@ -1646,6 +1649,8 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
                 break
             for filename in filenames:
                 seen_files += 1
+                if progress and seen_files % 500 == 0:
+                    progress(f"Checking file artifacts... files scanned={seen_files}", files_scanned=seen_files)
                 if seen_files > max_files:
                     break
                 path = Path(dirpath) / filename
@@ -2720,33 +2725,180 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     return report
 
 
+def emit_progress(progress, stage: str, percent: int | None = None, files_scanned: int | None = None):
+    message = stage if percent is None else f"{stage} ({percent}%)"
+    try:
+        progress(message, stage=stage, percent=percent, files_scanned=files_scanned)
+    except TypeError:
+        progress(message)
+
+
+class ScanDiagnostics:
+    def __init__(self, config: dict):
+        self.config = config
+        self.started_at = iso_now()
+        self.stage = "queued"
+        self.percent = 0
+        self.files_scanned = 0
+        self.last_successful_operation = "queued"
+        self.events: list[dict] = []
+        self.errors: list[str] = []
+
+    def progress(self, message: str, stage: str | None = None, percent: int | None = None, files_scanned: int | None = None):
+        if stage:
+            self.stage = stage
+        else:
+            self.stage = message
+        if percent is not None:
+            self.percent = percent
+        if files_scanned is not None:
+            self.files_scanned = max(self.files_scanned, int(files_scanned or 0))
+        self.last_successful_operation = message
+        event = {
+            "time": iso_now(),
+            "stage": self.stage,
+            "progressPercent": self.percent,
+            "filesScanned": self.files_scanned,
+            "message": message,
+        }
+        self.events.append(event)
+        write_app_log(self.config, f"stage={self.stage} progress={self.percent}% files={self.files_scanned} message={message}")
+
+    def fail(self, message: str):
+        self.errors.append(message)
+        write_app_log(self.config, f"scan diagnostic error: {message}")
+
+    def snapshot(self) -> dict:
+        return {
+            "startedAt": self.started_at,
+            "stage": self.stage,
+            "progressPercent": self.percent,
+            "filesScanned": self.files_scanned,
+            "lastSuccessfulOperation": self.last_successful_operation,
+            "events": self.events[-80:],
+            "errors": self.errors[-20:],
+        }
+
+
+def diagnostic_report(status: str, reason: str, diagnostics: ScanDiagnostics, config: dict) -> dict:
+    scan_time = iso_now()
+    system = collect_system_info()
+    system["scan_time"] = scan_time
+    status_label = "timeout" if status == "timeout" else "failed"
+    return {
+        "scanTime": scan_time,
+        "hostname": system.get("hostname", socket.gethostname()),
+        "highestResult": status_label,
+        "confidence": "diagnostic",
+        "evidenceSources": {"diagnosticReport": True, "partialScan": True},
+        "timeline": [
+            {
+                "time": event.get("time", ""),
+                "source": "Scan diagnostics",
+                "text": f"{event.get('stage')} - {event.get('message')} ({event.get('progressPercent', 0)}%, files={event.get('filesScanned', 0)})",
+                "confidence": "Possible",
+            }
+            for event in diagnostics.events[-40:]
+        ],
+        "sessions": [],
+        "findings": [],
+        "detectLogs": [],
+        "correlationFindings": [],
+        "warningLogs": [{
+            "detectionName": f"Scan {status_label}",
+            "severity": "High" if status == "timeout" else "Medium",
+            "explanation": reason,
+            "evidencePath": "Securo scan diagnostics",
+            "timestamp": scan_time,
+            "manualReviewRequired": True,
+            "confidenceLevel": "medium",
+            "type": "Warning",
+        }],
+        "recoveryArtifacts": [],
+        "antivirusLogs": [],
+        "engineResults": [],
+        "limitations": [
+            reason,
+            f"Last successful operation: {diagnostics.last_successful_operation}",
+            f"Last stage: {diagnostics.stage}",
+            f"Files scanned before terminal state: {diagnostics.files_scanned}",
+        ],
+        "scanDays": int(config.get("scan_days", 7)),
+        "topScore": 0,
+        "systemInfo": system,
+        "scanStatus": status_label,
+        "diagnostics": diagnostics.snapshot(),
+        "finalStatement": "The scan did not complete normally. A diagnostic report was generated so the PIN/session can reach a terminal state.",
+    }
+
+
+def run_scan_with_timeout(days: int, config: dict, progress, timeout_seconds: int) -> tuple[str, dict]:
+    diagnostics = ScanDiagnostics(config)
+
+    def tracked_progress(message: str, stage: str | None = None, percent: int | None = None, files_scanned: int | None = None):
+        diagnostics.progress(message, stage=stage, percent=percent, files_scanned=files_scanned)
+        try:
+            progress(message)
+        except TypeError:
+            progress(str(message))
+
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def scan_target():
+        try:
+            report = build_scan_report_with_progress(days, config, tracked_progress)
+            report["scanStatus"] = "completed"
+            report["diagnostics"] = diagnostics.snapshot()
+            try:
+                result_queue.put_nowait(("completed", report))
+            except queue.Full:
+                pass
+        except Exception as exc:
+            diagnostics.fail(str(exc))
+            try:
+                result_queue.put_nowait(("failed", diagnostic_report("failed", str(exc), diagnostics, config)))
+            except queue.Full:
+                pass
+
+    diagnostics.progress("Scan started", stage="scanning", percent=0)
+    worker = threading.Thread(target=scan_target, daemon=True)
+    worker.start()
+    try:
+        return result_queue.get(timeout=max(1, int(timeout_seconds or 900)))
+    except queue.Empty:
+        reason = f"Scan exceeded configured timeout of {timeout_seconds} seconds while at stage '{diagnostics.stage}'."
+        diagnostics.fail(reason)
+        return "timeout", diagnostic_report("timeout", reason, diagnostics, config)
+
+
 def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     scan_time = iso_now()
-    progress("Collecting Roblox logs...")
+    emit_progress(progress, "Scan started", 0)
+    emit_progress(progress, "Collecting Roblox logs", 5)
     sessions_raw, roblox_timeline = parse_roblox_logs(days, config)
-    progress("Checking event logs...")
+    emit_progress(progress, "Checking event logs", 12)
     process_findings, process_timeline = collect_process_evidence(days, config, sessions_raw)
-    progress("Checking Prefetch artifacts...")
+    emit_progress(progress, "Checking Prefetch artifacts", 22)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
-    progress("Checking file artifacts...")
-    file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False)
-    progress("Checking PowerShell history...")
+    emit_progress(progress, "Checking file artifacts", 34)
+    file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
+    emit_progress(progress, "Checking PowerShell history", 50)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
-    progress("Checking Defender artifacts...")
+    emit_progress(progress, "Checking Defender artifacts", 58)
     defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
-    progress("Checking persistence entries...")
+    emit_progress(progress, "Checking persistence entries", 66)
     persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
-    progress("Checking browser artifacts...")
+    emit_progress(progress, "Checking browser artifacts", 74)
     browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
-    progress("Checking ShellBag Analyzer context...")
+    emit_progress(progress, "Checking ShellBag Analyzer context", 80)
     shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
-    progress("Checking Recycle Bin context...")
+    emit_progress(progress, "Checking Recycle Bin context", 84)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
-    progress("Checking recovery metadata...")
+    emit_progress(progress, "Checking recovery metadata", 88)
     recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
-    progress("Checking warning indicators...")
+    emit_progress(progress, "Checking warning indicators", 92)
     warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
-    progress("Building report...")
+    emit_progress(progress, "Building report", 96)
     raw_timeline = (
         roblox_timeline
         + process_timeline
@@ -2779,7 +2931,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     top_score = max([f.get("score", 0) for f in findings], default=0)
     system = collect_system_info()
     system["scan_time"] = scan_time
-    return {
+    report = {
         "scanTime": scan_time,
         "hostname": system.get("hostname", ""),
         "highestResult": highest_result,
@@ -2802,6 +2954,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         if highest_result not in ["Confirmed Exploit", "Suspicious"]
         else "Confirmed exploit or suspicious Roblox exploit/injection evidence was found in available artifacts.",
     }
+    emit_progress(progress, "Scan completed", 100)
+    return report
 
 
 def save_local_reports(report: dict, config: dict, html_only=False, json_only=False) -> list[Path]:
@@ -3245,6 +3399,17 @@ def upload_report(api_base_url: str, session_id: str, upload_token: str, report:
     return False, str(data)
 
 
+def update_scan_status(api_base_url: str, pin: str, status: str, diagnostics: dict | None = None) -> tuple[bool, str]:
+    url = api_base_url.rstrip("/") + "/api/scan-status"
+    payload = {"pin": pin, "status": status, "diagnostics": diagnostics or {}}
+    ok, data = post_json(url, payload, timeout=3, retries=0)
+    if ok and isinstance(data, dict) and data.get("ok"):
+        return True, "ok"
+    if ok:
+        return False, json.dumps(data)[:300]
+    return False, str(data)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Read-only Roblox-focused PC evidence checker")
     p.add_argument("--cli", action="store_true", help="Run the old command-line flow")
@@ -3503,8 +3668,29 @@ class SecuroApp:
             self.log("PIN verified")
             self.session_id = verify_result["sessionId"]
             self.upload_token = verify_result["uploadToken"]
+            update_scan_status(self.api_base_url, pin, "scanning", {"stage": "PIN verified"})
 
-            report = build_scan_report_with_progress(self.days, self.config, self.log)
+            timeout_seconds = int(self.config.get("scan_timeout_seconds", 900) or 900)
+            last_ping = {"time": 0.0, "percent": -1, "stage": ""}
+
+            def gui_progress(message: str):
+                self.log(message)
+                now = time.monotonic()
+                stage = message.split(" (", 1)[0]
+                percent_match = re.search(r"\((\d+)%\)", message)
+                files_match = re.search(r"files scanned=(\d+)", message)
+                percent = int(percent_match.group(1)) if percent_match else last_ping["percent"]
+                files_scanned = int(files_match.group(1)) if files_match else 0
+                if stage != last_ping["stage"] or percent != last_ping["percent"] or now - last_ping["time"] >= 10:
+                    last_ping.update({"time": now, "percent": percent, "stage": stage})
+                    update_scan_status(self.api_base_url, pin, "scanning", {
+                        "stage": stage,
+                        "progressPercent": max(percent, 0),
+                        "filesScanned": files_scanned,
+                        "lastSuccessfulOperation": message,
+                    })
+
+            scan_status, report = run_scan_with_timeout(self.days, self.config, gui_progress, timeout_seconds)
             written = save_local_reports(report, self.config)
             for path in written:
                 self.log(f"Saved: {path}")
@@ -3512,17 +3698,25 @@ class SecuroApp:
             self.log("Calling POST /api/upload-report...")
             uploaded, upload_message = upload_report(self.api_base_url, self.session_id, self.upload_token, report)
             if uploaded:
-                self.log("Report uploaded successfully")
-                write_app_log(self.config, "Report uploaded successfully")
+                if scan_status in {"failed", "timeout"}:
+                    update_scan_status(self.api_base_url, pin, scan_status, report.get("diagnostics", {}))
+                    self.log(f"Diagnostic report uploaded; scan marked {scan_status}")
+                    write_app_log(self.config, f"Diagnostic report uploaded; scan marked {scan_status}")
+                else:
+                    update_scan_status(self.api_base_url, pin, "completed", report.get("diagnostics", {}))
+                    self.log("Report uploaded successfully")
+                    write_app_log(self.config, "Report uploaded successfully")
                 self.safe_after(self.show_close)
             else:
                 self.log(f"Upload failed: {upload_message}")
                 write_app_log(self.config, f"Upload failed: {upload_message}")
+                update_scan_status(self.api_base_url, pin, scan_status if scan_status in {"failed", "timeout"} else "failed", {"uploadError": upload_message, **(report.get("diagnostics", {}) if isinstance(report, dict) else {})})
                 self.running = False
                 self.set_busy(False)
         except Exception as exc:
             self.log(f"Error: {exc}")
             write_app_log(self.config, f"Error: {exc}")
+            update_scan_status(self.api_base_url, pin, "failed", {"error": str(exc)})
             self.running = False
             self.set_busy(False)
 

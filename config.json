@@ -1,6 +1,7 @@
 {
   "api_base_url": "https://securo-next.vercel.app/",
   "scan_days": 7,
+  "scan_timeout_seconds": 900,
   "virustotal_api_key": "",
   "ruin_mode_enabled": false,
   "storage_base_dir": "",

@@ -7,7 +7,11 @@ const styles: Record<string, string> = {
   Low: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
   pending: "border-zinc-500/40 bg-zinc-500/15 text-zinc-300",
   connected: "border-blue-500/40 bg-blue-500/15 text-blue-300",
-  completed: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+  queued: "border-zinc-500/40 bg-zinc-500/15 text-zinc-300",
+  scanning: "border-blue-500/40 bg-blue-500/15 text-blue-300",
+  completed: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+  failed: "border-red-500/40 bg-red-500/15 text-red-300",
+  timeout: "border-orange-500/40 bg-orange-500/15 text-orange-300"
 };
 
 export function Badge({ label, className }: { label: string; className?: string }) {

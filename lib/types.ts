@@ -1,4 +1,4 @@
-export type PinStatus = "pending" | "connected" | "completed";
+export type PinStatus = "queued" | "scanning" | "completed" | "failed" | "timeout";
 export type RiskLevel = "High" | "Medium" | "Low" | "Confirmed" | "Suspicious" | "Weak" | "Clean-but-limited" | "Insufficient data";
 
 export type TimelineEvent = {
@@ -64,6 +64,11 @@ export type PinRow = {
   status: PinStatus;
   created_at: string;
   expires_at: string;
+  scan_stage?: string | null;
+  scan_progress?: number | null;
+  files_scanned?: number | null;
+  last_successful_operation?: string | null;
+  status_updated_at?: string | null;
 };
 
 export type ReportRow = {
