@@ -37,6 +37,9 @@ def test_config():
         },
         "virustotal_api_key": "",
         "ruin_mode_enabled": False,
+        "scan_mode": "fast",
+        "max_files_scanned": 8000,
+        "deep_inspect_only_flagged": True,
         "storage_base_dir": "",
         "known_bad_hashes": [],
         "executor_confirmation_keywords": ["Volt", "Potassium", "Wave", "Synapse Z", "Seliware", "Madium", "Cosmic", "Velocity", "SirHurt", "Solara", "Xeno", "MacSploit", "Opiumware"],
@@ -155,6 +158,38 @@ class CoreTests(unittest.TestCase):
                 checker.scan_roots = original_roots
         self.assertTrue(findings)
         self.assertGreaterEqual(findings[0]["score"], 40)
+
+    def test_fast_scan_skips_old_or_uninteresting_file_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_file = root / "boring.exe"
+            old_file.write_text("fixture", encoding="utf-8")
+            old_time = (dt.datetime.now() - dt.timedelta(days=30)).timestamp()
+            os.utime(old_file, (old_time, old_time))
+            original_roots = checker.scan_roots
+            try:
+                checker.scan_roots = lambda: [root]
+                findings, _ = checker.collect_file_artifacts(7, test_config(), [])
+            finally:
+                checker.scan_roots = original_roots
+        self.assertFalse(findings)
+
+    def test_fast_scan_still_deep_checks_executor_named_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / "Potassium.exe"
+            artifact.write_bytes(b"MZ" + b"BSJB mscoree.dll system.runtime A3 DLL " + (b"x" * 2048))
+            now = dt.datetime.now().timestamp()
+            os.utime(artifact, (now, now))
+            config = test_config()
+            original_roots = checker.scan_roots
+            try:
+                checker.scan_roots = lambda: [root]
+                findings, _ = checker.collect_file_artifacts(7, config, [])
+            finally:
+                checker.scan_roots = original_roots
+        self.assertTrue(findings)
+        self.assertTrue(any("DotNetExecutable" in f.get("detection_categories", []) for f in findings))
 
     def test_xeno_detection_categories_are_confirmed(self):
         config = test_config()

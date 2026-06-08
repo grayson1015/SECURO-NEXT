@@ -294,6 +294,9 @@ def load_config() -> dict:
     config.setdefault("api_base_url", DEFAULT_API_BASE_URL)
     config.setdefault("scan_days", 7)
     config.setdefault("scan_timeout_seconds", 900)
+    config.setdefault("scan_mode", "fast")
+    config.setdefault("max_files_scanned", 8000)
+    config.setdefault("deep_inspect_only_flagged", True)
     config.setdefault("storage_base_dir", "")
     return config
 
@@ -742,14 +745,33 @@ def first_time(*values) -> str:
     return min(parsed).isoformat(sep=" ", timespec="seconds")
 
 
+def cheap_file_candidate(path_text: str, filename: str, times: list[dt.datetime], sessions: list[dict], config: dict, cut: dt.datetime) -> bool:
+    if max(times) < cut:
+        return False
+    if not suspicious_extension(path_text, config):
+        return False
+    if suspicious_name(filename, config) or suspicious_text(path_text, config):
+        return True
+    if any(near_any_session(t, sessions) for t in times):
+        return True
+    if user_writable_path(path_text) and Path(path_text).suffix.lower() in {".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"}:
+        return True
+    if common_dependency_path(path_text) or low_signal_path(path_text):
+        return True
+    return False
+
+
 def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     norm = path if "://" in (path or "") else (normalize_path(path) if path else "")
     suppressed = securo_internal_path(norm, config)
-    signer = signer_info(norm) if Path(norm).suffix.lower() in [".exe", ".dll"] else {"status": "not checked", "subject": "", "issuer": ""}
+    suffix = Path(norm).suffix.lower()
+    fast_mode = str(config.get("scan_mode", "fast")).lower() == "fast"
+    lazy_file_metadata = fast_mode and source == "file_system" and not suspicious_text(f"{name} {norm}", config)
+    signer = signer_info(norm) if suffix in [".exe", ".dll"] and not lazy_file_metadata else {"status": "not checked" if lazy_file_metadata else "not checked", "subject": "", "issuer": ""}
     finding = {
         "name": Path(norm).name if norm else name,
         "path": norm,
-        "sha256": sha256_file(norm) if Path(norm).is_file() and Path(norm).suffix.lower() in [".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"] else "",
+        "sha256": sha256_file(norm) if not lazy_file_metadata and Path(norm).is_file() and suffix in [".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"] else "",
         "signer": signer,
         "parent_process": "",
         "target_process": ROBLOX_EXE,
@@ -769,6 +791,8 @@ def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     }
     if suppressed:
         return finding
+    if lazy_file_metadata:
+        finding["supporting_evidence"].append("Fast scan deferred hash/signature checks until stronger suspicion exists.")
     if is_known_safe_signer(signer, config):
         add_score(finding, config["score_rules"]["known_safe_signer"], "Signed by known-safe signer")
     elif signer.get("status", "").lower() in ["notsigned", "unknown", "missing"]:
@@ -1637,7 +1661,9 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
     findings = {}
     timeline = []
     cut = cutoff(days)
-    max_files = 25000
+    scan_mode = str(config.get("scan_mode", "fast")).lower()
+    max_files = int(config.get("max_files_scanned") or (8000 if scan_mode == "fast" else 25000))
+    deep_inspect_only_flagged = bool(config.get("deep_inspect_only_flagged", scan_mode == "fast"))
     seen_files = 0
     for root in scan_roots():
         for dirpath, dirnames, filenames in os.walk(root, topdown=True):
@@ -1668,11 +1694,14 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
                 path_text = str(path)
                 if securo_internal_path(path_text, config):
                     continue
-                if not suspicious_extension(path_text, config):
+                cheap_candidate = cheap_file_candidate(path_text, filename, times, sessions, config, cut)
+                if not cheap_candidate:
                     continue
                 finding = make_finding(path_text, filename, "file_system", config)
-                inspect_file_indicators(path_text, finding)
                 near_session = any(near_any_session(t, sessions) for t in times)
+                should_deep_inspect = not deep_inspect_only_flagged or near_session or suspicious_name(filename, config) or suspicious_text(path_text, config) or user_writable_path(path_text)
+                if should_deep_inspect:
+                    inspect_file_indicators(path_text, finding)
                 structurally_flagged = bool(finding.get("detection_categories")) or near_session or common_dependency_path(path_text) or low_signal_path(path_text)
                 if not structurally_flagged:
                     continue
