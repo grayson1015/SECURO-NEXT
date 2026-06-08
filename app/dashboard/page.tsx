@@ -22,7 +22,7 @@ export default function DashboardPage() {
 
       setActivated(true);
       const [reportsResult, pinsResult] = await Promise.all([
-        fetch("/api/reports?summary=1&limit=100").then((res) => res.json()),
+        fetch("/api/reports?summary=1&limit=500").then((res) => res.json()),
         fetch("/api/pins").then((res) => res.json())
       ]);
       setReports((reportsResult.reports || []) as ReportSummaryRow[]);

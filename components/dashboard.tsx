@@ -11,8 +11,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
-type TimeRange = "30d" | "14d" | "7d" | "3d";
-const timeRanges: { label: string; value: TimeRange; days: number }[] = [
+type TimeRange = "all" | "30d" | "14d" | "7d" | "3d";
+const timeRanges: { label: string; value: TimeRange; days: number | null }[] = [
+  { label: "All logs", value: "all", days: null },
   { label: "1 month", value: "30d", days: 30 },
   { label: "2 weeks", value: "14d", days: 14 },
   { label: "1 week", value: "7d", days: 7 },
@@ -23,7 +24,7 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
   const [reports, setReports] = useState(initialReports);
   const [pins, setPins] = useState(initialPins);
   const [query, setQuery] = useState("");
-  const [timeRange, setTimeRange] = useState<TimeRange>("7d");
+  const [timeRange, setTimeRange] = useState<TimeRange>("all");
   const [sortKey, setSortKey] = useState<"username" | "userId" | "placeId" | "risk" | "scanTime">("scanTime");
   const [createdPin, setCreatedPin] = useState<PinRow | null>(null);
   const [busy, setBusy] = useState(false);
@@ -31,7 +32,7 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
   useEffect(() => {
     const timer = window.setInterval(async () => {
       if (document.visibilityState === "hidden") return;
-      const res = await fetch("/api/reports?summary=1&limit=100");
+      const res = await fetch("/api/reports?summary=1&limit=500");
       const body = await res.json().catch(() => null);
       if (body?.ok) setReports(body.reports || []);
     }, 10000);
@@ -230,6 +231,7 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
 
 function filterReportsByTimeRange(reports: ReportSummaryRow[], range: TimeRange) {
   const selected = timeRanges.find((item) => item.value === range) || timeRanges[2];
+  if (!selected.days) return reports;
   const cutoff = Date.now() - selected.days * 24 * 60 * 60 * 1000;
   return reports.filter((report) => {
     const value = new Date(report.scan_time || report.uploaded_at || "").getTime();
