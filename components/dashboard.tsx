@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Activity, Download, LogOut, Monitor, Plus, Search, ShieldAlert, ShieldCheck, Timer } from "lucide-react";
-import type { PinRow, ReportRow } from "@/lib/types";
+import { Activity, LogOut, Monitor, Plus, Search, ShieldAlert, ShieldCheck, Timer } from "lucide-react";
+import type { PinRow, ReportRow, ScanProfile } from "@/lib/types";
 import { countDetectionCategory, countFindings, filterReports, primarySession } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +18,11 @@ const timeRanges: { label: string; value: TimeRange; days: number }[] = [
   { label: "1 week", value: "7d", days: 7 },
   { label: "3 days", value: "3d", days: 3 }
 ];
+const scanProfiles: { label: string; value: ScanProfile; description: string }[] = [
+  { label: "Standard", value: "standard", description: "Balanced scan for normal checks." },
+  { label: "Deep", value: "deep", description: "Maximum coverage for stronger review." },
+  { label: "Quick", value: "quick", description: "Faster triage with clear limitations." }
+];
 
 export function Dashboard({ initialReports, initialPins }: { initialReports: ReportRow[]; initialPins: PinRow[] }) {
   const [reports, setReports] = useState(initialReports);
@@ -27,6 +32,8 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
   const [sortKey, setSortKey] = useState<"username" | "userId" | "placeId" | "risk" | "scanTime">("scanTime");
   const [createdPin, setCreatedPin] = useState<PinRow | null>(null);
   const [busy, setBusy] = useState(false);
+  const [profilePickerOpen, setProfilePickerOpen] = useState(false);
+  const [scanProfile, setScanProfile] = useState<ScanProfile>("standard");
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
@@ -52,13 +59,18 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
 
   async function createPin() {
     setBusy(true);
-    const res = await fetch("/api/create-pin", { method: "POST" });
+    const res = await fetch("/api/create-pin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scanProfile })
+    });
     const body = await res.json();
     setBusy(false);
     if (body.ok) {
       const nextPin = normalizePin(body.pin);
       setCreatedPin(nextPin);
       setPins((current) => [nextPin, ...current.filter((pin) => pin.id !== nextPin.id)]);
+      setProfilePickerOpen(false);
     } else {
       alert(body.error || "Could not create PIN");
     }
@@ -81,10 +93,35 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
             </div>
           </div>
           <div className="flex gap-2">
-            <Button onClick={createPin} disabled={busy}><Plus size={16} />Create New PIN</Button>
+            <Button onClick={() => setProfilePickerOpen(true)} disabled={busy}><Plus size={16} />Create New PIN</Button>
             <Button onClick={signOut} className="bg-zinc-800 text-white"><LogOut size={16} />Sign out</Button>
           </div>
         </header>
+
+        {profilePickerOpen ? (
+          <Card className="mb-5 border-primary/30 bg-zinc-950">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <div className="min-w-[260px] flex-1">
+                <CardTitle>Choose Scan Method</CardTitle>
+                <p className="mt-2 text-sm text-zinc-400">This method is attached to the PIN and applied automatically by SecuroChecker.</p>
+                <select
+                  className="mt-4 h-11 w-full rounded-md border border-border bg-black/30 px-3 text-sm font-semibold text-white outline-none focus:border-primary"
+                  value={scanProfile}
+                  onChange={(event) => setScanProfile(event.target.value as ScanProfile)}
+                >
+                  {scanProfiles.map((profile) => (
+                    <option key={profile.value} value={profile.value}>{profile.label}</option>
+                  ))}
+                </select>
+                <p className="mt-2 text-xs text-zinc-500">{scanProfiles.find((profile) => profile.value === scanProfile)?.description}</p>
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={createPin} disabled={busy}><Plus size={16} />Create PIN</Button>
+                <Button onClick={() => setProfilePickerOpen(false)} className="bg-zinc-800 text-white">Cancel</Button>
+              </div>
+            </div>
+          </Card>
+        ) : null}
 
         {createdPin ? (
           <Card className="mb-5 border-primary/40 bg-primary/10">
@@ -92,7 +129,9 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
               <div>
                 <CardTitle>Active PIN</CardTitle>
                 <div className="mt-2 text-5xl font-bold tracking-[.2em] text-primary">{displayPin(createdPin)}</div>
-                <p className="mt-2 text-sm text-zinc-300">Give this PIN to the user being checked. Expires {formatDate(createdPin.expires_at)}.</p>
+                <p className="mt-2 text-sm text-zinc-300">
+                  Give this PIN to the user being checked. Method {profileLabel(createdPin.scan_profile)}. Expires {formatDate(createdPin.expires_at)}.
+                </p>
               </div>
               <Badge label={createdPin.status} />
             </div>
@@ -209,9 +248,9 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
               <div className="mt-3 space-y-3">
                 {pins.slice(0, 6).map((pin) => (
                   <div key={pin.id} className="flex items-center justify-between rounded-md bg-black/20 p-3">
-                    <div>
-                      <div className="font-semibold tracking-widest">{displayPin(pin)}</div>
-                      <div className="text-xs text-zinc-500">{formatDate(pin.created_at)}</div>
+                      <div>
+                        <div className="font-semibold tracking-widest">{displayPin(pin)}</div>
+                      <div className="text-xs text-zinc-500">{formatDate(pin.created_at)} - {profileLabel(pin.scan_profile)}</div>
                     </div>
                     <Badge label={pin.status} />
                   </div>
@@ -271,6 +310,11 @@ function displayPin(pin: Partial<PinRow> & Record<string, unknown>) {
   return String(pin.pin_code || pin.pin || pin.pinCode || "Unknown");
 }
 
+function profileLabel(profile: unknown) {
+  const value = String(profile || "standard").toLowerCase();
+  return scanProfiles.find((item) => item.value === value)?.label || "Standard";
+}
+
 function normalizePin(pin: Partial<PinRow> & Record<string, unknown>): PinRow {
   return {
     id: String(pin.id || crypto.randomUUID()),
@@ -278,6 +322,7 @@ function normalizePin(pin: Partial<PinRow> & Record<string, unknown>): PinRow {
     owner_user_id: (pin.owner_user_id as string | null) || null,
     owner_email: (pin.owner_email as string | null) || null,
     status: ((pin.status || "queued") as PinRow["status"]),
+    scan_profile: (pin.scan_profile as string | null) || "standard",
     created_at: String(pin.created_at || new Date().toISOString()),
     expires_at: String(pin.expires_at || new Date(Date.now() + 15 * 60 * 1000).toISOString())
   };

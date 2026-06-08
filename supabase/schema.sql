@@ -78,6 +78,7 @@ create table if not exists public.reports (
 alter table public.pins alter column owner_user_id drop not null;
 alter table public.reports alter column owner_user_id drop not null;
 alter table public.pins add column if not exists owner_email text;
+alter table public.pins add column if not exists scan_profile text not null default 'standard';
 alter table public.reports add column if not exists owner_email text;
 alter table public.pins add column if not exists scan_stage text;
 alter table public.pins add column if not exists scan_progress integer not null default 0;
@@ -93,6 +94,13 @@ begin
   alter table public.pins drop constraint if exists pins_status_check;
   alter table public.pins
     add constraint pins_status_check check (status in ('queued', 'scanning', 'completed', 'failed', 'timeout'));
+end $$;
+
+do $$
+begin
+  alter table public.pins drop constraint if exists pins_scan_profile_check;
+  alter table public.pins
+    add constraint pins_scan_profile_check check (scan_profile in ('quick', 'standard', 'deep'));
 end $$;
 
 create index if not exists pins_owner_status_idx on public.pins(owner_user_id, status, created_at desc);
@@ -237,8 +245,10 @@ create trigger on_auth_user_created
 after insert on auth.users
 for each row execute function public.handle_new_user();
 
+drop function if exists public.connect_pin(text);
+
 create or replace function public.connect_pin(input_pin text)
-returns table(ok boolean, error text, pin_id uuid)
+returns table(ok boolean, error text, pin_id uuid, scan_profile text)
 language plpgsql
 security definer
 set search_path = public
@@ -256,7 +266,7 @@ begin
   limit 1;
 
   if matched_pin.id is null then
-    return query select false, 'invalid_or_expired_pin', null::uuid;
+    return query select false, 'invalid_or_expired_pin', null::uuid, null::text;
     return;
   end if;
 
@@ -264,7 +274,7 @@ begin
   set status = 'scanning'
   where id = matched_pin.id;
 
-  return query select true, null::text, matched_pin.id;
+  return query select true, null::text, matched_pin.id, coalesce(matched_pin.scan_profile, 'standard');
 end;
 $$;
 
@@ -403,13 +413,17 @@ begin
 end;
 $$;
 
+drop function if exists public.create_pin_by_key(text, text, text, timestamptz);
+drop function if exists public.create_pin_by_key(text, text, text, timestamptz, text);
+
 create or replace function public.create_pin_by_key(
   input_email text,
   input_key text,
   input_pin text,
-  input_expires_at timestamptz
+  input_expires_at timestamptz,
+  input_scan_profile text default 'standard'
 )
-returns table(id uuid, pin_code text, owner_user_id uuid, owner_email text, status text, created_at timestamptz, expires_at timestamptz)
+returns table(id uuid, pin_code text, owner_user_id uuid, owner_email text, status text, scan_profile text, created_at timestamptz, expires_at timestamptz)
 language plpgsql
 security definer
 set search_path = public
@@ -419,21 +433,27 @@ begin
     return;
   end if;
 
+  if coalesce(input_scan_profile, 'standard') not in ('quick', 'standard', 'deep') then
+    input_scan_profile := 'standard';
+  end if;
+
   return query
-  insert into public.pins(pin_code, owner_email, status, expires_at)
-  values (input_pin, lower(input_email), 'queued', input_expires_at)
-  returning pins.id, pins.pin_code, pins.owner_user_id, pins.owner_email, pins.status, pins.created_at, pins.expires_at;
+  insert into public.pins(pin_code, owner_email, status, scan_profile, expires_at)
+  values (input_pin, lower(input_email), 'queued', input_scan_profile, input_expires_at)
+  returning pins.id, pins.pin_code, pins.owner_user_id, pins.owner_email, pins.status, pins.scan_profile, pins.created_at, pins.expires_at;
 end;
 $$;
 
+drop function if exists public.list_pins_by_key(text, text);
+
 create or replace function public.list_pins_by_key(input_email text, input_key text)
-returns table(id uuid, pin_code text, owner_user_id uuid, owner_email text, status text, created_at timestamptz, expires_at timestamptz)
+returns table(id uuid, pin_code text, owner_user_id uuid, owner_email text, status text, scan_profile text, created_at timestamptz, expires_at timestamptz)
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select p.id, p.pin_code, p.owner_user_id, p.owner_email, p.status, p.created_at, p.expires_at
+  select p.id, p.pin_code, p.owner_user_id, p.owner_email, p.status, p.scan_profile, p.created_at, p.expires_at
   from public.pins p
   where public.validate_key_session(input_email, input_key)
     and lower(p.owner_email) = lower(input_email)
@@ -552,7 +572,7 @@ grant execute on function public.update_pin_scan_status(text, text, jsonb) to an
 grant execute on function public.upload_report_by_pin(text, text, text, integer, jsonb) to anon, authenticated;
 grant execute on function public.key_login(text, text) to anon, authenticated;
 grant execute on function public.validate_key_session(text, text) to anon, authenticated;
-grant execute on function public.create_pin_by_key(text, text, text, timestamptz) to anon, authenticated;
+grant execute on function public.create_pin_by_key(text, text, text, timestamptz, text) to anon, authenticated;
 grant execute on function public.list_pins_by_key(text, text) to anon, authenticated;
 grant execute on function public.list_reports_by_key(text, text) to anon, authenticated;
 grant execute on function public.get_report_by_key(text, text, uuid) to anon, authenticated;

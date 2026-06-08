@@ -1,4 +1,5 @@
 export type PinStatus = "queued" | "scanning" | "completed" | "failed" | "timeout";
+export type ScanProfile = "quick" | "standard" | "deep";
 export type RiskLevel = "High" | "Medium" | "Low" | "Confirmed" | "Suspicious" | "Weak" | "Clean-but-limited" | "Insufficient data";
 
 export type TimelineEvent = {
@@ -62,6 +63,7 @@ export type PinRow = {
   owner_user_id: string | null;
   owner_email?: string | null;
   status: PinStatus;
+  scan_profile?: ScanProfile | string | null;
   created_at: string;
   expires_at: string;
   scan_stage?: string | null;

@@ -13,5 +13,5 @@ export async function POST(req: NextRequest) {
   const result = Array.isArray(data) ? data[0] : data;
   if (!result?.ok) return NextResponse.json({ ok: false, error: result?.error || "invalid_or_expired_pin" }, { status: 404 });
 
-  return NextResponse.json({ ok: true, pinId: result.pin_id });
+  return NextResponse.json({ ok: true, pinId: result.pin_id, scanProfile: result.scan_profile || "standard" });
 }

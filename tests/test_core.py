@@ -37,6 +37,10 @@ def test_config():
         },
         "virustotal_api_key": "",
         "ruin_mode_enabled": False,
+        "scan_days": 7,
+        "scan_timeout_seconds": 900,
+        "default_scan_profile": "standard",
+        "scan_profiles": {},
         "storage_base_dir": "",
         "known_bad_hashes": [],
         "executor_confirmation_keywords": ["Volt", "Potassium", "Wave", "Synapse Z", "Seliware", "Madium", "Cosmic", "Velocity", "SirHurt", "Solara", "Xeno", "MacSploit", "Opiumware"],
@@ -531,6 +535,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(status, "timeout")
         self.assertEqual(report["scanStatus"], "timeout")
         self.assertIn("Last successful operation", " ".join(report["limitations"]))
+
+    def test_scan_profiles_apply_expected_coverage(self):
+        quick = checker.apply_scan_profile(test_config(), "quick")
+        standard = checker.apply_scan_profile(test_config(), "standard")
+        deep = checker.apply_scan_profile(test_config(), "deep")
+        self.assertEqual(quick["scan_profile"], "quick")
+        self.assertTrue(quick["skip_browser_artifacts"])
+        self.assertLess(quick["scan_timeout_seconds"], standard["scan_timeout_seconds"])
+        self.assertGreater(deep["scan_days"], standard["scan_days"])
+        self.assertGreater(deep["max_files_scanned"], standard["max_files_scanned"])
+
+    def test_verify_pin_returns_scan_profile(self):
+        original = checker.post_json
+        try:
+            checker.post_json = lambda *args, **kwargs: (True, {"ok": True, "pinId": "abc", "scanProfile": "deep"})
+            ok, result = checker.verify_pin("https://example.test", "123456")
+        finally:
+            checker.post_json = original
+        self.assertTrue(ok)
+        self.assertEqual(result["scanProfile"], "deep")
 
 
 if __name__ == "__main__":

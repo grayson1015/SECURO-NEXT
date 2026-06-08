@@ -294,8 +294,51 @@ def load_config() -> dict:
     config.setdefault("api_base_url", DEFAULT_API_BASE_URL)
     config.setdefault("scan_days", 7)
     config.setdefault("scan_timeout_seconds", 900)
+    config.setdefault("default_scan_profile", "standard")
+    config.setdefault("scan_profiles", {})
     config.setdefault("storage_base_dir", "")
     return config
+
+
+def scan_profiles() -> dict:
+    return {
+        "quick": {
+            "scan_days": 3,
+            "scan_timeout_seconds": 480,
+            "max_files_scanned": 12000,
+            "skip_browser_artifacts": True,
+            "skip_recovery_metadata": True,
+            "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations.",
+        },
+        "standard": {
+            "scan_days": 14,
+            "scan_timeout_seconds": 1200,
+            "max_files_scanned": 30000,
+            "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
+        },
+        "deep": {
+            "scan_days": 30,
+            "scan_timeout_seconds": 2400,
+            "max_files_scanned": 120000,
+            "description": "Maximum coverage scan for stronger review. This can take significantly longer.",
+        },
+    }
+
+
+def normalize_scan_profile(profile: str | None) -> str:
+    value = str(profile or "standard").strip().lower()
+    return value if value in {"quick", "standard", "deep"} else "standard"
+
+
+def apply_scan_profile(config: dict, profile: str | None) -> dict:
+    selected = normalize_scan_profile(profile or config.get("default_scan_profile"))
+    merged = dict(config)
+    profile_config = {**scan_profiles().get(selected, scan_profiles()["standard"]), **dict(config.get("scan_profiles", {}).get(selected, {}))}
+    for key, value in profile_config.items():
+        merged[key] = value
+    merged["scan_profile"] = selected
+    merged["scan_profile_description"] = profile_config.get("description", "")
+    return merged
 
 
 def default_storage_root() -> Path:
@@ -1637,7 +1680,7 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
     findings = {}
     timeline = []
     cut = cutoff(days)
-    max_files = 25000
+    max_files = int(config.get("max_files_scanned") or 25000)
     seen_files = 0
     for root in scan_roots():
         for dirpath, dirnames, filenames in os.walk(root, topdown=True):
@@ -2654,6 +2697,7 @@ def camel_finding(finding: dict) -> dict:
 
 
 def build_scan_report(days: int, config: dict, verbose=False) -> dict:
+    days = int(config.get("scan_days", days) or days)
     scan_time = iso_now()
     sessions_raw, roblox_timeline = parse_roblox_logs(days, config)
     process_findings, process_timeline = collect_process_evidence(days, config, sessions_raw)
@@ -2662,10 +2706,16 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
     defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
     persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
-    browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
+    if config.get("skip_browser_artifacts"):
+        browser_findings, browser_timeline = [], []
+    else:
+        browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
     shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
-    recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
+    if config.get("skip_recovery_metadata"):
+        recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
+    else:
+        recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
     warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
     raw_timeline = (
         roblox_timeline
@@ -2699,6 +2749,11 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     top_score = max([f.get("score", 0) for f in findings], default=0)
     system = collect_system_info()
     system["scan_time"] = scan_time
+    limitations = limitations_from_quality(quality)
+    if config.get("skip_browser_artifacts"):
+        limitations.append("Browser artifacts were skipped by the selected scan profile.")
+    if config.get("skip_recovery_metadata"):
+        limitations.append("Recovery metadata was skipped by the selected scan profile.")
     report = {
         "scanTime": scan_time,
         "hostname": system.get("hostname", ""),
@@ -2714,8 +2769,10 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
         "engineResults": engine_results,
-        "limitations": limitations_from_quality(quality),
+        "limitations": limitations,
         "scanDays": days,
+        "scanProfile": config.get("scan_profile", "standard"),
+        "scanProfileDescription": config.get("scan_profile_description", ""),
         "topScore": top_score,
         "systemInfo": system,
         "finalStatement": "No confirmed Roblox injection evidence was found in available logs. Logging coverage may not be sufficient to rule it out."
@@ -2824,6 +2881,8 @@ def diagnostic_report(status: str, reason: str, diagnostics: ScanDiagnostics, co
             f"Files scanned before terminal state: {diagnostics.files_scanned}",
         ],
         "scanDays": int(config.get("scan_days", 7)),
+        "scanProfile": config.get("scan_profile", "standard"),
+        "scanProfileDescription": config.get("scan_profile_description", ""),
         "topScore": 0,
         "systemInfo": system,
         "scanStatus": status_label,
@@ -2872,6 +2931,7 @@ def run_scan_with_timeout(days: int, config: dict, progress, timeout_seconds: in
 
 
 def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
+    days = int(config.get("scan_days", days) or days)
     scan_time = iso_now()
     emit_progress(progress, "Scan started", 0)
     emit_progress(progress, "Collecting Roblox logs", 5)
@@ -2889,13 +2949,21 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     emit_progress(progress, "Checking persistence entries", 66)
     persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
     emit_progress(progress, "Checking browser artifacts", 74)
-    browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
+    if config.get("skip_browser_artifacts"):
+        browser_findings, browser_timeline = [], []
+        emit_progress(progress, "Browser artifacts skipped by scan profile", 74)
+    else:
+        browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
     emit_progress(progress, "Checking ShellBag Analyzer context", 80)
     shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
     emit_progress(progress, "Checking Recycle Bin context", 84)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     emit_progress(progress, "Checking recovery metadata", 88)
-    recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
+    if config.get("skip_recovery_metadata"):
+        recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
+        emit_progress(progress, "Recovery metadata skipped by scan profile", 88)
+    else:
+        recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
     emit_progress(progress, "Checking warning indicators", 92)
     warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
     emit_progress(progress, "Building report", 96)
@@ -2931,6 +2999,11 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     top_score = max([f.get("score", 0) for f in findings], default=0)
     system = collect_system_info()
     system["scan_time"] = scan_time
+    limitations = limitations_from_quality(quality)
+    if config.get("skip_browser_artifacts"):
+        limitations.append("Browser artifacts were skipped by the selected scan profile.")
+    if config.get("skip_recovery_metadata"):
+        limitations.append("Recovery metadata was skipped by the selected scan profile.")
     report = {
         "scanTime": scan_time,
         "hostname": system.get("hostname", ""),
@@ -2946,8 +3019,10 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
         "engineResults": engine_results,
-        "limitations": limitations_from_quality(quality),
+        "limitations": limitations,
         "scanDays": days,
+        "scanProfile": config.get("scan_profile", "standard"),
+        "scanProfileDescription": config.get("scan_profile_description", ""),
         "topScore": top_score,
         "systemInfo": system,
         "finalStatement": "No confirmed Roblox injection evidence was found in available logs. Logging coverage may not be sufficient to rule it out."
@@ -3379,7 +3454,7 @@ def verify_pin(api_base_url: str, pin: str) -> tuple[bool, dict | str]:
         return False, data.get("error", "invalid_or_expired_pin") if isinstance(data, dict) else "bad_server_response"
     if not data.get("pinId"):
         return False, "bad_server_response"
-    return True, {"sessionId": data["pinId"], "uploadToken": pin}
+    return True, {"sessionId": data["pinId"], "uploadToken": pin, "scanProfile": normalize_scan_profile(data.get("scanProfile"))}
 
 
 def upload_report(api_base_url: str, session_id: str, upload_token: str, report: dict) -> tuple[bool, str]:
@@ -3668,7 +3743,14 @@ class SecuroApp:
             self.log("PIN verified")
             self.session_id = verify_result["sessionId"]
             self.upload_token = verify_result["uploadToken"]
-            update_scan_status(self.api_base_url, pin, "scanning", {"stage": "PIN verified"})
+            self.config = apply_scan_profile(self.config, verify_result.get("scanProfile", "standard"))
+            self.days = int(self.config.get("scan_days", self.days) or self.days)
+            self.storage_dirs = ensure_storage_dirs(self.config)
+            self.log(f"Scan method: {self.config.get('scan_profile', 'standard').title()}")
+            update_scan_status(self.api_base_url, pin, "scanning", {
+                "stage": f"PIN verified ({self.config.get('scan_profile', 'standard')} scan)",
+                "scanProfile": self.config.get("scan_profile", "standard"),
+            })
 
             timeout_seconds = int(self.config.get("scan_timeout_seconds", 900) or 900)
             last_ping = {"time": 0.0, "percent": -1, "stage": ""}
@@ -3761,6 +3843,9 @@ def cli_main(args):
         print("PIN verified")
         session_id = verify_result["sessionId"]
         upload_token = verify_result["uploadToken"]
+        config = apply_scan_profile(config, verify_result.get("scanProfile", "standard"))
+        days = int(config.get("scan_days", days) or days)
+        print(f"Scan method: {config.get('scan_profile', 'standard')}")
     elif not args.local_only:
         print("No API base URL configured. Running local-only scan.")
     if args.verbose:
