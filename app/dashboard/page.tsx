@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { PinRow, ReportSummaryRow } from "@/lib/types";
+import type { PinRow, ReportRow } from "@/lib/types";
 import { Dashboard } from "@/components/dashboard";
 import { LoginPanel } from "@/components/login-panel";
 
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [activated, setActivated] = useState(false);
-  const [reports, setReports] = useState<ReportSummaryRow[]>([]);
+  const [reports, setReports] = useState<ReportRow[]>([]);
   const [pins, setPins] = useState<PinRow[]>([]);
 
   useEffect(() => {
@@ -22,10 +22,10 @@ export default function DashboardPage() {
 
       setActivated(true);
       const [reportsResult, pinsResult] = await Promise.all([
-        fetch("/api/reports?summary=1&limit=500").then((res) => res.json()),
+        fetch("/api/reports").then((res) => res.json()),
         fetch("/api/pins").then((res) => res.json())
       ]);
-      setReports((reportsResult.reports || []) as ReportSummaryRow[]);
+      setReports((reportsResult.reports || []) as ReportRow[]);
       setPins((pinsResult.pins || []) as PinRow[]);
       setLoading(false);
     }

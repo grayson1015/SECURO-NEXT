@@ -2,55 +2,53 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Activity, LogOut, Monitor, Plus, Search, ShieldAlert, ShieldCheck, Timer } from "lucide-react";
-import type { PinRow, ReportSummaryRow } from "@/lib/types";
-import { filterReportSummaries } from "@/lib/report";
+import { Activity, Download, LogOut, Monitor, Plus, Search, ShieldAlert, ShieldCheck, Timer } from "lucide-react";
+import type { PinRow, ReportRow } from "@/lib/types";
+import { countDetectionCategory, countFindings, filterReports, primarySession } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
-type TimeRange = "all" | "30d" | "14d" | "7d" | "3d";
-const timeRanges: { label: string; value: TimeRange; days: number | null }[] = [
-  { label: "All logs", value: "all", days: null },
+type TimeRange = "30d" | "14d" | "7d" | "3d";
+const timeRanges: { label: string; value: TimeRange; days: number }[] = [
   { label: "1 month", value: "30d", days: 30 },
   { label: "2 weeks", value: "14d", days: 14 },
   { label: "1 week", value: "7d", days: 7 },
   { label: "3 days", value: "3d", days: 3 }
 ];
 
-export function Dashboard({ initialReports, initialPins }: { initialReports: ReportSummaryRow[]; initialPins: PinRow[] }) {
+export function Dashboard({ initialReports, initialPins }: { initialReports: ReportRow[]; initialPins: PinRow[] }) {
   const [reports, setReports] = useState(initialReports);
   const [pins, setPins] = useState(initialPins);
   const [query, setQuery] = useState("");
-  const [timeRange, setTimeRange] = useState<TimeRange>("all");
+  const [timeRange, setTimeRange] = useState<TimeRange>("7d");
   const [sortKey, setSortKey] = useState<"username" | "userId" | "placeId" | "risk" | "scanTime">("scanTime");
   const [createdPin, setCreatedPin] = useState<PinRow | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
-      if (document.visibilityState === "hidden") return;
-      const res = await fetch("/api/reports?summary=1&limit=500");
+      const res = await fetch("/api/reports");
       const body = await res.json().catch(() => null);
       if (body?.ok) setReports(body.reports || []);
-    }, 10000);
+    }, 5000);
     return () => window.clearInterval(timer);
   }, []);
 
   const rangedReports = useMemo(() => filterReportsByTimeRange(reports, timeRange), [reports, timeRange]);
-  const filtered = useMemo(() => sortReports(filterReportSummaries(rangedReports, query), sortKey), [rangedReports, query, sortKey]);
+  const filtered = useMemo(() => sortReports(filterReports(rangedReports, query), sortKey), [rangedReports, query, sortKey]);
   const latest = rangedReports[0];
-  const confirmed = latest?.confirmed_count || 0;
-  const likely = latest?.likely_count || 0;
-  const possible = latest?.possible_count || 0;
-  const sessions = latest?.sessions_count || 0;
-  const coverage = latest?.evidence_coverage || 0;
-  const packed = latest?.packed_count || 0;
-  const dotnet = latest?.dotnet_count || 0;
-  const autoit = latest?.autoit_count || 0;
-  const tampered = latest?.tampered_count || 0;
+  const confirmed = latest ? countFindings(latest.report_json, "Confirmed") : 0;
+  const likely = latest ? countFindings(latest.report_json, "Likely") : 0;
+  const possible = latest ? countFindings(latest.report_json, "Possible") : 0;
+  const sessions = latest?.report_json.sessions.length || 0;
+  const coverage = latest ? coveragePercent(latest.report_json.evidenceSources) : 0;
+  const packed = latest ? countDetectionCategory(latest.report_json, ["packed", "UPX", "VMProtect", "Themida"]) : 0;
+  const dotnet = latest ? countDetectionCategory(latest.report_json, ["dotnet", "DotNet", "Suspicious Net File"]) : 0;
+  const autoit = latest ? countDetectionCategory(latest.report_json, ["AutoIT", "AutoHotkey", "autohotkey"]) : 0;
+  const tampered = latest ? countDetectionCategory(latest.report_json, ["Tampered File"]) : 0;
 
   async function createPin() {
     setBusy(true);
@@ -162,16 +160,23 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
                 <tbody>
                   {filtered.map((report) => (
                     <tr key={report.id} className="border-b border-border/70">
-                      <td className="py-3 font-medium">{report.username || "Unknown"}</td>
-                      <td>{report.user_id || ""}</td>
-                      <td>{report.place_id || report.game_id || ""}</td>
-                      <td>{report.duration || "unknown"}</td>
-                      <td>{report.session_status || "Clean"}</td>
+                      {(() => {
+                        const session = primarySession(report.report_json);
+                        return (
+                          <>
+                            <td className="py-3 font-medium">{session.username || "Unknown"}</td>
+                            <td>{session.userId || ""}</td>
+                            <td>{session.placeId || session.gameId || ""}</td>
+                            <td>{session.duration || "unknown"}</td>
+                            <td>{session.status || "Clean"}</td>
+                          </>
+                        );
+                      })()}
                       <td className="py-3 font-medium">{report.hostname}</td>
                       <td><Badge label={report.risk_level} /></td>
                       <td>{report.evidence_score}</td>
                       <td>{formatDate(report.scan_time)}</td>
-                      <td>{report.findings_count}</td>
+                      <td>{report.report_json.findings.length}</td>
                       <td className="text-right"><Link className="text-primary hover:underline" href={`/reports/${report.id}`}>Open</Link></td>
                     </tr>
                   ))}
@@ -204,18 +209,9 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
               <div className="mt-3 space-y-3">
                 {pins.slice(0, 6).map((pin) => (
                   <div key={pin.id} className="flex items-center justify-between rounded-md bg-black/20 p-3">
-                    <div className="min-w-0">
+                    <div>
                       <div className="font-semibold tracking-widest">{displayPin(pin)}</div>
                       <div className="text-xs text-zinc-500">{formatDate(pin.created_at)}</div>
-                      {pin.status === "failed" || pin.status === "timeout" ? (
-                        <div className="mt-1 max-w-[230px] truncate text-xs text-red-300" title={pinFailureText(pin)}>
-                          {pinFailureText(pin)}
-                        </div>
-                      ) : pin.status === "scanning" ? (
-                        <div className="mt-1 max-w-[230px] truncate text-xs text-primary" title={pinProgressText(pin)}>
-                          {pinProgressText(pin)}
-                        </div>
-                      ) : null}
                     </div>
                     <Badge label={pin.status} />
                   </div>
@@ -229,9 +225,8 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
   );
 }
 
-function filterReportsByTimeRange(reports: ReportSummaryRow[], range: TimeRange) {
+function filterReportsByTimeRange(reports: ReportRow[], range: TimeRange) {
   const selected = timeRanges.find((item) => item.value === range) || timeRanges[2];
-  if (!selected.days) return reports;
   const cutoff = Date.now() - selected.days * 24 * 60 * 60 * 1000;
   return reports.filter((report) => {
     const value = new Date(report.scan_time || report.uploaded_at || "").getTime();
@@ -266,28 +261,14 @@ function Risk({ label, value }: { label: string; value: number }) {
   );
 }
 
+function coveragePercent(sources: Record<string, unknown>) {
+  const values = Object.values(sources);
+  if (!values.length) return 0;
+  return Math.round((values.filter(Boolean).length / values.length) * 100);
+}
+
 function displayPin(pin: Partial<PinRow> & Record<string, unknown>) {
   return String(pin.pin_code || pin.pin || pin.pinCode || "Unknown");
-}
-
-function pinFailureText(pin: PinRow) {
-  const diagnostics = pin.diagnostics || {};
-  const uploadError = typeof diagnostics.uploadError === "string" ? diagnostics.uploadError : "";
-  const error = typeof diagnostics.error === "string" ? diagnostics.error : "";
-  const timeoutReason = typeof diagnostics.failureReason === "string" ? diagnostics.failureReason : "";
-  if (uploadError) return `Upload failed: ${uploadError}`;
-  if (error) return `Scan error: ${error}`;
-  if (timeoutReason) return timeoutReason;
-  if (pin.last_successful_operation) return `Last step: ${pin.last_successful_operation}`;
-  if (pin.scan_stage) return `Last stage: ${pin.scan_stage}`;
-  return "No failure details stored yet";
-}
-
-function pinProgressText(pin: PinRow) {
-  const progress = typeof pin.scan_progress === "number" ? `${pin.scan_progress}%` : "working";
-  const stage = pin.scan_stage || pin.last_successful_operation || "Scanning";
-  const files = typeof pin.files_scanned === "number" && pin.files_scanned > 0 ? `, ${pin.files_scanned} files` : "";
-  return `${stage} (${progress}${files})`;
 }
 
 function normalizePin(pin: Partial<PinRow> & Record<string, unknown>): PinRow {
@@ -298,25 +279,21 @@ function normalizePin(pin: Partial<PinRow> & Record<string, unknown>): PinRow {
     owner_email: (pin.owner_email as string | null) || null,
     status: ((pin.status || "queued") as PinRow["status"]),
     created_at: String(pin.created_at || new Date().toISOString()),
-    expires_at: String(pin.expires_at || new Date(Date.now() + 15 * 60 * 1000).toISOString()),
-    scan_stage: (pin.scan_stage as string | null) || null,
-    scan_progress: (pin.scan_progress as number | null) || null,
-    files_scanned: (pin.files_scanned as number | null) || null,
-    last_successful_operation: (pin.last_successful_operation as string | null) || null,
-    diagnostics: (pin.diagnostics as Record<string, unknown> | null) || {},
-    status_updated_at: (pin.status_updated_at as string | null) || null
+    expires_at: String(pin.expires_at || new Date(Date.now() + 15 * 60 * 1000).toISOString())
   };
 }
 
-function sortReports(reports: ReportSummaryRow[], key: "username" | "userId" | "placeId" | "risk" | "scanTime") {
+function sortReports(reports: ReportRow[], key: "username" | "userId" | "placeId" | "risk" | "scanTime") {
   return [...reports].sort((a, b) => {
     if (key === "scanTime") return new Date(b.scan_time).getTime() - new Date(a.scan_time).getTime();
     if (key === "risk") return String(a.risk_level).localeCompare(String(b.risk_level));
-    const pick = (report: ReportSummaryRow) => {
-      if (key === "username") return report.username || "";
-      if (key === "userId") return report.user_id || "";
-      return report.place_id || report.game_id || "";
+    const aSession = primarySession(a.report_json);
+    const bSession = primarySession(b.report_json);
+    const pick = (reportSession: typeof aSession) => {
+      if (key === "username") return reportSession.username || "";
+      if (key === "userId") return reportSession.userId || "";
+      return reportSession.placeId || reportSession.gameId || "";
     };
-    return String(pick(a)).localeCompare(String(pick(b)));
+    return String(pick(aSession)).localeCompare(String(pick(bSession)));
   });
 }
