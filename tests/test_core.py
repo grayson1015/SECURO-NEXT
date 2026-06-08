@@ -545,6 +545,15 @@ class CoreTests(unittest.TestCase):
         self.assertLess(quick["scan_timeout_seconds"], standard["scan_timeout_seconds"])
         self.assertGreater(deep["scan_days"], standard["scan_days"])
         self.assertGreater(deep["max_files_scanned"], standard["max_files_scanned"])
+        self.assertFalse(standard["skip_browser_artifacts"])
+        self.assertFalse(deep["skip_browser_artifacts"])
+
+    def test_switching_from_quick_to_deep_clears_quick_skips(self):
+        quick = checker.apply_scan_profile(test_config(), "quick")
+        deep = checker.apply_scan_profile(quick, "deep")
+        self.assertEqual(deep["scan_profile"], "deep")
+        self.assertFalse(deep["skip_browser_artifacts"])
+        self.assertFalse(deep["skip_recovery_metadata"])
 
     def test_verify_pin_returns_scan_profile(self):
         original = checker.post_json

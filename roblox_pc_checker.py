@@ -314,12 +314,16 @@ def scan_profiles() -> dict:
             "scan_days": 14,
             "scan_timeout_seconds": 1200,
             "max_files_scanned": 30000,
+            "skip_browser_artifacts": False,
+            "skip_recovery_metadata": False,
             "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
         },
         "deep": {
             "scan_days": 30,
             "scan_timeout_seconds": 2400,
             "max_files_scanned": 120000,
+            "skip_browser_artifacts": False,
+            "skip_recovery_metadata": False,
             "description": "Maximum coverage scan for stronger review. This can take significantly longer.",
         },
     }
@@ -333,6 +337,8 @@ def normalize_scan_profile(profile: str | None) -> str:
 def apply_scan_profile(config: dict, profile: str | None) -> dict:
     selected = normalize_scan_profile(profile or config.get("default_scan_profile"))
     merged = dict(config)
+    for key in ("skip_browser_artifacts", "skip_recovery_metadata", "max_files_scanned", "scan_profile", "scan_profile_description"):
+        merged.pop(key, None)
     profile_config = {**scan_profiles().get(selected, scan_profiles()["standard"]), **dict(config.get("scan_profiles", {}).get(selected, {}))}
     for key, value in profile_config.items():
         merged[key] = value
@@ -3454,7 +3460,7 @@ def verify_pin(api_base_url: str, pin: str) -> tuple[bool, dict | str]:
         return False, data.get("error", "invalid_or_expired_pin") if isinstance(data, dict) else "bad_server_response"
     if not data.get("pinId"):
         return False, "bad_server_response"
-    return True, {"sessionId": data["pinId"], "uploadToken": pin, "scanProfile": normalize_scan_profile(data.get("scanProfile"))}
+    return True, {"sessionId": data["pinId"], "uploadToken": pin, "scanProfile": normalize_scan_profile(data.get("scanProfile") or data.get("scan_profile"))}
 
 
 def upload_report(api_base_url: str, session_id: str, upload_token: str, report: dict) -> tuple[bool, str]:
