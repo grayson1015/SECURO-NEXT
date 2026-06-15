@@ -3685,7 +3685,7 @@ def upload_report(api_base_url: str, session_id: str, upload_token: str, report:
     return False, str(data)
 
 
-def compact_report_for_upload(report: dict, max_bytes: int = 3_200_000) -> dict:
+def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     try:
         encoded = json.dumps(report, separators=(",", ":"), default=str).encode("utf-8", errors="replace")
     except Exception:
@@ -3694,18 +3694,44 @@ def compact_report_for_upload(report: dict, max_bytes: int = 3_200_000) -> dict:
         return report
 
     compacted = dict(report)
-    compacted["timeline"] = list(report.get("timeline", []))[-1200:]
-    compacted["findings"] = select_upload_findings(report.get("findings", []), limit=700)
-    compacted["detectLogs"] = list(report.get("detectLogs", []))[:700]
-    compacted["warningLogs"] = list(report.get("warningLogs", []))[:300]
-    compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:300]
-    compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:400]
-    compacted["engineResults"] = list(report.get("engineResults", []))[:700]
+    limitations = list(compacted.get("limitations", []))
+    limitations.append("Large scan report was compacted for website upload. The full report remains saved locally on the scanned PC.")
+    compacted["limitations"] = limitations
     compacted["uploadCompacted"] = True
     compacted["originalApproxBytes"] = len(encoded)
-    limitations = list(compacted.get("limitations", []))
-    limitations.append("Deep scan report was compacted for website upload. The full report remains saved locally on the scanned PC.")
-    compacted["limitations"] = limitations
+
+    # Vercel rejects large function payloads before the API route can store them.
+    # Keep the website report useful, but reserve the complete report for local files.
+    size_profiles = [
+        {"timeline": 700, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80},
+        {"timeline": 350, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40},
+        {"timeline": 150, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20},
+    ]
+    for profile in size_profiles:
+        compacted["timeline"] = list(report.get("timeline", []))[-profile["timeline"]:]
+        compacted["findings"] = select_upload_findings(report.get("findings", []), limit=profile["findings"])
+        compacted["detectLogs"] = list(report.get("detectLogs", []))[:profile["detectLogs"]]
+        compacted["warningLogs"] = list(report.get("warningLogs", []))[:profile["warningLogs"]]
+        compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:profile["recoveryArtifacts"]]
+        compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:profile["antivirusLogs"]]
+        compacted["engineResults"] = list(report.get("engineResults", []))[:profile["engineResults"]]
+        if isinstance(compacted.get("rawArtifacts"), list):
+            compacted["rawArtifacts"] = list(report.get("rawArtifacts", []))[:profile["rawArtifacts"]]
+        try:
+            if len(json.dumps(compacted, separators=(",", ":"), default=str).encode("utf-8", errors="replace")) <= max_bytes:
+                return compacted
+        except Exception:
+            return compacted
+
+    compacted["timeline"] = list(report.get("timeline", []))[-80:]
+    compacted["findings"] = select_upload_findings(report.get("findings", []), limit=40)
+    compacted["detectLogs"] = list(report.get("detectLogs", []))[:40]
+    compacted["warningLogs"] = list(report.get("warningLogs", []))[:20]
+    compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:20]
+    compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:30]
+    compacted["engineResults"] = list(report.get("engineResults", []))[:40]
+    if isinstance(compacted.get("rawArtifacts"), list):
+        compacted["rawArtifacts"] = []
     return compacted
 
 

@@ -629,9 +629,11 @@ class CoreTests(unittest.TestCase):
         }
         compacted = checker.compact_report_for_upload(report, max_bytes=1000)
         self.assertTrue(compacted["uploadCompacted"])
-        self.assertLessEqual(len(compacted["timeline"]), 1200)
+        self.assertLessEqual(len(compacted["timeline"]), 80)
         self.assertEqual(compacted["findings"][0]["name"], "confirmed")
         self.assertIn("full report remains saved locally", " ".join(compacted["limitations"]))
+        encoded = json.dumps(compacted, separators=(",", ":"), default=str).encode("utf-8", errors="replace")
+        self.assertLess(len(encoded), 900_000)
 
 
 if __name__ == "__main__":
