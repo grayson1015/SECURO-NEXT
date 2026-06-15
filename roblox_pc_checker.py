@@ -1613,10 +1613,6 @@ def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict]
                 "rawLog": session["raw_log"],
             }]
             sessions.append(session)
-            timeline.append({"time": session["start_time"], "source": "Roblox log", "text": f"{ROBLOX_EXE} session/log observed: {path.name}"})
-            for event in session["events"]:
-                if event.get("type") in {"Teleport", "Reconnect", "Join", "Disconnect", "ClientSettings", "FastFlag"}:
-                    timeline.append({"time": event.get("timestamp", session["start_time"]), "source": f"Roblox {event.get('type')}", "text": event.get("message", "")[:240]})
             for line in session["crashes"][:3]:
                 timeline.append({"time": session["start_time"], "source": "Roblox log", "text": f"Roblox crash/fatal line: {line[:160]}"})
     deduped = {}

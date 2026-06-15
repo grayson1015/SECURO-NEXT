@@ -153,7 +153,7 @@ class CoreTests(unittest.TestCase):
             os.utime(log_dir / "first.log", (fixed, fixed))
             os.utime(log_dir / "second.log", (fixed, fixed))
             try:
-                sessions, _ = checker.parse_roblox_logs(30, test_config())
+                sessions, timeline = checker.parse_roblox_logs(30, test_config())
             finally:
                 if old_local is None:
                     os.environ.pop("LOCALAPPDATA", None)
@@ -165,6 +165,8 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(all(item.get("rawLog") for item in report_logs))
         self.assertIn("FFlagDebugGraphicsPreferD3D11", {flag["name"] for flag in flags})
         self.assertIn("DFIntTaskSchedulerTargetFps", {flag["name"] for flag in flags})
+        self.assertFalse(any("FFlagDebugGraphicsPreferD3D11" in event.get("text", "") for event in timeline))
+        self.assertFalse(any(event.get("source", "").startswith("Roblox FastFlag") for event in timeline))
 
     def test_missing_telemetry_lowers_confidence(self):
         quality = {"Roblox logs available": True, "Prefetch available": False, "Sysmon Event ID 8 available": False}
