@@ -412,6 +412,45 @@ class CoreTests(unittest.TestCase):
         self.assertGreaterEqual(story["evidence_score_contribution"], 32)
         self.assertTrue(story["event_timeline"])
 
+    def test_relationship_enrichment_marks_executed_deleted(self):
+        config = test_config()
+        executed = checker.make_finding("C:\\Users\\timmy\\Downloads\\Potassium.exe", "Potassium.exe", "prefetch", config)
+        executed["first_seen"] = "2026-06-02 14:22:00"
+        executed["evidence_types"].append("prefetch_execution")
+        checker.add_detection(executed, "Executed Suspicious File", "Prefetch execution fixture", "High", 25)
+        deleted = checker.make_possible_context_finding("C:\\Users\\timmy\\Downloads\\Potassium.exe", "Potassium.exe", "Recycle Bin", "Recycle Bin deletion fixture", dt.datetime(2026, 6, 2, 14, 27), config)
+        deleted["evidence_types"].append("recovery")
+        checker.add_detection(deleted, "Suspicious File Deletion", "Deleted suspicious file metadata fixture", "Medium", 20)
+        finalized = checker.finalize_findings([executed, deleted], config)
+        categories = set().union(*(set(f["detection_categories"]) for f in finalized))
+        self.assertIn("Executed & Deleted", categories)
+        self.assertIn("Suspicious File Deletion/Execution/Modification", categories)
+
+    def test_relationship_enrichment_marks_executed_modified(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\Xeno.exe", "Xeno.exe", "file_system", config)
+        finding["first_seen"] = "2026-06-02 14:22:00"
+        finding["evidence_types"].append("prefetch_execution")
+        finding["supporting_evidence"].append("created=2026-06-02 14:20:00 modified=2026-06-02 14:29:00 accessed=2026-06-02 14:30:00")
+        checker.add_detection(finding, "Executed Suspicious File", "Execution fixture", "High", 25)
+        finalized = checker.finalize_findings([finding], config)
+        self.assertIn("Executed & Modified", finalized[0]["detection_categories"])
+
+    def test_network_and_external_bypass_labels_are_added(self):
+        config = test_config()
+        network = checker.make_finding("\\\\share\\tools\\Velocity.exe", "Velocity.exe", "file_system", config)
+        network["first_seen"] = "2026-06-02 14:22:00"
+        network["evidence_types"].append("process_execution")
+        checker.add_detection(network, "Executed Suspicious File", "Network execution fixture", "High", 25)
+        external = checker.make_finding("E:\\Wave.exe", "Wave.exe", "file_system", config)
+        external["first_seen"] = "2026-06-02 14:22:00"
+        external["evidence_types"].extend(["process_execution", "external_device"])
+        checker.add_detection(external, "External Device Execution", "External execution fixture", "Medium", 20)
+        finalized = checker.finalize_findings([network, external], config)
+        categories = set().union(*(set(f["detection_categories"]) for f in finalized))
+        self.assertIn("Generic Bypass Method (Network File)", categories)
+        self.assertIn("Generic Bypass Method (External Device Execution)", categories)
+
     def test_forensic_correlation_marks_dll_injection_critical_from_sysmon(self):
         config = test_config()
         session = {"start_time": "2026-06-02 14:21:00", "end_time": "2026-06-02 14:40:00"}
@@ -545,6 +584,8 @@ class CoreTests(unittest.TestCase):
         self.assertLess(quick["scan_timeout_seconds"], standard["scan_timeout_seconds"])
         self.assertGreater(deep["scan_days"], standard["scan_days"])
         self.assertGreater(deep["max_files_scanned"], standard["max_files_scanned"])
+        self.assertLessEqual(standard["file_artifact_time_budget_seconds"], 180)
+        self.assertLessEqual(deep["file_artifact_time_budget_seconds"], 420)
         self.assertFalse(standard["skip_browser_artifacts"])
         self.assertFalse(deep["skip_browser_artifacts"])
 

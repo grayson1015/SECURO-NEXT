@@ -56,6 +56,7 @@ GENERIC_DETECTION_CATEGORIES = {
     "Modified File Extension",
     "Generic Packed Mod",
     "Untrusted File",
+    "Suspicious File Deletion/Execution/Modification",
 }
 SPECIFIC_DETECTION_CATEGORIES = {
     "Possible Roblox Exploit Execution",
@@ -64,20 +65,29 @@ SPECIFIC_DETECTION_CATEGORIES = {
     "Possible FastFlag Modifications",
     "Possible Alternate Roblox Account Usage",
     "Executed-Then-Deleted Application",
+    "Executed & Modified",
+    "Executed & Deleted",
     "Suspicious Archive-To-Execution Chain",
     "Suspicious External Drive Execution",
     "Packed Or Obfuscated Executable",
     "File Tampering Or Integrity Violation",
     "Generic Bypass Method",
     "Tampered File",
+    "Generic Bypass Method (NVIDIA / Powershell execution log)",
     "Suspicious DLL Deletion",
     "Suspicious File Deletion",
     "Suspicious File Modification",
+    "Suspicious File Execution",
     "Deleted Prefetch File",
+    "Prefetch Deleted",
     "Duplicate Prefetch Behavior",
     "Impossible Prefetch Behavior",
+    "Impossible File Deletion/Execution/Modification",
     "Network File Execution",
+    "Generic Bypass Method (Network File)",
     "External Device Execution",
+    "Generic Bypass Method (External Device Execution)",
+    "External Device Deletion",
     "RAR File Execution",
     "RAM Suspicious Indicator",
     "Game Instance Modification",
@@ -305,23 +315,26 @@ def scan_profiles() -> dict:
         "quick": {
             "scan_days": 3,
             "scan_timeout_seconds": 480,
-            "max_files_scanned": 12000,
+            "max_files_scanned": 8000,
+            "file_artifact_time_budget_seconds": 90,
             "skip_browser_artifacts": True,
             "skip_recovery_metadata": True,
             "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations.",
         },
         "standard": {
-            "scan_days": 14,
-            "scan_timeout_seconds": 1200,
-            "max_files_scanned": 30000,
+            "scan_days": 10,
+            "scan_timeout_seconds": 900,
+            "max_files_scanned": 15000,
+            "file_artifact_time_budget_seconds": 180,
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
             "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
         },
         "deep": {
-            "scan_days": 30,
-            "scan_timeout_seconds": 2400,
-            "max_files_scanned": 120000,
+            "scan_days": 21,
+            "scan_timeout_seconds": 1500,
+            "max_files_scanned": 45000,
+            "file_artifact_time_budget_seconds": 420,
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
             "description": "Maximum coverage scan for stronger review. This can take significantly longer.",
@@ -337,7 +350,7 @@ def normalize_scan_profile(profile: str | None) -> str:
 def apply_scan_profile(config: dict, profile: str | None) -> dict:
     selected = normalize_scan_profile(profile or config.get("default_scan_profile"))
     merged = dict(config)
-    for key in ("skip_browser_artifacts", "skip_recovery_metadata", "max_files_scanned", "scan_profile", "scan_profile_description"):
+    for key in ("skip_browser_artifacts", "skip_recovery_metadata", "max_files_scanned", "file_artifact_time_budget_seconds", "scan_profile", "scan_profile_description"):
         merged.pop(key, None)
     profile_config = {**scan_profiles().get(selected, scan_profiles()["standard"]), **dict(config.get("scan_profiles", {}).get(selected, {}))}
     for key, value in profile_config.items():
@@ -552,7 +565,11 @@ def normalize_path(path: str) -> str:
 
 
 def signer_info(path: str) -> dict:
-    if not path or not Path(path).exists():
+    try:
+        exists = bool(path and Path(path).exists())
+    except OSError:
+        return {"status": "inaccessible", "subject": "", "issuer": ""}
+    if not exists:
         return {"status": "missing", "subject": "", "issuer": ""}
     ps = (
         "$s = Get-AuthenticodeSignature -LiteralPath "
@@ -792,13 +809,17 @@ def first_time(*values) -> str:
 
 
 def make_finding(path: str, name: str, source: str, config: dict) -> dict:
-    norm = path if "://" in (path or "") else (normalize_path(path) if path else "")
+    norm = path if "://" in (path or "") or str(path or "").startswith(NETWORK_PATH_PREFIXES) else (normalize_path(path) if path else "")
     suppressed = securo_internal_path(norm, config)
     signer = signer_info(norm) if Path(norm).suffix.lower() in [".exe", ".dll"] else {"status": "not checked", "subject": "", "issuer": ""}
+    try:
+        hashable = Path(norm).is_file() and Path(norm).suffix.lower() in [".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"]
+    except OSError:
+        hashable = False
     finding = {
         "name": Path(norm).name if norm else name,
         "path": norm,
-        "sha256": sha256_file(norm) if Path(norm).is_file() and Path(norm).suffix.lower() in [".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"] else "",
+        "sha256": sha256_file(norm) if hashable else "",
         "signer": signer,
         "parent_process": "",
         "target_process": ROBLOX_EXE,
@@ -988,6 +1009,152 @@ def confirmed_verification_gate(finding: dict, config: dict) -> bool:
     if not has_timeline_anchor(finding):
         return False
     return True
+
+
+def finding_tokens(finding: dict) -> set[str]:
+    values = {str(finding.get("name", "")).lower(), str(finding.get("path", "")).lower()}
+    path = str(finding.get("path", "") or "")
+    name = Path(path).name.lower() if path else ""
+    if name:
+        values.add(name)
+    return {value for value in values if value}
+
+
+def related_artifacts(left: dict, right: dict) -> bool:
+    left_path = str(left.get("path", "") or "").lower()
+    right_path = str(right.get("path", "") or "").lower()
+    if left_path and right_path and left_path == right_path:
+        return True
+    left_name = str(left.get("name", "") or Path(left_path).name).lower()
+    right_name = str(right.get("name", "") or Path(right_path).name).lower()
+    return bool(left_name and right_name and left_name == right_name)
+
+
+def finding_has_execution(finding: dict) -> bool:
+    return bool(set(finding.get("evidence_types", [])) & {"process_execution", "prefetch_execution", "powershell_history"})
+
+
+def finding_has_deletion(finding: dict) -> bool:
+    categories = set(finding.get("detection_categories", []))
+    types = set(finding.get("evidence_types", []))
+    evidence_text = " ".join(str(x) for x in finding.get("supporting_evidence", [])).lower()
+    return bool(types & {"recovery", "possible_context"} and ("delet" in evidence_text or categories & {"Recycle Bin", "Recovered File Metadata", "Suspicious File Deletion", "Suspicious DLL Deletion"}))
+
+
+def parse_file_metadata_times(finding: dict) -> tuple[dt.datetime | None, dt.datetime | None, dt.datetime | None]:
+    text = " ".join(str(x) for x in finding.get("supporting_evidence", []))
+    match = re.search(r"created=([^ ]+ [^ ]+) modified=([^ ]+ [^ ]+) accessed=([^ ]+ [^ ]+)", text)
+    if not match:
+        return None, None, None
+    return parse_dt(match.group(1)), parse_dt(match.group(2)), parse_dt(match.group(3))
+
+
+def finding_has_later_modification(finding: dict) -> bool:
+    created, modified, accessed = parse_file_metadata_times(finding)
+    first_seen = parse_dt(finding.get("first_seen"))
+    if modified and created and modified > created + dt.timedelta(seconds=60):
+        return True
+    if modified and first_seen and modified > first_seen + dt.timedelta(seconds=60):
+        return True
+    return bool(accessed and first_seen and accessed > first_seen + dt.timedelta(seconds=60))
+
+
+def matching_prefetch_exists(finding: dict) -> bool:
+    folder = Path("C:/Windows/Prefetch")
+    if not safe_exists(folder):
+        return True
+    stem = Path(finding.get("name") or finding.get("path") or "").stem
+    if not stem:
+        return True
+    try:
+        return any(pf.name.lower().startswith(stem.lower() + "-") for pf in folder.glob("*.pf"))
+    except OSError:
+        return True
+
+
+def enrich_artifact_relationships(findings: list[dict], config: dict) -> None:
+    visible = [f for f in findings if not f.get("suppressed") and not securo_internal_path(f.get("path", ""), config)]
+    executed = [f for f in visible if finding_has_execution(f)]
+    deleted = [f for f in visible if finding_has_deletion(f)]
+
+    for finding in visible:
+        if not detection_triggered(finding):
+            continue
+        path = finding.get("path", "")
+        low_path = str(path).lower()
+        suffix = Path(path or finding.get("name", "")).suffix.lower()
+        categories = set(finding.get("detection_categories", []))
+        if finding_has_execution(finding) and finding_has_later_modification(finding):
+            add_detection(finding, "Executed & Modified", "Executed artifact has file metadata showing later modification; possible self-destruct or update behavior.", "Medium", 25)
+            finding["evidence_types"].append("executed_modified")
+        if (finding_has_execution(finding) or finding_has_deletion(finding) or finding_has_later_modification(finding)) and (suspicious_name(finding.get("name", ""), config) or categories & HIGH_CONFIDENCE_CHEAT_CATEGORIES or categories & CONFIRMED_EXPLOIT_CATEGORIES):
+            add_detection(finding, "Suspicious File Deletion/Execution/Modification", "A highly suspicious artifact had execution, deletion, or modification evidence.", "High", 30)
+            finding["evidence_types"].append("suspicious_file_activity")
+        if (finding_has_execution(finding) or finding_has_deletion(finding) or finding_has_later_modification(finding)) and ("\\windows\\system32\\" in low_path or "\\windows\\syswow64\\" in low_path):
+            add_detection(finding, "Impossible File Deletion/Execution/Modification", "Suspicious activity references a protected system location where normal user-driven modification/deletion is unlikely.", "High", 35)
+            finding["evidence_types"].append("impossible_file_activity")
+        if finding_has_deletion(finding):
+            add_detection(finding, "Suspicious File Deletion/Execution/Modification", "Suspicious deleted-file artifact requires manual review.", "Medium", 20)
+            finding["evidence_types"].append("deletion_artifact")
+            if suffix == ".dll":
+                add_detection(finding, "Suspicious DLL Deletion", "Deleted suspicious DLL metadata was observed.", "High", 30)
+                finding["evidence_types"].append("suspicious_dll_deleted")
+            if str(path).startswith(NETWORK_PATH_PREFIXES):
+                add_detection(finding, "Generic Bypass Method (Network File)", "Deleted/modified suspicious artifact was located on a network resource.", "High", 35)
+                finding["evidence_types"].append("network_artifact")
+            if len(str(path)) > 2 and str(path)[1] == ":" and str(path)[0].upper() in EXTERNAL_DRIVE_LETTERS:
+                add_detection(finding, "External Device Deletion", "Deleted suspicious artifact was located on an external/removable-drive style letter.", "Medium", 25)
+                finding["evidence_types"].append("external_device_deletion")
+        if str(path).startswith(NETWORK_PATH_PREFIXES):
+            finding["evidence_types"].append("network_artifact")
+        if len(str(path)) > 2 and str(path)[1] == ":" and str(path)[0].upper() in EXTERNAL_DRIVE_LETTERS:
+            finding["evidence_types"].append("external_device")
+        if "network_artifact" in finding.get("evidence_types", []):
+            add_detection(finding, "Generic Bypass Method (Network File)", "Suspicious file activity involved a network resource.", "High", 35)
+        if "external_device" in finding.get("evidence_types", []):
+            add_detection(finding, "Generic Bypass Method (External Device Execution)", "Suspicious execution involved an external/removable-drive style path.", "High", 30)
+        local_hits = len(set(finding.get("detection_categories", [])))
+        signer_status = (finding.get("signer", {}) or {}).get("status", "").lower()
+        if local_hits >= 4 and signer_status in {"notsigned", "unknown", "missing", ""} and not allowlisted_finding(finding, config):
+            add_detection(finding, "Untrusted File", "Multiple local heuristic flags matched an unsigned or untrusted artifact.", "High", 30)
+        if {"packed", "ruin_mode"} <= set(finding.get("evidence_types", [])):
+            add_detection(finding, "Generic Packed Mod", "Game/mod artifact shows packed or obfuscated traits.", "Medium", 25)
+        if finding_has_execution(finding) and not matching_prefetch_exists(finding) and (suspicious_name(finding.get("name", ""), config) or exploit_specific_artifact(finding, config)):
+            add_detection(finding, "Prefetch Deleted", "Suspicious execution was observed but no matching Prefetch file is currently present.", "Medium", 25)
+            finding["evidence_types"].append("prefetch_deleted")
+
+    for run in executed:
+        for gone in deleted:
+            if not related_artifacts(run, gone):
+                continue
+            add_detection(run, "Executed & Deleted", "Execution evidence and deleted-file metadata refer to the same suspicious artifact.", "High", 35)
+            run["evidence_types"].append("executed_deleted")
+            add_detection(gone, "Executed & Deleted", "Deleted-file metadata matches a suspicious executed artifact.", "High", 35)
+            gone["evidence_types"].append("executed_deleted")
+            if str(gone.get("path", "")).startswith(NETWORK_PATH_PREFIXES) or str(run.get("path", "")).startswith(NETWORK_PATH_PREFIXES):
+                add_detection(run, "Generic Bypass Method (Network File)", "Executed/deleted chain involved a network resource.", "High", 35)
+                run["evidence_types"].append("network_artifact")
+
+
+def cheap_artifact_candidate(path_text: str, times: list[dt.datetime], sessions: list[dict], config: dict) -> bool:
+    name = Path(path_text).name.lower()
+    low = path_text.lower()
+    suffix = Path(path_text).suffix.lower()
+    if suspicious_name(name, config):
+        return True
+    if any(near_any_session(t, sessions) for t in times):
+        return True
+    if risky_source_path(path_text) and suffix in {".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".ahk", ".rar", ".7z", ".zip", ".jar"}:
+        return True
+    if path_text.startswith(NETWORK_PATH_PREFIXES):
+        return True
+    if len(path_text) > 2 and path_text[1] == ":" and path_text[0].upper() in EXTERNAL_DRIVE_LETTERS:
+        return True
+    if re.search(r"\.(jpg|png|gif|txt|pdf|docx?)\.(exe|dll|scr|bat|cmd|ps1)$", name):
+        return True
+    if ".minecraft" in low or "\\mods\\" in low or "clientsettings" in low or "fastflag" in low:
+        return True
+    return False
 
 
 def engine_detected_executor_artifact(finding: dict, config: dict) -> bool:
@@ -1191,6 +1358,7 @@ def categorize_finding(finding: dict, config: dict) -> str:
 
 def finalize_findings(findings: list[dict], config: dict) -> list[dict]:
     visible = [f for f in findings if not f.get("suppressed") and not securo_internal_path(f.get("path", ""), config)]
+    enrich_artifact_relationships(visible, config)
     for f in visible:
         apply_executor_keyword_check(f, config)
         f["score"] = max(0, f.get("score", 0))
@@ -1687,10 +1855,34 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
     timeline = []
     cut = cutoff(days)
     max_files = int(config.get("max_files_scanned") or 25000)
+    time_budget = int(config.get("file_artifact_time_budget_seconds") or 240)
+    started = time.monotonic()
     seen_files = 0
+    skipped_dirs = {
+        "node_modules", ".git", "windowsapps", "packages", "__pycache__", ".next", "cache2",
+        "inetsim", "installer", "winsxs", "softwaredistribution", "temporary internet files",
+    }
+    noisy_dir_markers = (
+        "\\appdata\\local\\packages\\",
+        "\\appdata\\local\\microsoft\\windowsapps\\",
+        "\\appdata\\local\\google\\chrome\\user data\\",
+        "\\appdata\\local\\microsoft\\edge\\user data\\",
+        "\\appdata\\roaming\\mozilla\\firefox\\profiles\\",
+        "\\program files\\windowsapps\\",
+        "\\windows\\winsxs\\",
+        "\\windows\\servicing\\",
+    )
     for root in scan_roots():
         for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-            dirnames[:] = [d for d in dirnames if d.lower() not in {"node_modules", ".git", "windowsapps", "packages"}]
+            if time.monotonic() - started > time_budget:
+                if progress:
+                    progress(f"Checking file artifacts hit time cap after {seen_files} files", files_scanned=seen_files)
+                return list(findings.values()), timeline
+            low_dir = str(dirpath).lower()
+            if any(marker in low_dir for marker in noisy_dir_markers):
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if d.lower() not in skipped_dirs]
             dirnames[:] = [d for d in dirnames if not securo_internal_path(str(Path(dirpath) / d), config)]
             if securo_internal_path(dirpath, config):
                 continue
@@ -1718,6 +1910,8 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
                 if securo_internal_path(path_text, config):
                     continue
                 if not suspicious_extension(path_text, config):
+                    continue
+                if not cheap_artifact_candidate(path_text, times, sessions, config):
                     continue
                 finding = make_finding(path_text, filename, "file_system", config)
                 inspect_file_indicators(path_text, finding)
@@ -1980,6 +2174,7 @@ def collect_powershell_history(days: int, config: dict, sessions: list[dict]) ->
     except OSError:
         return [], []
     download_terms = re.compile(r"(invoke-webrequest|iwr|wget|curl|start-process|powershell\s+-|bitsadmin|downloadstring|frombase64string|expand-archive)", re.I)
+    delete_modify_terms = re.compile(r"(remove-item|del\s|erase\s|move-item|rename-item|set-content|add-content|clear-content)", re.I)
     for hist in files:
         try:
             mtime = dt.datetime.fromtimestamp(hist.stat().st_mtime)
@@ -1989,7 +2184,7 @@ def collect_powershell_history(days: int, config: dict, sessions: list[dict]) ->
         if mtime < cutoff(days):
             continue
         for i, line in enumerate(lines, start=1):
-            if not download_terms.search(line):
+            if not (download_terms.search(line) or delete_modify_terms.search(line)):
                 continue
             name = f"PowerShell history line {i}"
             finding = make_finding(str(hist), name, "powershell_history", config)
@@ -1999,6 +2194,15 @@ def collect_powershell_history(days: int, config: dict, sessions: list[dict]) ->
                 add_score(finding, config["score_rules"]["near_roblox_session"], "PowerShell history timestamp is within 30 minutes of Roblox activity")
             finding["supporting_evidence"].append(f"{hist}:{i}: {line[:500]}")
             finding["evidence_types"].append("powershell_history")
+            if "\\\\" in line or "file://" in line.lower():
+                add_detection(finding, "Generic Bypass Method (Network File)", "PowerShell history references execution/modification/deletion from a network resource.", "High", 35)
+                finding["evidence_types"].append("network_artifact")
+            if ".rar" in line.lower() and re.search(r"(start-process|&\s*|invoke-item|ii\s)", line, re.I):
+                add_detection(finding, "RAR File Execution", "PowerShell history indicates direct execution involving a RAR archive path.", "Medium", 25)
+                finding["evidence_types"].append("archive_artifact")
+            if "nvidia" in line.lower() and delete_modify_terms.search(line):
+                add_detection(finding, "Generic Bypass Method (NVIDIA / Powershell execution log)", "PowerShell history references modification/deletion of NVIDIA-related execution/log artifacts.", "High", 35)
+                finding["evidence_types"].append("bypass_method")
             merge_findings(findings, finding)
             timeline.append({"time": finding["first_seen"], "source": "PowerShell history", "text": f"Suspicious PowerShell command: {line[:160]}"})
     return list(findings.values()), timeline

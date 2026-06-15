@@ -7,21 +7,24 @@
     "quick": {
       "scan_days": 3,
       "scan_timeout_seconds": 480,
-      "max_files_scanned": 12000,
+      "max_files_scanned": 8000,
+      "file_artifact_time_budget_seconds": 90,
       "skip_browser_artifacts": true,
       "skip_recovery_metadata": true,
       "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations."
     },
     "standard": {
-      "scan_days": 14,
-      "scan_timeout_seconds": 1200,
-      "max_files_scanned": 30000,
+      "scan_days": 10,
+      "scan_timeout_seconds": 900,
+      "max_files_scanned": 15000,
+      "file_artifact_time_budget_seconds": 180,
       "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage."
     },
     "deep": {
-      "scan_days": 30,
-      "scan_timeout_seconds": 2400,
-      "max_files_scanned": 120000,
+      "scan_days": 21,
+      "scan_timeout_seconds": 1500,
+      "max_files_scanned": 45000,
+      "file_artifact_time_budget_seconds": 420,
       "description": "Maximum coverage scan for stronger review. This can take significantly longer."
     }
   },
