@@ -43,7 +43,7 @@ def test_config():
         "scan_profiles": {},
         "storage_base_dir": "",
         "known_bad_hashes": [],
-        "executor_confirmation_keywords": ["Volt", "Potassium", "Wave", "Synapse Z", "Seliware", "Madium", "Cosmic", "Velocity", "SirHurt", "Solara", "Xeno", "MacSploit", "Opiumware"],
+        "executor_confirmation_keywords": ["Volt", "Potassium", "Wave", "Synapse Z", "Seliware", "Madium", "Cosmic", "Velocity", "SirHurt", "Solara", "Xeno"],
         "category_thresholds": {"confirmed": 70, "suspicious": 35, "weak": 10},
         "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation", "Python Software Foundation"],
         "suspicious_name_terms": ["executor", "injector", "roblox", "solara", "arceus"],
@@ -180,6 +180,29 @@ class CoreTests(unittest.TestCase):
             if expected == "Confirmed Exploit":
                 self.assertGreaterEqual(result["score"], config["category_thresholds"]["confirmed"])
                 self.assertEqual(result["confidence_level"], "Confirmed")
+
+    def test_flagged_executor_exe_or_dll_name_confirms(self):
+        config = test_config()
+        cases = [
+            "C:\\Users\\timmy\\Downloads\\Synapse Z.exe",
+            "C:\\Users\\timmy\\Downloads\\synapse_z.dll",
+            "C:\\Users\\timmy\\Downloads\\synapse-z.exe",
+            "C:\\Users\\timmy\\Downloads\\Potassium.dll",
+        ]
+        for path in cases:
+            finding = checker.make_finding(path, Path(path).name, "unit", config)
+            checker.add_detection(finding, "Executed Suspicious File", "Already flagged fixture", "High", 20)
+            finding["first_seen"] = "2026-06-02 12:00:00"
+            result = checker.finalize_findings([finding], config)[0]
+            self.assertEqual(result["classification"], "Confirmed Exploit", path)
+            self.assertEqual(result["confidence_level"], "Confirmed", path)
+
+    def test_executor_filename_match_does_not_confirm_unflagged_file(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\Downloads\\Solara.exe", "Solara.exe", "unit", config)
+        finding["first_seen"] = "2026-06-02 12:00:00"
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
 
     def test_shellbag_and_recycle_bin_context_stay_possible(self):
         config = test_config()

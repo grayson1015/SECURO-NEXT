@@ -962,7 +962,7 @@ def executor_filename_keyword_match(finding: dict, config: dict) -> bool:
         if not value:
             continue
         filename = Path(str(value)).name
-        if Path(filename).suffix.lower() == ".exe":
+        if Path(filename).suffix.lower() in {".exe", ".dll"}:
             candidates.append(Path(filename).stem)
     return any(normalize_executor_keyword(candidate) in normalized_keywords for candidate in candidates)
 
@@ -971,6 +971,10 @@ def executor_keyword_match(finding: dict, config: dict) -> bool:
     if not already_flagged_by_detection(finding):
         return False
     return executor_filename_keyword_match(finding, config)
+
+
+def flagged_executor_binary_match(finding: dict, config: dict) -> bool:
+    return already_flagged_by_detection(finding) and executor_filename_keyword_match(finding, config)
 
 
 def apply_executor_keyword_check(finding: dict, config: dict):
@@ -1172,6 +1176,8 @@ def engine_detected_executor_artifact(finding: dict, config: dict) -> bool:
 
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
+    if flagged_executor_binary_match(finding, config):
+        return True
     if not confirmed_verification_gate(finding, config):
         return False
     if known_bad_hash(finding, config):
