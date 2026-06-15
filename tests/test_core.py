@@ -565,6 +565,33 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(result["scanProfile"], "deep")
 
+    def test_large_report_compacts_for_upload(self):
+        report = {
+            "scanTime": "2026-06-09T00:00:00",
+            "hostname": "unit",
+            "highestResult": "Suspicious",
+            "confidence": "medium",
+            "evidenceSources": {},
+            "timeline": [{"time": "2026-06-09T00:00:00", "source": "unit", "text": "x" * 2000} for _ in range(3000)],
+            "sessions": [],
+            "findings": [
+                {"name": "possible", "classification": "Indicator Found", "confidenceLevel": "Possible", "score": 5},
+                {"name": "confirmed", "classification": "Confirmed Exploit", "confidenceLevel": "Confirmed", "score": 90},
+            ],
+            "detectLogs": [{"text": "x" * 2000} for _ in range(1000)],
+            "warningLogs": [],
+            "recoveryArtifacts": [],
+            "antivirusLogs": [],
+            "engineResults": [],
+            "limitations": [],
+            "topScore": 90,
+        }
+        compacted = checker.compact_report_for_upload(report, max_bytes=1000)
+        self.assertTrue(compacted["uploadCompacted"])
+        self.assertLessEqual(len(compacted["timeline"]), 1200)
+        self.assertEqual(compacted["findings"][0]["name"], "confirmed")
+        self.assertIn("full report remains saved locally", " ".join(compacted["limitations"]))
+
 
 if __name__ == "__main__":
     unittest.main()

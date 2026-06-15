@@ -3465,12 +3465,13 @@ def verify_pin(api_base_url: str, pin: str) -> tuple[bool, dict | str]:
 
 def upload_report(api_base_url: str, session_id: str, upload_token: str, report: dict) -> tuple[bool, str]:
     url = api_base_url.rstrip("/") + "/api/upload-report"
+    upload_report_data = compact_report_for_upload(report)
     payload = {
         "pin": upload_token,
-        "hostname": report.get("hostname", ""),
-        "riskLevel": report.get("highestResult", ""),
-        "evidenceScore": int(report.get("topScore", 0) or 0),
-        "reportData": report,
+        "hostname": upload_report_data.get("hostname", ""),
+        "riskLevel": upload_report_data.get("highestResult", ""),
+        "evidenceScore": int(upload_report_data.get("topScore", 0) or 0),
+        "reportData": upload_report_data,
     }
     ok, data = post_json(url, payload, timeout=20, retries=2)
     if ok and isinstance(data, dict) and data.get("ok"):
@@ -3478,6 +3479,45 @@ def upload_report(api_base_url: str, session_id: str, upload_token: str, report:
     if ok:
         return False, json.dumps(data)[:300]
     return False, str(data)
+
+
+def compact_report_for_upload(report: dict, max_bytes: int = 3_200_000) -> dict:
+    try:
+        encoded = json.dumps(report, separators=(",", ":"), default=str).encode("utf-8", errors="replace")
+    except Exception:
+        return report
+    if len(encoded) <= max_bytes:
+        return report
+
+    compacted = dict(report)
+    compacted["timeline"] = list(report.get("timeline", []))[-1200:]
+    compacted["findings"] = select_upload_findings(report.get("findings", []), limit=700)
+    compacted["detectLogs"] = list(report.get("detectLogs", []))[:700]
+    compacted["warningLogs"] = list(report.get("warningLogs", []))[:300]
+    compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:300]
+    compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:400]
+    compacted["engineResults"] = list(report.get("engineResults", []))[:700]
+    compacted["uploadCompacted"] = True
+    compacted["originalApproxBytes"] = len(encoded)
+    limitations = list(compacted.get("limitations", []))
+    limitations.append("Deep scan report was compacted for website upload. The full report remains saved locally on the scanned PC.")
+    compacted["limitations"] = limitations
+    return compacted
+
+
+def select_upload_findings(findings: list, limit: int) -> list:
+    def priority(finding: dict) -> tuple[int, int]:
+        text = f"{finding.get('classification', '')} {finding.get('confidenceLevel', '')}".lower()
+        if "confirmed" in text:
+            rank = 0
+        elif "suspicious" in text or "likely" in text:
+            rank = 1
+        else:
+            rank = 2
+        return rank, -int(finding.get("score", 0) or 0)
+
+    normalized = [item for item in findings if isinstance(item, dict)]
+    return sorted(normalized, key=priority)[:limit]
 
 
 def update_scan_status(api_base_url: str, pin: str, status: str, diagnostics: dict | None = None) -> tuple[bool, str]:
