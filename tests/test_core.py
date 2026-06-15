@@ -45,7 +45,7 @@ def test_config():
         "known_bad_hashes": [],
         "executor_confirmation_keywords": ["Volt", "Potassium", "Wave", "Synapse Z", "Seliware", "Madium", "Cosmic", "Velocity", "SirHurt", "Solara", "Xeno"],
         "category_thresholds": {"confirmed": 70, "suspicious": 35, "weak": 10},
-        "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation", "Python Software Foundation"],
+        "known_safe_signers": ["Microsoft Corporation", "Roblox Corporation", "Python Software Foundation", "OpenAI", "Codex", "Medal"],
         "suspicious_name_terms": ["executor", "injector", "roblox", "solara", "arceus"],
         "suspicious_extensions": [".exe", ".dll", ".zip", ".ps1"],
         "dangerous_access_terms": ["PROCESS_VM_WRITE", "PROCESS_CREATE_THREAD"],
@@ -137,6 +137,34 @@ class CoreTests(unittest.TestCase):
                     os.environ["LOCALAPPDATA"] = old_local
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["duration"], "unknown")
+        self.assertEqual(len(sessions[0]["all_logs"]), 2)
+
+    def test_roblox_logs_preserve_raw_history_and_fastflags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_local = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = tmp
+            log_dir = Path(tmp) / "Roblox" / "logs"
+            log_dir.mkdir(parents=True)
+            first = "2026-06-02 12:00:00 userId: 123 username: Player placeId: 999 jobId: abcdefgh-1234\n2026-06-02 12:01:00 LoadClientSettings FFlagDebugGraphicsPreferD3D11=true\n"
+            second = "2026-06-03 12:00:00 userId: 123 username: Player placeId: 999 jobId: abcdefgh-1234\n2026-06-03 12:02:00 Teleport server reconnect DFIntTaskSchedulerTargetFps = 240\n"
+            (log_dir / "first.log").write_text(first, encoding="utf-8")
+            (log_dir / "second.log").write_text(second, encoding="utf-8")
+            fixed = dt.datetime.now().timestamp()
+            os.utime(log_dir / "first.log", (fixed, fixed))
+            os.utime(log_dir / "second.log", (fixed, fixed))
+            try:
+                sessions, _ = checker.parse_roblox_logs(30, test_config())
+            finally:
+                if old_local is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
+        report_logs = checker.roblox_logs_for_report(sessions)
+        flags = checker.fastflags_for_report(sessions)
+        self.assertEqual(len(report_logs), 2)
+        self.assertTrue(all(item.get("rawLog") for item in report_logs))
+        self.assertIn("FFlagDebugGraphicsPreferD3D11", {flag["name"] for flag in flags})
+        self.assertIn("DFIntTaskSchedulerTargetFps", {flag["name"] for flag in flags})
 
     def test_missing_telemetry_lowers_confidence(self):
         quality = {"Roblox logs available": True, "Prefetch available": False, "Sysmon Event ID 8 available": False}
@@ -271,6 +299,24 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(finding["suppressed"])
         self.assertEqual(finding["suppression_reason"], "Internal Securo Component")
         self.assertEqual(checker.finalize_findings([finding], config), [])
+
+    def test_codex_workspace_files_are_suppressed(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\Grayson Gollotte\\Documents\\Codex\\2026-06-01\\work\\Velocity.exe", "Velocity.exe", "unit", config)
+        checker.add_detection(finding, "Executed Suspicious File", "fixture", "High", 80)
+        self.assertTrue(finding["suppressed"])
+        self.assertEqual(checker.finalize_findings([finding], config), [])
+
+    def test_medal_is_not_confirmed_from_generic_flags(self):
+        config = test_config()
+        finding = checker.make_finding("C:\\Users\\timmy\\AppData\\Local\\Medal\\Medal.exe", "Medal.exe", "unit", config)
+        finding["signer"] = {"status": "Valid", "subject": "CN=Medal", "issuer": "CN=Trusted CA"}
+        checker.add_detection(finding, "Generic Packed File", "Generic fixture", "High", 100)
+        finding["first_seen"] = "2026-06-02 12:00:00"
+        finding["score"] = 500
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+        self.assertNotEqual(result["confidence_level"], "Confirmed")
 
     def test_trusted_signed_dependency_downgrades_outside_securo(self):
         config = test_config()
@@ -524,6 +570,14 @@ class CoreTests(unittest.TestCase):
             "evidenceSources": {},
             "timeline": [{"time": "2026-06-02 17:55:00", "source": "unit", "text": "event"}],
             "sessions": [],
+            "robloxLogs": [{
+                "logFile": "Client.log",
+                "startTime": "2026-06-02 17:55:00",
+                "events": [{"timestamp": "2026-06-02 17:55:00", "type": "FastFlag", "message": "FFlagUnit=true"}],
+                "fastFlags": [{"name": "FFlagUnit", "value": "true", "timestamp": "2026-06-02 17:55:00", "sourceLog": "Client.log"}],
+                "rawLog": "FFlagUnit=true",
+            }],
+            "detectedFastFlags": [{"name": "FFlagUnit", "value": "true", "timestamp": "2026-06-02 17:55:00", "sourceLog": "Client.log"}],
             "findings": [],
             "detectLogs": [{
                 "type": "Generic",
@@ -549,6 +603,9 @@ class CoreTests(unittest.TestCase):
         self.assertIn("report-entry", rendered)
         self.assertIn('data-timestamp=', rendered)
         self.assertIn('applyReportTimeFilter', rendered)
+        self.assertIn("Detected FastFlags", rendered)
+        self.assertIn("Show All Roblox Logs", rendered)
+        self.assertIn("FFlagUnit", rendered)
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json

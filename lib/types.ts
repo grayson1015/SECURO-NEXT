@@ -23,6 +23,48 @@ export type SecuroSession = {
   status?: string;
   linkedDetections?: SecuroFinding[];
   logFile?: string;
+  loadClientSettings?: string[];
+  events?: RobloxLogEvent[];
+  fastFlags?: RobloxFastFlag[];
+  robloxLogs?: RobloxLogArtifact[];
+};
+
+export type RobloxLogEvent = {
+  timestamp?: string;
+  type?: string;
+  sourceLog?: string;
+  message?: string;
+};
+
+export type RobloxFastFlag = {
+  name?: string;
+  value?: string;
+  sourceLog?: string;
+  timestamp?: string;
+  line?: string;
+  placeId?: string;
+  jobId?: string;
+  userId?: string;
+};
+
+export type RobloxLogArtifact = {
+  logFile?: string;
+  modifiedTime?: string;
+  startTime?: string;
+  endTime?: string;
+  duration?: string;
+  placeId?: string;
+  jobId?: string;
+  userId?: string;
+  username?: string;
+  displayName?: string;
+  version?: string;
+  events?: RobloxLogEvent[];
+  fastFlags?: RobloxFastFlag[];
+  loadClientSettings?: string[];
+  errors?: string[];
+  crashes?: string[];
+  rawLog?: string;
 };
 
 export type SecuroFinding = {
@@ -52,6 +94,8 @@ export type SecuroReportJson = {
   evidenceSources: Record<string, boolean | string | number | null>;
   timeline: TimelineEvent[];
   sessions: SecuroSession[];
+  robloxLogs?: RobloxLogArtifact[];
+  detectedFastFlags?: RobloxFastFlag[];
   findings: SecuroFinding[];
   limitations: string[];
   [key: string]: unknown;

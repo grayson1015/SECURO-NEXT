@@ -29,6 +29,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   }), [filteredFindings]);
   const filteredDetections = useMemo(() => filterTimedItems(detectionFindings, timeRange, (item) => item.firstSeen), [detectionFindings, timeRange]);
   const filteredSessions = useMemo(() => filterTimedItems(data.sessions, timeRange, (item) => item.launchTime || item.exitTime), [data.sessions, timeRange]);
+  const filteredRobloxLogs = useMemo(() => filterTimedItems(data.robloxLogs || [], timeRange, (item) => item.startTime || item.modifiedTime), [data.robloxLogs, timeRange]);
+  const filteredFastFlags = useMemo(() => filterTimedItems(data.detectedFastFlags || [], timeRange, (item) => item.timestamp), [data.detectedFastFlags, timeRange]);
   const filteredEvidence = useMemo(
     () => extraEvidence.map((group) => ({
       ...group,
@@ -181,6 +183,69 @@ export function ReportDetail({ report }: { report: ReportRow }) {
         </Card>
 
         <Card className="mt-5">
+          <h2 className="mb-2 text-lg font-semibold">Detected FastFlags</h2>
+          <p className="mb-4 text-sm text-zinc-400">FastFlags are grouped with the Roblox log where they were detected.</p>
+          <div className="space-y-2">
+            {filteredFastFlags.map((flag, index) => (
+              <div key={`${flag.name}-${flag.sourceLog}-${index}`} className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-3 text-sm text-yellow-100">
+                <div className="font-semibold">{flag.name || "FastFlag"}{flag.value ? ` = ${flag.value}` : ""}</div>
+                <div className="mt-1 text-yellow-100/80">Timestamp: {formatDate(flag.timestamp)}</div>
+                <div className="min-w-0 break-words text-yellow-100/80 [overflow-wrap:anywhere]">Source: {flag.sourceLog || "Roblox log"}</div>
+                <div className="text-yellow-100/80">Place: {flag.placeId || ""} Job: {flag.jobId || ""}</div>
+                {flag.line ? <div className="mt-2 min-w-0 break-words text-yellow-100/80 [overflow-wrap:anywhere]">{flag.line}</div> : null}
+              </div>
+            ))}
+            {!filteredFastFlags.length ? <p className="text-sm text-zinc-500">No FastFlags detected in this time range.</p> : null}
+          </div>
+        </Card>
+
+        <Card className="mt-5">
+          <h2 className="mb-2 text-lg font-semibold">Show All Roblox Logs</h2>
+          <p className="mb-4 text-sm text-zinc-400">Expand each captured Roblox log to inspect extracted events, FastFlags, and the raw log text.</p>
+          <div className="space-y-3">
+            {filteredRobloxLogs.map((log, index) => (
+              <details key={`${log.logFile}-${index}`} className="rounded-md border border-border bg-black/20 p-3">
+                <summary className="cursor-pointer font-semibold">
+                  {log.logFile?.split(/[\\/]/).pop() || "Roblox log"} · {formatDate(log.startTime || log.modifiedTime)}
+                </summary>
+                <div className="mt-3 grid gap-2 text-sm text-zinc-400 md:grid-cols-3">
+                  <div>Username: {log.username || "Unknown"}</div>
+                  <div>User ID: {log.userId || ""}</div>
+                  <div>Place ID: {log.placeId || ""}</div>
+                  <div>Job ID: {log.jobId || ""}</div>
+                  <div>Duration: {log.duration || "unknown"}</div>
+                  <div>Version: {log.version || ""}</div>
+                </div>
+                <h3 className="mt-4 text-sm font-semibold text-zinc-200">FastFlags in this log</h3>
+                <div className="mt-2 space-y-2">
+                  {(log.fastFlags || []).map((flag, flagIndex) => (
+                    <div key={`${flag.name}-${flagIndex}`} className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-100">
+                      <div className="font-semibold">{flag.name || "FastFlag"}{flag.value ? ` = ${flag.value}` : ""}</div>
+                      <div>{formatDate(flag.timestamp)}</div>
+                    </div>
+                  ))}
+                  {!(log.fastFlags || []).length ? <p className="text-sm text-zinc-500">None found in this log.</p> : null}
+                </div>
+                <h3 className="mt-4 text-sm font-semibold text-zinc-200">Captured Roblox Events</h3>
+                <div className="mt-2 space-y-2">
+                  {(log.events || []).map((event, eventIndex) => (
+                    <div key={`${event.timestamp}-${eventIndex}`} className="grid gap-2 rounded-md border border-border/70 bg-black/20 p-2 text-xs md:grid-cols-[150px_110px_minmax(0,1fr)]">
+                      <div className="text-zinc-500">{formatDate(event.timestamp)}</div>
+                      <div className="text-primary">{event.type || "Event"}</div>
+                      <div className="min-w-0 break-words text-zinc-300 [overflow-wrap:anywhere]">{event.message || ""}</div>
+                    </div>
+                  ))}
+                  {!(log.events || []).length ? <p className="text-sm text-zinc-500">No structured events extracted.</p> : null}
+                </div>
+                <h3 className="mt-4 text-sm font-semibold text-zinc-200">Raw Roblox Log</h3>
+                <pre className="mt-2 max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/40 p-3 text-xs text-zinc-300">{log.rawLog || ""}</pre>
+              </details>
+            ))}
+            {!filteredRobloxLogs.length ? <p className="text-sm text-zinc-500">No Roblox logs in this time range.</p> : null}
+          </div>
+        </Card>
+
+        <Card className="mt-5">
           <h2 className="mb-4 text-lg font-semibold">Detailed Evidence</h2>
           <div className="space-y-3">
             {filteredEvidence.map((group) => (
@@ -309,6 +374,8 @@ function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
     ["Recovery", raw.recoveryArtifacts || raw.recovery_artifacts || raw.recoveredFiles || raw.recovered_files],
     ["Antivirus Logs", raw.antivirusLogs || raw.antivirus_logs],
     ["Engine Results", raw.engineResults || raw.engine_results],
+    ["Detected FastFlags", raw.detectedFastFlags || raw.detected_fast_flags],
+    ["Roblox Logs", raw.robloxLogs || raw.roblox_logs],
     ["Evidence Sources", Object.entries(data.evidenceSources || {}).map(([source, value]) => ({ source, value }))],
     ["Limitations", (data.limitations || []).map((text) => ({ text }))]
   ];
@@ -334,6 +401,24 @@ function buildExportHtml(report: ReportRow) {
     ${group.items.map((item) => entry(evidenceTimestamp(item), `<pre>${escape(JSON.stringify(item, null, 2))}</pre>`)).join("") || "<p>No entries.</p>"}
     </section>
   `).join("");
+  const fastFlags = (data.detectedFastFlags || []).map((flag) => entry(flag.timestamp, `
+    <p><b>${escape(flag.name || "FastFlag")}</b>${flag.value ? ` = ${escape(flag.value)}` : ""}</p>
+    <p>Source: ${escape(flag.sourceLog || "Roblox log")}</p>
+    <p>Place: ${escape(flag.placeId || "")} Job: ${escape(flag.jobId || "")}</p>
+    <p>${escape(flag.line || "")}</p>
+  `)).join("");
+  const robloxLogs = (data.robloxLogs || []).map((log) => entry(log.startTime || log.modifiedTime, `
+    <details open>
+      <summary>${escape(log.logFile?.split(/[\\/]/).pop() || "Roblox log")} · ${escape(formatDate(log.startTime || log.modifiedTime))}</summary>
+      <p>User: ${escape(log.username || "Unknown")} (${escape(log.userId || "")}) Place: ${escape(log.placeId || "")} Job: ${escape(log.jobId || "")}</p>
+      <h3>FastFlags in this log</h3>
+      ${(log.fastFlags || []).map((flag) => `<p><b>${escape(flag.name || "FastFlag")}</b>${flag.value ? ` = ${escape(flag.value)}` : ""} ${escape(flag.timestamp || "")}</p>`).join("") || "<p>None found.</p>"}
+      <h3>Captured Roblox Events</h3>
+      ${(log.events || []).map((event) => `<div class="timeline-entry"><time>${escape(formatDate(event.timestamp))}</time><div class="timeline-message">${escape(event.message || "")}</div><small class="timeline-source">${escape(event.type || "Event")}</small></div>`).join("") || "<p>No structured events extracted.</p>"}
+      <h3>Raw Roblox Log</h3>
+      <pre>${escape(log.rawLog || "")}</pre>
+    </details>
+  `)).join("");
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
     <style>
@@ -356,6 +441,8 @@ function buildExportHtml(report: ReportRow) {
     <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
     <section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section>
     <section><h2>Sessions</h2>${data.sessions.map((session) => entry(session.launchTime || session.exitTime, `<p><b>${escape(session.username || "Unknown user")}</b></p><p>User ID: ${escape(session.userId || "")}</p><p>Place: ${escape(session.placeId || session.gameId || "")}</p><p>Duration: ${escape(session.duration || "unknown")}</p><p>Status: ${escape(session.status || "Clean")}</p>`)).join("") || "<p>No sessions.</p>"}</section>
+    <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
+    <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>
     <section><h2>Findings</h2>${visibleFindings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`, "div", isConfirmedFinding(finding))).join("") || "<p>No findings.</p>"}</section>
     ${evidence}
     <section><h2>Raw report</h2><pre>${escape(JSON.stringify(data, null, 2))}</pre></section>

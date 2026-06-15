@@ -159,6 +159,10 @@ TRUST_DAMPEN_SIGNERS = (
     "Spotify",
     "Proton",
     "Python Software Foundation",
+    "OpenAI",
+    "Codex",
+    "Medal",
+    "Medal.tv",
 )
 COMMON_DEPENDENCY_NAMES = (
     "sqlite3.dll",
@@ -198,6 +202,16 @@ MAINSTREAM_SOFTWARE_PATH_MARKERS = (
     "\\roblox\\",
     "\\microsoft\\",
     "\\mozilla firefox\\",
+    "\\medal\\",
+    "\\medal.tv\\",
+    "\\overwolf\\",
+)
+DEVELOPER_TOOL_PATH_MARKERS = (
+    "\\documents\\codex\\",
+    "\\.codex\\",
+    "\\.cache\\codex-runtimes\\",
+    "\\codex-primary-runtime\\",
+    "\\openai\\codex\\",
 )
 PROTECTED_SYSTEM_PROCESS_NAMES = {
     "svchost.exe",
@@ -418,6 +432,8 @@ def securo_internal_path(path: str, config: dict | None = None) -> bool:
     if not path:
         return False
     lowered = str(path).lower()
+    if any(marker in lowered for marker in DEVELOPER_TOOL_PATH_MARKERS):
+        return True
     looks_like_path = bool(re.match(r"^[a-z]:[\\/]", str(path), re.I) or str(path).startswith(("\\\\", "/", "~")) or "\\" in str(path) or "/" in str(path))
     internal_names = (
         "sqlite3.dll",
@@ -1435,6 +1451,62 @@ def format_duration(start: str, end: str) -> str:
     return f"{seconds}s"
 
 
+def extract_fastflags_from_line(line: str, timestamp: str, source_log: str) -> list[dict]:
+    results = []
+    seen = set()
+    patterns = [
+        r"\b((?:D?F(?:Flag|Int|String|Log)|SFFlag)[A-Za-z0-9_]+)\b\s*(?:=|:|,)\s*([^\s,\]}\"']+)",
+        r"[\"']((?:D?F(?:Flag|Int|String|Log)|SFFlag)[A-Za-z0-9_]+)[\"']\s*:\s*[\"']?([^,\"'}\]]+)",
+        r"\b((?:D?F(?:Flag|Int|String|Log)|SFFlag)[A-Za-z0-9_]+)\b",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, line, re.I):
+            name = match.group(1)
+            value = match.group(2).strip() if len(match.groups()) >= 2 and match.group(2) is not None else ""
+            key = (name.lower(), value)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                "name": name,
+                "value": value,
+                "sourceLog": source_log,
+                "timestamp": timestamp,
+                "line": line.strip(),
+            })
+    return results
+
+
+def roblox_event_from_line(line: str, timestamp: str, source_log: str) -> dict | None:
+    low = line.lower()
+    event_terms = {
+        "teleport": "Teleport",
+        "reconnect": "Reconnect",
+        "server": "Server",
+        "placeid": "Place",
+        "place id": "Place",
+        "jobid": "Job",
+        "job id": "Job",
+        "join": "Join",
+        "leave": "Leave",
+        "disconnect": "Disconnect",
+        "loadclientsettings": "ClientSettings",
+        "fflag": "FastFlag",
+        "dfint": "FastFlag",
+        "ffint": "FastFlag",
+        "dfflag": "FastFlag",
+    }
+    kind = next((label for term, label in event_terms.items() if term in low), "")
+    if not kind:
+        return None
+    return {
+        "timestamp": timestamp,
+        "type": kind,
+        "sourceLog": source_log,
+        "message": line.strip(),
+    }
+
+
 def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict], list[dict]]:
     sessions = []
     timeline = []
@@ -1467,10 +1539,18 @@ def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict]
                 "errors": [],
                 "crashes": [],
                 "flags": [],
+                "fast_flags": [],
+                "events": [],
+                "raw_log": "",
+                "raw_lines": [],
+                "all_logs": [],
                 "suspicious_lines": [],
             }
             try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                raw_text = path.read_text(encoding="utf-8", errors="replace")
+                lines = raw_text.splitlines()
+                session["raw_log"] = raw_text
+                session["raw_lines"] = lines
             except Exception:
                 lines = []
             seen_times = []
@@ -1478,16 +1558,23 @@ def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict]
                 ts = parse_log_timestamp(line, mtime)
                 if ts:
                     seen_times.append(ts)
+                line_time = (ts or mtime).isoformat(sep=" ", timespec="seconds")
+                event = roblox_event_from_line(line, line_time, str(path))
+                if event:
+                    session["events"].append(event)
                 if "LoadClientSettings" in line:
-                    session["load_client_settings"].append(line.strip()[:500])
+                    session["load_client_settings"].append(line.strip())
                 if re.search(r"\b(error|warn|failed|exception)\b", line, re.I):
-                    session["errors"].append(line.strip()[:500])
+                    session["errors"].append(line.strip())
                 if re.search(r"\b(crash|fatal|minidump|stack trace)\b", line, re.I):
-                    session["crashes"].append(line.strip()[:500])
+                    session["crashes"].append(line.strip())
                 if re.search(r"\b(fflag|dfint|fflag|flag)\b", line, re.I):
-                    session["flags"].append(line.strip()[:500])
+                    session["flags"].append(line.strip())
+                fast_flags = extract_fastflags_from_line(line, line_time, str(path))
+                if fast_flags:
+                    session["fast_flags"].extend(fast_flags)
                 if suspicious_text(line, config):
-                    session["suspicious_lines"].append(line.strip()[:500])
+                    session["suspicious_lines"].append(line.strip())
                 for key, pat in [
                     ("user_id", r"(?:userid|user id|userId)[^\d]*(\d+)"),
                     ("place_id", r"(?:placeid|place id|gameid|game id|placeId)[^\d]*(\d+)"),
@@ -1506,14 +1593,42 @@ def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict]
                 session["duration"] = format_duration(session["start_time"], session["end_time"])
             if not session["duration"]:
                 session["duration"] = "unknown"
+            session["all_logs"] = [{
+                "logFile": str(path),
+                "modifiedTime": mtime.isoformat(sep=" ", timespec="seconds"),
+                "startTime": session["start_time"],
+                "endTime": session["end_time"],
+                "duration": session["duration"],
+                "placeId": session["place_id"],
+                "jobId": session["job_id"],
+                "userId": session["user_id"],
+                "username": session["username"] or "Unknown",
+                "displayName": session["display_name"],
+                "version": session["version"],
+                "events": session["events"],
+                "fastFlags": session["fast_flags"],
+                "loadClientSettings": session["load_client_settings"],
+                "errors": session["errors"],
+                "crashes": session["crashes"],
+                "rawLog": session["raw_log"],
+            }]
             sessions.append(session)
             timeline.append({"time": session["start_time"], "source": "Roblox log", "text": f"{ROBLOX_EXE} session/log observed: {path.name}"})
+            for event in session["events"]:
+                if event.get("type") in {"Teleport", "Reconnect", "Join", "Disconnect", "ClientSettings", "FastFlag"}:
+                    timeline.append({"time": event.get("timestamp", session["start_time"]), "source": f"Roblox {event.get('type')}", "text": event.get("message", "")[:240]})
             for line in session["crashes"][:3]:
                 timeline.append({"time": session["start_time"], "source": "Roblox log", "text": f"Roblox crash/fatal line: {line[:160]}"})
     deduped = {}
     for s in sessions:
         key = (s.get("start_time"), s.get("end_time"), s.get("place_id"), s.get("job_id"), s.get("user_id"), s.get("username"))
-        deduped[key] = s
+        if key not in deduped:
+            deduped[key] = s
+            continue
+        existing = deduped[key]
+        for field in ["load_client_settings", "errors", "crashes", "flags", "fast_flags", "events", "suspicious_lines", "all_logs"]:
+            existing[field] = existing.get(field, []) + s.get(field, [])
+        existing["log_file"] = "; ".join(sorted(set([existing.get("log_file", ""), s.get("log_file", "")]) - {""}))
     return list(deduped.values()), timeline
 
 
@@ -2877,10 +2992,33 @@ def camel_session(session: dict) -> dict:
         "linkedDetections": session.get("linked_detections", []),
         "logFile": session.get("log_file", ""),
         "loadClientSettings": session.get("load_client_settings", []),
+        "events": session.get("events", []),
+        "fastFlags": session.get("fast_flags", []),
+        "robloxLogs": session.get("all_logs", []),
         "errors": session.get("errors", [])[:20],
         "crashes": session.get("crashes", [])[:20],
         "suspiciousLines": session.get("suspicious_lines", [])[:20],
     }
+
+
+def roblox_logs_for_report(sessions: list[dict]) -> list[dict]:
+    logs = []
+    for session in sessions:
+        for item in session.get("all_logs", []):
+            logs.append(item)
+    return sorted(logs, key=lambda item: parse_dt(item.get("startTime") or item.get("modifiedTime")) or dt.datetime.min)
+
+
+def fastflags_for_report(sessions: list[dict]) -> list[dict]:
+    flags = []
+    for session in sessions:
+        for flag in session.get("fast_flags", []):
+            row = dict(flag)
+            row.setdefault("placeId", session.get("place_id", ""))
+            row.setdefault("jobId", session.get("job_id", ""))
+            row.setdefault("userId", session.get("user_id", ""))
+            flags.append(row)
+    return sorted(flags, key=lambda item: parse_dt(item.get("timestamp")) or dt.datetime.min)
 
 
 def camel_finding(finding: dict) -> dict:
@@ -2978,6 +3116,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "evidenceSources": quality,
         "timeline": timeline,
         "sessions": [camel_session(s) for s in sessions_raw],
+        "robloxLogs": roblox_logs_for_report(sessions_raw),
+        "detectedFastFlags": fastflags_for_report(sessions_raw),
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
         "correlationFindings": correlation_findings_for_report(findings),
@@ -3228,6 +3368,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "evidenceSources": quality,
         "timeline": timeline,
         "sessions": [camel_session(s) for s in sessions_raw],
+        "robloxLogs": roblox_logs_for_report(sessions_raw),
+        "detectedFastFlags": fastflags_for_report(sessions_raw),
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
         "correlationFindings": correlation_findings_for_report(findings),
@@ -3417,6 +3559,24 @@ def render_txt(report: dict) -> str:
         ]
         for linked in s.get("linkedDetections", []):
             lines += [f"  Detection: {linked.get('name')} {linked.get('classification')} {linked.get('path')}"]
+    lines += ["", "Detected FastFlags", "------------------"]
+    if not report.get("detectedFastFlags"):
+        lines.append("No FastFlags detected in captured Roblox logs.")
+    for flag in report.get("detectedFastFlags", []):
+        lines.append(f"{flag.get('timestamp')} {flag.get('name')}={flag.get('value')} Source={flag.get('sourceLog')} Place={flag.get('placeId')} Job={flag.get('jobId')}")
+    lines += ["", "All Roblox Logs", "---------------"]
+    if not report.get("robloxLogs"):
+        lines.append("No raw Roblox logs captured.")
+    for item in report.get("robloxLogs", []):
+        lines += [
+            f"Log: {item.get('logFile')}",
+            f"Start: {item.get('startTime')} End: {item.get('endTime')} Duration: {item.get('duration')}",
+            f"User: {item.get('username')} ({item.get('userId')}) Place: {item.get('placeId')} Job: {item.get('jobId')}",
+            "Events:",
+        ]
+        for event in item.get("events", []):
+            lines.append(f"  {event.get('timestamp')} [{event.get('type')}] {event.get('message')}")
+        lines += ["Raw Roblox Log:", item.get("rawLog", ""), ""]
     lines += ["Findings", "--------"]
     if not report["findings"]:
         lines += ["No confirmed Roblox injection evidence was found in available logs.", "Logging coverage may not be sufficient to rule it out.", ""]
@@ -3484,6 +3644,14 @@ def render_html(report: dict) -> str:
         "Signer": f["signer"].get("status", ""), "First Seen": f["firstSeen"], "Reason": "; ".join(b["reason"] for b in f["scoreBreakdown"][:3])
     } for f in sorted(report["findings"], key=lambda x: x["score"], reverse=True)[:10]]
     sessions = [{"Username": s["username"], "Display Name": s.get("displayName", ""), "User ID": s["userId"], "Place ID": s["placeId"], "Job ID": s["jobId"], "Duration": s["duration"], "Status": s.get("status", "Clean"), "Timestamp": s.get("launchTime", "")} for s in report["sessions"]]
+    fastflag_rows = [{
+        "FastFlag": f.get("name", ""),
+        "Value": f.get("value", ""),
+        "Source Log": f.get("sourceLog", ""),
+        "Timestamp": f.get("timestamp", ""),
+        "Place ID": f.get("placeId", ""),
+        "Job ID": f.get("jobId", ""),
+    } for f in report.get("detectedFastFlags", [])]
     detect_rows = [{
         "Type": d.get("type", ""),
         "Detection": d.get("detectionName", ""),
@@ -3572,6 +3740,27 @@ def render_html(report: dict) -> str:
         f"<div class='session report-entry {html.escape((s.get('status') or 'Clean').lower())}'{html_data_timestamp(s.get('launchTime'))}><h3>{html.escape(s.get('username') or 'Unknown')}</h3><p><b>Display Name:</b> {html.escape(s.get('displayName', ''))}</p><p><b>User ID:</b> {html.escape(s.get('userId', ''))}</p><p><b>Place ID:</b> {html.escape(s.get('placeId', ''))}</p><p><b>Job ID:</b> {html.escape(s.get('jobId', ''))}</p><p><b>Duration:</b> {html.escape(s.get('duration', 'unknown'))}</p><p><b>Status:</b> {html.escape(s.get('status', 'Clean'))}</p>{''.join('<p><b>Detection:</b> ' + html.escape(d.get('name','')) + ' ' + html.escape(d.get('path','')) + '</p>' for d in s.get('linkedDetections', []))}</div>"
         for s in report["sessions"]
     )
+    roblox_log_html = ""
+    for item in report.get("robloxLogs", []):
+        events = "".join(
+            f"<li class='report-entry'{html_data_timestamp(event.get('timestamp'))}><time>{html.escape(str(event.get('timestamp', '')))}</time><span>{html.escape(str(event.get('message', '')))}</span><small>{html.escape(str(event.get('type', '')))}</small></li>"
+            for event in item.get("events", [])
+        )
+        per_log_flags = html_table([{
+            "FastFlag": flag.get("name", ""),
+            "Value": flag.get("value", ""),
+            "Timestamp": flag.get("timestamp", ""),
+            "Source Log": flag.get("sourceLog", ""),
+        } for flag in item.get("fastFlags", [])], ["FastFlag", "Value", "Timestamp", "Source Log"], "Timestamp")
+        roblox_log_html += (
+            f"<details class='report-entry' open{html_data_timestamp(item.get('startTime') or item.get('modifiedTime'))}>"
+            f"<summary>{html.escape(Path(str(item.get('logFile', 'Roblox log'))).name)} - {html.escape(str(item.get('startTime') or item.get('modifiedTime') or 'unknown time'))}</summary>"
+            f"<p><b>Place ID:</b> {html.escape(str(item.get('placeId', '')))} <b>Job ID:</b> {html.escape(str(item.get('jobId', '')))} <b>User ID:</b> {html.escape(str(item.get('userId', '')))}</p>"
+            f"<h4>Detected FastFlags in this log</h4>{per_log_flags}"
+            f"<h4>Captured Roblox Events</h4><ul class='timeline'>{events or '<li>No structured events extracted.</li>'}</ul>"
+            f"<h4>Raw Roblox Log</h4><pre>{html.escape(str(item.get('rawLog', '')))}</pre>"
+            f"</details>"
+        )
     raw = html.escape(json.dumps(report, indent=2))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
@@ -3589,6 +3778,8 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Antivirus Logs</h2>{html_table(antivirus_rows, ['Source','Detection','Severity','Timestamp','Path'], 'Timestamp')}</section>
 <section><h2>Engines</h2>{html_table(engine_rows, ['File','Score','Local Hits','Detectability','VirusTotal','Manual Review'])}</section>
 <section><h2>Session Information</h2><div class="sessions">{session_cards}</div>{html_table(sessions, ['Username','Display Name','User ID','Place ID','Job ID','Duration','Status'], 'Timestamp')}</section>
+<section><h2>Detected FastFlags</h2><p class="muted">FastFlags are grouped with the Roblox log where they were found.</p>{html_table(fastflag_rows, ['FastFlag','Value','Source Log','Timestamp','Place ID','Job ID'], 'Timestamp')}</section>
+<section><h2>Show All Roblox Logs</h2><p class="muted">Expand each log to inspect every captured Roblox event and the raw log text.</p>{roblox_log_html or "<p class='muted'>No raw Roblox logs were captured.</p>"}</section>
 <section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section>
 <section><h2>Findings</h2>{findings_html}</section>
 <section><h2>Evidence Limitations</h2><ul>{quality}</ul></section>
