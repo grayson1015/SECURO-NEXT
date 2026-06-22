@@ -52,6 +52,8 @@ def main():
             "SecuroChecker",
             "--add-data",
             "config.json;.",
+            "--add-data",
+            "securo_iocs.json;.",
             "roblox_pc_checker.py",
         ],
         cwd=ROOT,

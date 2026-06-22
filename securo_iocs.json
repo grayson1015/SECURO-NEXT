@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "updated": "2026-06-22",
+  "description": "Securo local IOC list. Add confirmed indicators here without changing scanner code.",
+  "filenames": [],
+  "folder_names": [],
+  "hashes": [],
+  "publisher_names": [],
+  "registry_keys": [],
+  "mutexes": [],
+  "domains": [],
+  "ips": []
+}

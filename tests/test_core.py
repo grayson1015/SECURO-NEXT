@@ -42,6 +42,8 @@ def test_config():
         "default_scan_profile": "standard",
         "scan_profiles": {},
         "storage_base_dir": "",
+        "ioc_file": "securo_iocs.json",
+        "iocs": checker.normalize_iocs({}),
         "known_bad_hashes": [],
         "executor_confirmation_keywords": ["Volt", "Potassium", "Wave", "Synapse Z", "Seliware", "Madium", "Cosmic", "Velocity", "SirHurt", "Solara", "Xeno"],
         "category_thresholds": {"confirmed": 70, "suspicious": 35, "weak": 10},
@@ -58,6 +60,8 @@ class CoreTests(unittest.TestCase):
         for name in [
             "parse_roblox_logs",
             "collect_process_evidence",
+            "collect_running_processes",
+            "collect_network_ioc_evidence",
             "collect_prefetch_evidence",
             "collect_file_artifacts",
             "collect_powershell_history",
@@ -75,6 +79,8 @@ class CoreTests(unittest.TestCase):
         try:
             checker.parse_roblox_logs = lambda days, config: ([], [])
             checker.collect_process_evidence = lambda days, config, sessions: ([], [])
+            checker.collect_running_processes = lambda config, sessions: ([], [])
+            checker.collect_network_ioc_evidence = lambda config: ([], [])
             checker.collect_prefetch_evidence = lambda days, config, sessions: ([], [])
             checker.collect_file_artifacts = lambda days, config, sessions, verbose=False: ([], [])
             checker.collect_powershell_history = lambda days, config, sessions: ([], [])
@@ -98,6 +104,8 @@ class CoreTests(unittest.TestCase):
             self.assertIn(key, report)
         for key in ["detectLogs", "warningLogs", "recoveryArtifacts", "antivirusLogs", "engineResults"]:
             self.assertIn(key, report)
+        self.assertTrue(report["scanTransparency"]["readOnly"])
+        self.assertIn("Roblox logs including user ID", " ".join(report["scanTransparency"]["scannedScope"]))
 
     def test_upload_payload_shape(self):
         captured = {}
@@ -233,6 +241,75 @@ class CoreTests(unittest.TestCase):
         finding["first_seen"] = "2026-06-02 12:00:00"
         result = checker.finalize_findings([finding], config)[0]
         self.assertNotEqual(result["classification"], "Confirmed Exploit")
+
+    def test_ioc_hash_match_confirms_flagged_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "neutral_tool.exe"
+            path.write_bytes(b"MZ harmless fixture")
+            digest = checker.sha256_file(str(path))
+            config = test_config()
+            config["iocs"] = checker.normalize_iocs({"hashes": [digest]})
+            finding = checker.make_finding(str(path), path.name, "unit", config)
+            finding["first_seen"] = "2026-06-02 12:00:00"
+            result = checker.finalize_findings([finding], config)[0]
+        self.assertIn("Confirmed IOC", result["detection_categories"])
+        self.assertEqual(result["classification"], "Confirmed Exploit")
+        self.assertEqual(result["confidence_level"], "Confirmed")
+
+    def test_running_process_ioc_match_is_reported(self):
+        config = test_config()
+        config["iocs"] = checker.normalize_iocs({"filenames": ["BadLoader.exe"]})
+        csv_text = (
+            "Node,CommandLine,ExecutablePath,Name,ParentProcessId,ProcessId\r\n"
+            "PC,\"C:\\Users\\timmy\\Downloads\\BadLoader.exe --run\",C:\\Users\\timmy\\Downloads\\BadLoader.exe,BadLoader.exe,100,200\r\n"
+            "PC,C:\\Roblox\\RobloxPlayerBeta.exe,C:\\Roblox\\RobloxPlayerBeta.exe,RobloxPlayerBeta.exe,50,201\r\n"
+        )
+        original = checker.run_command
+        try:
+            checker.run_command = lambda *args, **kwargs: csv_text
+            findings, timeline = checker.collect_running_processes(config, [])
+        finally:
+            checker.run_command = original
+        self.assertTrue(findings)
+        finalized = checker.finalize_findings(findings, config)
+        self.assertIn("Confirmed IOC", finalized[0]["detection_categories"])
+        self.assertTrue(any("BadLoader.exe" in event["text"] for event in timeline))
+
+    def test_normal_roblox_install_path_is_not_confirmed(self):
+        config = test_config()
+        finding = checker.make_finding(
+            "C:\\Program Files (x86)\\Roblox\\Versions\\version-123\\RobloxPlayerBeta.exe",
+            "RobloxPlayerBeta.exe",
+            "unit",
+            config,
+        )
+        checker.add_detection(finding, "A3", "Generic indicator fixture", "Medium", 80)
+        result = checker.finalize_findings([finding], config)[0]
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+
+    def test_session_report_includes_roblox_identity_client_settings_and_times(self):
+        session = {
+            "place_id": "987654321",
+            "job_id": "abc-def",
+            "user_id": "123456789",
+            "username": "ExampleUser",
+            "display_name": "Example",
+            "start_time": "2026-06-02 17:00:00",
+            "end_time": "2026-06-02 18:24:00",
+            "duration": "1h 24m",
+            "load_client_settings": ["LoadClientSettingsFromLocal ClientAppSettings.json"],
+        }
+        row = checker.camel_session(session)
+        self.assertEqual(row["userId"], "123456789")
+        self.assertEqual(row["username"], "ExampleUser")
+        self.assertEqual(row["displayName"], "Example")
+        self.assertEqual(row["gameId"], "987654321")
+        self.assertEqual(row["placeId"], "987654321")
+        self.assertEqual(row["jobId"], "abc-def")
+        self.assertEqual(row["launchTime"], "2026-06-02 17:00:00")
+        self.assertEqual(row["exitTime"], "2026-06-02 18:24:00")
+        self.assertEqual(row["duration"], "1h 24m")
+        self.assertIn("LoadClientSettingsFromLocal", row["loadClientSettings"][0])
 
     def test_shellbag_and_recycle_bin_context_stay_possible(self):
         config = test_config()

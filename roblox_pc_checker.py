@@ -33,6 +33,7 @@ CONFIRMED_EXPLOIT_CATEGORIES = {
     "Tampered File",
     "A3",
     "Skript Loader Trace",
+    "Confirmed IOC",
 }
 HIGH_CONFIDENCE_CHEAT_CATEGORIES = {"S1", "DLL", "BSoD", "S2", "C3", "C4", "A"}
 GENERIC_DETECTION_CATEGORIES = {
@@ -72,6 +73,8 @@ SPECIFIC_DETECTION_CATEGORIES = {
     "Packed Or Obfuscated Executable",
     "File Tampering Or Integrity Violation",
     "Generic Bypass Method",
+    "Known-Bad Network IOC",
+    "Suspicious Persistence IOC",
     "Tampered File",
     "Generic Bypass Method (NVIDIA / Powershell execution log)",
     "Suspicious DLL Deletion",
@@ -321,7 +324,126 @@ def load_config() -> dict:
     config.setdefault("default_scan_profile", "standard")
     config.setdefault("scan_profiles", {})
     config.setdefault("storage_base_dir", "")
+    config.setdefault("ioc_file", "securo_iocs.json")
+    config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
+
+
+def load_iocs(filename: str | None = None) -> dict:
+    ioc_file = str(filename or "securo_iocs.json").strip() or "securo_iocs.json"
+    candidates = []
+    configured = Path(os.path.expandvars(ioc_file)).expanduser()
+    if configured.is_absolute():
+        candidates.append(configured)
+    else:
+        candidates.extend([app_dir() / configured, resource_path(str(configured))])
+    for path in candidates:
+        try:
+            if path.exists():
+                with path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return normalize_iocs(data)
+        except Exception:
+            continue
+    return normalize_iocs({})
+
+
+def scan_transparency_metadata() -> dict:
+    return {
+        "readOnly": True,
+        "automaticFileUpload": False,
+        "automaticFileDeletion": False,
+        "automaticQuarantine": False,
+        "credentialCollection": False,
+        "privateMessageCollection": False,
+        "scannedScope": [
+            "Running process metadata, process names, paths, parent process IDs, and command lines when available",
+            "Startup folders, Run registry keys, scheduled tasks, services, and WMI persistence metadata",
+            "Downloads, Desktop, Documents, AppData, Temp, ProgramData, and Roblox-related folders",
+            "Prefetch, Windows Security/Sysmon event logs when available, Defender artifacts, browser download metadata, ShellBag context, and Recycle Bin metadata",
+            "Roblox logs including user ID, username, display name when available, place ID/game ID, job ID, session time, duration, LoadClientSettings lines, and FastFlags",
+            "Suspicious executable/script metadata including SHA-256, Authenticode signer status, timestamps, and file path",
+            "Optional IOC matches loaded from the local Securo IOC JSON file",
+        ],
+        "notCollected": [
+            "Passwords",
+            "Browser cookies",
+            "Authentication tokens",
+            "Discord tokens or private Discord data",
+            "Private messages",
+            "Raw private documents unrelated to suspicious artifacts",
+        ],
+    }
+
+
+def normalize_iocs(data: dict) -> dict:
+    data = data if isinstance(data, dict) else {}
+    aliases = {
+        "filenames": ("filenames", "file_names", "files"),
+        "folder_names": ("folder_names", "folders", "directories"),
+        "hashes": ("hashes", "sha256", "sha256s"),
+        "publisher_names": ("publisher_names", "publishers", "signers"),
+        "registry_keys": ("registry_keys", "registry"),
+        "mutexes": ("mutexes",),
+        "domains": ("domains",),
+        "ips": ("ips", "ip_addresses"),
+    }
+    normalized = {}
+    for key, names in aliases.items():
+        values = []
+        for name in names:
+            raw = data.get(name, [])
+            if isinstance(raw, str):
+                values.append(raw)
+            elif isinstance(raw, list):
+                values.extend(str(item) for item in raw if str(item).strip())
+        normalized[key] = sorted({value.strip() for value in values if value.strip()})
+    return normalized
+
+
+def ioc_values(config: dict, key: str) -> list[str]:
+    iocs = config.get("iocs") or {}
+    values = iocs.get(key, [])
+    return values if isinstance(values, list) else []
+
+
+def ioc_text_matches(text: str, config: dict) -> list[tuple[str, str]]:
+    low = (text or "").lower()
+    matches = []
+    for key in ("filenames", "folder_names", "registry_keys", "mutexes", "domains", "ips"):
+        for value in ioc_values(config, key):
+            needle = str(value).strip().lower()
+            if needle and needle in low:
+                matches.append((key, value))
+    return matches
+
+
+def apply_ioc_matches(finding: dict, config: dict, extra_text: str = ""):
+    if finding.get("suppressed"):
+        return
+    digest = (finding.get("sha256") or "").lower()
+    known_hashes = {str(value).lower() for value in ioc_values(config, "hashes")}
+    if digest and digest in known_hashes:
+        add_detection(finding, "Confirmed IOC", "SHA-256 matched an external IOC entry.", "High Risk", 70)
+        finding.setdefault("evidence_types", []).append("ioc_hash")
+    signer_text = " ".join(str(finding.get("signer", {}).get(field, "")) for field in ("subject", "issuer"))
+    for publisher in ioc_values(config, "publisher_names"):
+        if publisher.lower() in signer_text.lower():
+            add_detection(finding, "Confirmed IOC", f"Publisher/signer matched IOC: {publisher}", "High Risk", 55)
+            finding.setdefault("evidence_types", []).append("ioc_publisher")
+    text = " ".join([finding.get("name", ""), finding.get("path", ""), extra_text] + finding.get("supporting_evidence", []))
+    for key, value in ioc_text_matches(text, config):
+        if key in {"domains", "ips"}:
+            category = "Known-Bad Network IOC"
+            points = 40
+        elif key == "registry_keys":
+            category = "Suspicious Persistence IOC"
+            points = 35
+        else:
+            category = "Confirmed IOC"
+            points = 45
+        add_detection(finding, category, f"{key} matched external IOC: {value}", "High Risk", points)
+        finding.setdefault("evidence_types", []).append(f"ioc_{key}")
 
 
 def scan_profiles() -> dict:
@@ -873,6 +995,7 @@ def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     if low_signal_path(norm):
         finding["low_signal_path"] = True
         finding["supporting_evidence"].append("Known noisy folder context; path-abuse score is dampened.")
+    apply_ioc_matches(finding, config)
     return finding
 
 
@@ -1162,6 +1285,8 @@ def cheap_artifact_candidate(path_text: str, times: list[dt.datetime], sessions:
     suffix = Path(path_text).suffix.lower()
     if suspicious_name(name, config):
         return True
+    if ioc_text_matches(path_text, config):
+        return True
     if any(near_any_session(t, sessions) for t in times):
         return True
     if risky_source_path(path_text) and suffix in {".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".ahk", ".rar", ".7z", ".zip", ".jar"}:
@@ -1197,6 +1322,8 @@ def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     if not confirmed_verification_gate(finding, config):
         return False
     if known_bad_hash(finding, config):
+        return True
+    if "Confirmed IOC" in categories:
         return True
     if real_behavioral_evidence(finding):
         return True
@@ -1798,6 +1925,7 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
             if low_signal_path(ident["path"]):
                 findings[key]["low_signal_path"] = True
                 findings[key]["supporting_evidence"].append("Known noisy folder context; path-abuse score is dampened.")
+            apply_ioc_matches(findings[key], config)
         return findings[key]
 
     for ev in sysmon_events:
@@ -1890,6 +2018,70 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
         else:
             f["attribution_explanation"] = "Available logs do not identify this as confirmed executor evidence; treat as context unless stronger evidence exists."
     return list(findings.values()), timeline
+
+
+def collect_running_processes(config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
+    # Live process inventory is read-only and captures path/hash/signer/command-line context.
+    findings = {}
+    timeline = []
+    out = run_command(["wmic", "process", "get", "ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine", "/format:csv"], timeout=25)
+    try:
+        rows = list(csv.DictReader(line for line in out.splitlines() if line.strip()))
+    except Exception:
+        rows = []
+    roblox_running = any(ROBLOX_EXE.lower() in (row.get("Name", "") or "").lower() for row in rows)
+    for row in rows:
+        name = row.get("Name", "") or ""
+        path = row.get("ExecutablePath", "") or ""
+        command = row.get("CommandLine", "") or ""
+        text = " ".join([name, path, command])
+        ioc_hit = bool(ioc_text_matches(text, config))
+        if not (suspicious_text(text, config) or ioc_hit or risky_source_path(path)):
+            continue
+        finding = make_finding(path, name or "Running process", "running_process", config)
+        finding["first_seen"] = iso_now()
+        finding["parent_process"] = row.get("ParentProcessId", "")
+        finding["process_id"] = row.get("ProcessId", "")
+        finding["command_line"] = command[:1000]
+        finding["supporting_evidence"].append(f"Running process pid={row.get('ProcessId', '')} ppid={row.get('ParentProcessId', '')} command={command[:500]}")
+        finding["evidence_types"].append("running_process")
+        if finding.get("signer", {}).get("status", "").lower() in {"notsigned", "unknown", "missing"}:
+            add_detection(finding, "Executed Suspicious File", "Running unsigned or unverifiable process in suspicious context.", "High", 25)
+        if roblox_running and (suspicious_text(text, config) or ioc_hit):
+            add_score(finding, config["score_rules"].get("executor_behavior", 30), "Suspicious process was running while Roblox was present")
+            finding["supporting_evidence"].append(f"{ROBLOX_EXE} was present in the live process list during scan.")
+        apply_ioc_matches(finding, config, command)
+        merge_findings(findings, finding)
+        timeline.append({"time": finding["first_seen"], "source": "Running process", "text": f"Suspicious running process observed: {name or path}"})
+    return finalize_findings(list(findings.values()), config), timeline
+
+
+def collect_network_ioc_evidence(config: dict) -> tuple[list[dict], list[dict]]:
+    # Network collection only checks live connection metadata against configured IOC domains/IPs.
+    indicators = {str(value).lower() for value in ioc_values(config, "domains") + ioc_values(config, "ips") if str(value).strip()}
+    if not indicators:
+        return [], []
+    findings = {}
+    timeline = []
+    out = run_command(["netstat", "-ano"], timeout=15)
+    when = iso_now()
+    for line in out.splitlines():
+        low = line.lower()
+        matched = [ioc for ioc in indicators if ioc in low]
+        if not matched:
+            continue
+        parts = line.split()
+        pid = parts[-1] if parts and parts[-1].isdigit() else ""
+        finding = make_finding("", f"Network connection PID {pid or 'unknown'}", "network_ioc", config)
+        finding["first_seen"] = when
+        finding["process_id"] = pid
+        finding["supporting_evidence"].append(f"netstat: {line}")
+        finding["evidence_types"].append("network_connection")
+        for ioc in matched:
+            add_detection(finding, "Known-Bad Network IOC", f"Network connection matched external IOC: {ioc}", "High Risk", 40)
+        merge_findings(findings, finding)
+        timeline.append({"time": when, "source": "Network IOC", "text": f"Network connection matched IOC: {', '.join(matched)}"})
+    return finalize_findings(list(findings.values()), config), timeline
 
 
 def scan_roots() -> list[Path]:
@@ -2407,7 +2599,7 @@ def collect_persistence(days: int, config: dict, sessions: list[dict]) -> tuple[
     for line in wmi.splitlines():
         checks.append(("WMI persistence", "", line))
     for source, location, text in checks:
-        if not (suspicious_text(text, config) or user_writable_path(text)):
+        if not (suspicious_text(text, config) or user_writable_path(text) or ioc_text_matches(" ".join([source, location, text]), config)):
             continue
         paths = re.findall(r"[A-Za-z]:\\[^\"<>|]+?\.(?:exe|dll|ps1|bat|cmd|vbs|js)", text, re.I)
         path = paths[0] if paths else location
@@ -2416,6 +2608,7 @@ def collect_persistence(days: int, config: dict, sessions: list[dict]) -> tuple[
         add_score(finding, config["score_rules"]["persistence"], f"Suspicious persistence entry: {source}")
         finding["supporting_evidence"].append(text[:800])
         finding["evidence_types"].append("persistence")
+        apply_ioc_matches(finding, config, " ".join([source, location, text]))
         merge_findings(findings, finding)
         timeline.append({"time": finding["first_seen"], "source": source, "text": f"Suspicious persistence entry: {text[:160]}"})
     return list(findings.values()), timeline
@@ -3051,6 +3244,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     scan_time = iso_now()
     sessions_raw, roblox_timeline = parse_roblox_logs(days, config)
     process_findings, process_timeline = collect_process_evidence(days, config, sessions_raw)
+    running_findings, running_timeline = collect_running_processes(config, sessions_raw)
+    network_findings, network_timeline = collect_network_ioc_evidence(config)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=verbose)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
@@ -3070,6 +3265,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     raw_timeline = (
         roblox_timeline
         + process_timeline
+        + running_timeline
+        + network_timeline
         + prefetch_timeline
         + file_timeline
         + ps_timeline
@@ -3082,7 +3279,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -3127,6 +3324,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "scanProfileDescription": config.get("scan_profile_description", ""),
         "topScore": top_score,
         "systemInfo": system,
+        "scanTransparency": scan_transparency_metadata(),
         "finalStatement": "No confirmed Roblox injection evidence was found in available logs. Logging coverage may not be sufficient to rule it out."
         if highest_result not in ["Confirmed Exploit", "Suspicious"]
         else "Confirmed exploit or suspicious Roblox exploit/injection evidence was found in available artifacts.",
@@ -3290,6 +3488,9 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     sessions_raw, roblox_timeline = parse_roblox_logs(days, config)
     emit_progress(progress, "Checking event logs", 12)
     process_findings, process_timeline = collect_process_evidence(days, config, sessions_raw)
+    emit_progress(progress, "Checking running processes", 16)
+    running_findings, running_timeline = collect_running_processes(config, sessions_raw)
+    network_findings, network_timeline = collect_network_ioc_evidence(config)
     emit_progress(progress, "Checking Prefetch artifacts", 22)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
     emit_progress(progress, "Checking file artifacts", 34)
@@ -3322,6 +3523,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     raw_timeline = (
         roblox_timeline
         + process_timeline
+        + running_timeline
+        + network_timeline
         + prefetch_timeline
         + file_timeline
         + ps_timeline
@@ -3334,7 +3537,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -3379,6 +3582,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "scanProfileDescription": config.get("scan_profile_description", ""),
         "topScore": top_score,
         "systemInfo": system,
+        "scanTransparency": scan_transparency_metadata(),
         "finalStatement": "No confirmed Roblox injection evidence was found in available logs. Logging coverage may not be sufficient to rule it out."
         if highest_result not in ["Confirmed Exploit", "Suspicious"]
         else "Confirmed exploit or suspicious Roblox exploit/injection evidence was found in available artifacts.",
