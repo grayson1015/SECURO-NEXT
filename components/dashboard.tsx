@@ -24,9 +24,10 @@ const scanProfiles: { label: string; value: ScanProfile; description: string }[]
   { label: "Quick", value: "quick", description: "Faster triage with clear limitations." }
 ];
 
-export function Dashboard({ initialReports, initialPins }: { initialReports: ReportRow[]; initialPins: PinRow[] }) {
+export function Dashboard({ initialReports, initialPins, initialLoadError = "" }: { initialReports: ReportRow[]; initialPins: PinRow[]; initialLoadError?: string }) {
   const [reports, setReports] = useState(initialReports);
   const [pins, setPins] = useState(initialPins);
+  const [loadError, setLoadError] = useState(initialLoadError);
   const [query, setQuery] = useState("");
   const [timeRange, setTimeRange] = useState<TimeRange>("7d");
   const [sortKey, setSortKey] = useState<"username" | "userId" | "placeId" | "risk" | "scanTime">("scanTime");
@@ -41,7 +42,13 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
     async function loadReports() {
       const res = await fetch(`/api/reports?days=${selected.days}`);
       const body = await res.json().catch(() => null);
-      if (!cancelled && body?.ok) setReports(body.reports || []);
+      if (cancelled) return;
+      if (body?.ok) {
+        setReports(body.reports || []);
+        setLoadError("");
+      } else {
+        setLoadError(body?.error || "Reports could not load.");
+      }
     }
     loadReports();
     const timer = window.setInterval(loadReports, 5000);
@@ -113,6 +120,13 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
             <Button onClick={signOut} className="bg-zinc-800 text-white"><LogOut size={16} />Sign out</Button>
           </div>
         </header>
+
+        {loadError ? (
+          <Card className="mb-5 border-yellow-500/30 bg-yellow-500/10 text-yellow-100">
+            <CardTitle>Dashboard warning</CardTitle>
+            <p className="mt-2 text-sm">{loadError}</p>
+          </Card>
+        ) : null}
 
         {profilePickerOpen ? (
           <Card className="mb-5 border-primary/30 bg-zinc-950">
