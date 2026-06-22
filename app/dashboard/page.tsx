@@ -1,17 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { PinRow, ReportRow } from "@/lib/types";
 import { Dashboard } from "@/components/dashboard";
 import { LoginPanel } from "@/components/login-panel";
-
-const defaultReportDays = 7;
 
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [activated, setActivated] = useState(false);
-  const [reports, setReports] = useState<ReportRow[]>([]);
-  const [pins, setPins] = useState<PinRow[]>([]);
   const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
@@ -26,17 +21,8 @@ export default function DashboardPage() {
         }
 
         setActivated(true);
-        const [reportsResult, pinsResult] = await Promise.all([
-          fetchJsonWithTimeout(`/api/reports?days=${defaultReportDays}`, 15000),
-          fetchJsonWithTimeout("/api/pins", 15000)
-        ]);
-        if (cancelled) return;
-        setReports((reportsResult?.reports || []) as ReportRow[]);
-        setPins((pinsResult?.pins || []) as PinRow[]);
-        if (!reportsResult?.ok) setLoadError(reportsResult?.error || "Reports could not load.");
       } catch (error) {
         if (!cancelled) {
-          setActivated(true);
           setLoadError(error instanceof Error ? error.message : "Dashboard could not load.");
         }
       } finally {
@@ -53,7 +39,7 @@ export default function DashboardPage() {
   if (!activated) {
     return <LoginPanel />;
   }
-  return <Dashboard initialReports={reports} initialPins={pins} initialLoadError={loadError} />;
+  return <Dashboard initialReports={[]} initialPins={[]} initialLoadError={loadError} />;
 }
 
 async function fetchJsonWithTimeout(url: string, timeoutMs: number) {

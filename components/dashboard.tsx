@@ -59,11 +59,13 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
   }, [timeRange]);
 
   useEffect(() => {
-    const timer = window.setInterval(async () => {
+    async function loadPins() {
       const res = await fetch("/api/pins");
       const body = await res.json().catch(() => null);
       if (body?.ok) setPins(body.pins || []);
-    }, 5000);
+    }
+    loadPins();
+    const timer = window.setInterval(loadPins, 5000);
     return () => window.clearInterval(timer);
   }, []);
 

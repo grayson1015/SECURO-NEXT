@@ -515,7 +515,18 @@ as $$
       'sessions',
         case
           when jsonb_typeof(r.report_json->'sessions') = 'array' and jsonb_array_length(r.report_json->'sessions') > 0
-            then jsonb_build_array((r.report_json->'sessions')->0)
+            then jsonb_build_array(jsonb_build_object(
+              'gameId', ((r.report_json->'sessions')->0)->'gameId',
+              'placeId', ((r.report_json->'sessions')->0)->'placeId',
+              'jobId', ((r.report_json->'sessions')->0)->'jobId',
+              'userId', ((r.report_json->'sessions')->0)->'userId',
+              'username', ((r.report_json->'sessions')->0)->'username',
+              'displayName', ((r.report_json->'sessions')->0)->'displayName',
+              'launchTime', ((r.report_json->'sessions')->0)->'launchTime',
+              'exitTime', ((r.report_json->'sessions')->0)->'exitTime',
+              'duration', ((r.report_json->'sessions')->0)->'duration',
+              'status', ((r.report_json->'sessions')->0)->'status'
+            ))
           else '[]'::jsonb
         end,
       'findings', coalesce((
@@ -551,7 +562,7 @@ as $$
   from public.reports r
   where public.validate_key_session(input_email, input_key)
     and lower(r.owner_email) = lower(input_email)
-    and r.scan_time >= now() - make_interval(days => greatest(3, least(coalesce(input_days, 7), 30)))
+    and r.uploaded_at >= now() - make_interval(days => greatest(3, least(coalesce(input_days, 7), 30)))
   order by r.uploaded_at desc
   limit 200;
 $$;
