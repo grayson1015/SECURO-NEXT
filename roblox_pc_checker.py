@@ -3873,9 +3873,59 @@ def upload_report(api_base_url: str, session_id: str, upload_token: str, report:
     ok, data = post_json(url, payload, timeout=20, retries=2)
     if ok and isinstance(data, dict) and data.get("ok"):
         return True, "ok"
+    error_text = json.dumps(data)[:500] if ok else str(data)
+    if any(marker in error_text.lower() for marker in ["413", "payload", "too large", "statement timeout", "function_payload_too_large"]):
+        minimal_report_data = compact_report_for_upload(report, max_bytes=250_000)
+        minimal_report_data["uploadRetryCompacted"] = True
+        retry_payload = {
+            "pin": upload_token,
+            "hostname": minimal_report_data.get("hostname", ""),
+            "riskLevel": minimal_report_data.get("highestResult", ""),
+            "evidenceScore": int(minimal_report_data.get("topScore", 0) or 0),
+            "reportData": minimal_report_data,
+        }
+        retry_ok, retry_data = post_json(url, retry_payload, timeout=20, retries=1)
+        if retry_ok and isinstance(retry_data, dict) and retry_data.get("ok"):
+            return True, "ok_compacted_retry"
+        if retry_ok:
+            return False, json.dumps(retry_data)[:300]
+        return False, str(retry_data)
     if ok:
         return False, json.dumps(data)[:300]
     return False, str(data)
+
+
+def compact_roblox_logs_for_upload(logs: list, limit: int, include_raw: bool) -> list:
+    compacted = []
+    for item in logs[:limit]:
+        if not isinstance(item, dict):
+            continue
+        row = {
+            "logFile": item.get("logFile", ""),
+            "modifiedTime": item.get("modifiedTime", ""),
+            "startTime": item.get("startTime", ""),
+            "endTime": item.get("endTime", ""),
+            "duration": item.get("duration", ""),
+            "placeId": item.get("placeId", ""),
+            "jobId": item.get("jobId", ""),
+            "userId": item.get("userId", ""),
+            "username": item.get("username", ""),
+            "displayName": item.get("displayName", ""),
+            "version": item.get("version", ""),
+            "events": list(item.get("events", []))[:80],
+            "fastFlags": list(item.get("fastFlags", []))[:120],
+            "loadClientSettings": list(item.get("loadClientSettings", []))[:40],
+            "errors": list(item.get("errors", []))[:25],
+            "crashes": list(item.get("crashes", []))[:25],
+        }
+        if include_raw:
+            row["rawLog"] = item.get("rawLog", "")
+        else:
+            row["rawLog"] = ""
+            row["rawLogOmittedForUpload"] = True
+            row["rawLogApproxBytes"] = len(str(item.get("rawLog", "")).encode("utf-8", errors="replace"))
+        compacted.append(row)
+    return compacted
 
 
 def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
@@ -3896,9 +3946,9 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     # Vercel rejects large function payloads before the API route can store them.
     # Keep the website report useful, but reserve the complete report for local files.
     size_profiles = [
-        {"timeline": 700, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80},
-        {"timeline": 350, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40},
-        {"timeline": 150, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20},
+        {"timeline": 700, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "rawRoblox": False},
+        {"timeline": 350, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "rawRoblox": False},
+        {"timeline": 150, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "rawRoblox": False},
     ]
     for profile in size_profiles:
         compacted["timeline"] = list(report.get("timeline", []))[-profile["timeline"]:]
@@ -3908,6 +3958,8 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
         compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:profile["recoveryArtifacts"]]
         compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:profile["antivirusLogs"]]
         compacted["engineResults"] = list(report.get("engineResults", []))[:profile["engineResults"]]
+        compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), profile["robloxLogs"], include_raw=profile["rawRoblox"])
+        compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:profile["fastFlags"]]
         if isinstance(compacted.get("rawArtifacts"), list):
             compacted["rawArtifacts"] = list(report.get("rawArtifacts", []))[:profile["rawArtifacts"]]
         try:
@@ -3923,6 +3975,8 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:20]
     compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:30]
     compacted["engineResults"] = list(report.get("engineResults", []))[:40]
+    compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), 10, include_raw=False)
+    compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:120]
     if isinstance(compacted.get("rawArtifacts"), list):
         compacted["rawArtifacts"] = []
     return compacted

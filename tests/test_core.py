@@ -706,6 +706,14 @@ class CoreTests(unittest.TestCase):
             "recoveryArtifacts": [],
             "antivirusLogs": [],
             "engineResults": [],
+            "robloxLogs": [{
+                "logFile": "Client.log",
+                "startTime": "2026-06-09T00:00:00",
+                "events": [{"timestamp": "2026-06-09T00:00:00", "type": "FastFlag", "message": "FFlagUnit=true"}],
+                "fastFlags": [{"name": "FFlagUnit", "value": "true", "timestamp": "2026-06-09T00:00:00", "sourceLog": "Client.log"}],
+                "rawLog": "FFlagUnit=true\n" + ("x" * 2_000_000),
+            }],
+            "detectedFastFlags": [{"name": "FFlagUnit", "value": "true", "timestamp": "2026-06-09T00:00:00", "sourceLog": "Client.log"}],
             "limitations": [],
             "topScore": 90,
         }
@@ -713,6 +721,9 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(compacted["uploadCompacted"])
         self.assertLessEqual(len(compacted["timeline"]), 80)
         self.assertEqual(compacted["findings"][0]["name"], "confirmed")
+        self.assertEqual(compacted["detectedFastFlags"][0]["name"], "FFlagUnit")
+        self.assertTrue(compacted["robloxLogs"][0]["rawLogOmittedForUpload"])
+        self.assertEqual(compacted["robloxLogs"][0]["rawLog"], "")
         self.assertIn("full report remains saved locally", " ".join(compacted["limitations"]))
         encoded = json.dumps(compacted, separators=(",", ":"), default=str).encode("utf-8", errors="replace")
         self.assertLess(len(encoded), 900_000)
