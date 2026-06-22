@@ -475,6 +475,87 @@ as $$
   order by r.uploaded_at desc;
 $$;
 
+drop function if exists public.list_report_summaries_by_key(text, text, integer);
+
+create or replace function public.list_report_summaries_by_key(input_email text, input_key text, input_days integer default 7)
+returns table(
+  id uuid,
+  pin_id uuid,
+  owner_user_id uuid,
+  owner_email text,
+  uploaded_at timestamptz,
+  hostname text,
+  scan_time timestamptz,
+  risk_level text,
+  evidence_score integer,
+  report_json jsonb
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    r.id,
+    r.pin_id,
+    r.owner_user_id,
+    r.owner_email,
+    r.uploaded_at,
+    r.hostname,
+    r.scan_time,
+    r.risk_level,
+    r.evidence_score,
+    jsonb_build_object(
+      'scanTime', coalesce(r.report_json->>'scanTime', r.scan_time::text),
+      'hostname', coalesce(r.report_json->>'hostname', r.hostname),
+      'highestResult', coalesce(r.report_json->>'highestResult', r.risk_level),
+      'confidence', coalesce(r.report_json->>'confidence', ''),
+      'evidenceSources', coalesce(r.report_json->'evidenceSources', '{}'::jsonb),
+      'timeline', '[]'::jsonb,
+      'sessions',
+        case
+          when jsonb_typeof(r.report_json->'sessions') = 'array' and jsonb_array_length(r.report_json->'sessions') > 0
+            then jsonb_build_array((r.report_json->'sessions')->0)
+          else '[]'::jsonb
+        end,
+      'findings', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'name', finding.value->'name',
+          'path', finding.value->'path',
+          'score', finding.value->'score',
+          'category', finding.value->'category',
+          'classification', finding.value->'classification',
+          'confidenceLevel', finding.value->'confidenceLevel',
+          'detectionCategories', finding.value->'detectionCategories',
+          'detections', finding.value->'detections',
+          'evidenceTypes', finding.value->'evidenceTypes'
+        ))
+        from (
+          select value, ordinality
+          from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) with ordinality
+          order by case when coalesce(value->>'score', '') ~ '^-?[0-9]+$' then (value->>'score')::integer else 0 end desc, ordinality
+          limit 250
+        ) finding
+      ), '[]'::jsonb),
+      'limitations', coalesce(r.report_json->'limitations', '[]'::jsonb),
+      '_summary', jsonb_build_object(
+        'findingCount',
+          case when jsonb_typeof(r.report_json->'findings') = 'array' then jsonb_array_length(r.report_json->'findings') else 0 end,
+        'sessionCount',
+          case when jsonb_typeof(r.report_json->'sessions') = 'array' then jsonb_array_length(r.report_json->'sessions') else 0 end,
+        'robloxLogCount',
+          case when jsonb_typeof(r.report_json->'robloxLogs') = 'array' then jsonb_array_length(r.report_json->'robloxLogs') else 0 end,
+        'summaryOnly', true
+      )
+    ) as report_json
+  from public.reports r
+  where public.validate_key_session(input_email, input_key)
+    and lower(r.owner_email) = lower(input_email)
+    and r.scan_time >= now() - make_interval(days => greatest(3, least(coalesce(input_days, 7), 30)))
+  order by r.uploaded_at desc
+  limit 200;
+$$;
+
 create or replace function public.get_report_by_key(input_email text, input_key text, input_report_id uuid)
 returns setof public.reports
 language sql
@@ -575,6 +656,7 @@ grant execute on function public.validate_key_session(text, text) to anon, authe
 grant execute on function public.create_pin_by_key(text, text, text, timestamptz, text) to anon, authenticated;
 grant execute on function public.list_pins_by_key(text, text) to anon, authenticated;
 grant execute on function public.list_reports_by_key(text, text) to anon, authenticated;
+grant execute on function public.list_report_summaries_by_key(text, text, integer) to anon, authenticated;
 grant execute on function public.get_report_by_key(text, text, uuid) to anon, authenticated;
 
 create or replace function public.is_securo_owner()

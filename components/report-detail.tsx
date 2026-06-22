@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Clock, Download } from "lucide-react";
 import type { ReportRow, SecuroFinding } from "@/lib/types";
@@ -11,7 +11,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
 
 export function ReportDetail({ report }: { report: ReportRow }) {
-  const data = report.report_json;
+  const [currentReport, setCurrentReport] = useState(report);
+  const [fullReportLoaded, setFullReportLoaded] = useState(false);
+  const [loadingFullReport, setLoadingFullReport] = useState(false);
+  const data = currentReport.report_json;
   const primary = data.sessions[0] || {};
   const [timeRange, setTimeRange] = useState("7");
   const visibleFindings = useMemo(() => data.findings.filter((finding) => !isSecuroSuppressedFinding(finding)), [data.findings]);
@@ -39,13 +42,33 @@ export function ReportDetail({ report }: { report: ReportRow }) {
     [extraEvidence, timeRange]
   );
 
+  useEffect(() => {
+    setCurrentReport(report);
+    setFullReportLoaded(false);
+    setLoadingFullReport(false);
+  }, [report]);
+
+  async function changeTimeRange(value: string) {
+    setTimeRange(value);
+    if ((value === "30" || value === "all") && !fullReportLoaded && !loadingFullReport) {
+      setLoadingFullReport(true);
+      const days = value === "all" ? 3650 : 30;
+      const result = await fetch(`/api/report/${report.id}?days=${days}`).then((res) => res.json()).catch(() => null);
+      if (result?.ok && result.report) {
+        setCurrentReport(result.report as ReportRow);
+        setFullReportLoaded(true);
+      }
+      setLoadingFullReport(false);
+    }
+  }
+
   function exportHtml() {
-    const html = buildExportHtml(report);
+    const html = buildExportHtml(currentReport);
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `securo-report-${report.hostname}-${report.id}.html`;
+    a.download = `securo-report-${currentReport.hostname}-${currentReport.id}.html`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -62,9 +85,9 @@ export function ReportDetail({ report }: { report: ReportRow }) {
 
         <section className="grid gap-4 md:grid-cols-4">
           <Card><CardTitle>Scan timestamp</CardTitle><CardValue className="text-lg">{formatDate(data.scanTime)}</CardValue></Card>
-          <Card><CardTitle>Hostname</CardTitle><CardValue>{report.hostname}</CardValue></Card>
-          <Card><CardTitle>Risk level</CardTitle><div className="mt-3"><Badge label={report.risk_level} /></div></Card>
-          <Card><CardTitle>Evidence score</CardTitle><CardValue>{report.evidence_score}</CardValue></Card>
+          <Card><CardTitle>Hostname</CardTitle><CardValue>{currentReport.hostname}</CardValue></Card>
+          <Card><CardTitle>Risk level</CardTitle><div className="mt-3"><Badge label={currentReport.risk_level} /></div></Card>
+          <Card><CardTitle>Evidence score</CardTitle><CardValue>{currentReport.evidence_score}</CardValue></Card>
         </section>
 
         <Card className="mt-5 border-primary/40 bg-primary/10">
@@ -73,7 +96,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             <Summary label="User" value={primary.username || "Unknown"} />
             <Summary label="User ID" value={primary.userId || ""} />
             <Summary label="Place ID" value={primary.placeId || primary.gameId || ""} />
-            <Summary label="Risk Level" value={report.risk_level} />
+            <Summary label="Risk Level" value={currentReport.risk_level} />
             <Summary label="Injection Evidence" value={data.highestResult || "Not confirmed"} />
           </div>
         </Card>
@@ -93,7 +116,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             <select
               className="h-10 rounded-md border border-border bg-black/30 px-3 text-sm text-white outline-none"
               value={timeRange}
-              onChange={(event) => setTimeRange(event.target.value)}
+              onChange={(event) => changeTimeRange(event.target.value)}
             >
               <option value="30">1 month</option>
               <option value="14">2 weeks</option>
@@ -102,6 +125,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               <option value="all">All logs</option>
             </select>
           </div>
+          {loadingFullReport ? <p className="mt-3 text-sm text-primary">Loading full report history...</p> : null}
+          {!fullReportLoaded && (timeRange === "30" || timeRange === "all") ? (
+            <p className="mt-3 text-sm text-zinc-500">Full raw history loads only for 1 month or All logs to keep normal report viewing fast.</p>
+          ) : null}
         </Card>
 
         <Card className="mt-5">

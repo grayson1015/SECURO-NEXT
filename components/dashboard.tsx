@@ -36,10 +36,26 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
   const [scanProfile, setScanProfile] = useState<ScanProfile>("standard");
 
   useEffect(() => {
-    const timer = window.setInterval(async () => {
-      const res = await fetch("/api/reports");
+    let cancelled = false;
+    const selected = timeRanges.find((item) => item.value === timeRange) || timeRanges[2];
+    async function loadReports() {
+      const res = await fetch(`/api/reports?days=${selected.days}`);
       const body = await res.json().catch(() => null);
-      if (body?.ok) setReports(body.reports || []);
+      if (!cancelled && body?.ok) setReports(body.reports || []);
+    }
+    loadReports();
+    const timer = window.setInterval(loadReports, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [timeRange]);
+
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      const res = await fetch("/api/pins");
+      const body = await res.json().catch(() => null);
+      if (body?.ok) setPins(body.pins || []);
     }, 5000);
     return () => window.clearInterval(timer);
   }, []);
@@ -220,7 +236,7 @@ export function Dashboard({ initialReports, initialPins }: { initialReports: Rep
                     </tr>
                   ))}
                   {!filtered.length ? (
-                    <tr><td className="py-6 text-zinc-500" colSpan={11}>No reports found.</td></tr>
+                    <tr><td className="py-6 text-zinc-500" colSpan={11}>No reports found in this range. Try 1 month for older scans.</td></tr>
                   ) : null}
                 </tbody>
               </table>

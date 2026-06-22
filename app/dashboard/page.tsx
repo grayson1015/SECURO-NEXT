@@ -5,6 +5,8 @@ import type { PinRow, ReportRow } from "@/lib/types";
 import { Dashboard } from "@/components/dashboard";
 import { LoginPanel } from "@/components/login-panel";
 
+const defaultReportDays = 7;
+
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [activated, setActivated] = useState(false);
@@ -22,7 +24,7 @@ export default function DashboardPage() {
 
       setActivated(true);
       const [reportsResult, pinsResult] = await Promise.all([
-        fetch("/api/reports").then((res) => res.json()),
+        fetch(`/api/reports?days=${defaultReportDays}`).then((res) => res.json()),
         fetch("/api/pins").then((res) => res.json())
       ]);
       setReports((reportsResult.reports || []) as ReportRow[]);
