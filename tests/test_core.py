@@ -571,7 +571,14 @@ class CoreTests(unittest.TestCase):
             "confidence": "low",
             "evidenceSources": {},
             "timeline": [{"time": "2026-06-02 17:55:00", "source": "unit", "text": "event"}],
-            "sessions": [],
+            "sessions": [{
+                "username": "ExampleUser",
+                "userId": "123",
+                "placeId": "456",
+                "duration": "10m",
+                "robloxLogs": [{"rawLog": "x" * 1_000_000}],
+                "events": [{"text": "event"} for _ in range(100)],
+            }],
             "robloxLogs": [{
                 "logFile": "Client.log",
                 "startTime": "2026-06-02 17:55:00",
@@ -700,7 +707,14 @@ class CoreTests(unittest.TestCase):
             "confidence": "medium",
             "evidenceSources": {},
             "timeline": [{"time": "2026-06-09T00:00:00", "source": "unit", "text": "x" * 2000} for _ in range(3000)],
-            "sessions": [],
+            "sessions": [{
+                "username": "ExampleUser",
+                "userId": "123",
+                "placeId": "456",
+                "duration": "10m",
+                "robloxLogs": [{"rawLog": "x" * 1_000_000}],
+                "events": [{"text": "event"} for _ in range(100)],
+            }],
             "findings": [
                 {"name": "possible", "classification": "Indicator Found", "confidenceLevel": "Possible", "score": 5},
                 {"name": "confirmed", "classification": "Confirmed Exploit", "confidenceLevel": "Confirmed", "score": 90},
@@ -725,6 +739,8 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(compacted["uploadCompacted"])
         self.assertLessEqual(len(compacted["timeline"]), 80)
         self.assertEqual(compacted["findings"][0]["name"], "confirmed")
+        self.assertTrue(compacted["sessions"][0]["robloxLogsOmittedForUpload"])
+        self.assertNotIn("robloxLogs", compacted["sessions"][0])
         self.assertEqual(compacted["detectedFastFlags"][0]["name"], "FFlagUnit")
         self.assertTrue(compacted["robloxLogs"][0]["rawLogOmittedForUpload"])
         self.assertEqual(compacted["robloxLogs"][0]["rawLog"], "")

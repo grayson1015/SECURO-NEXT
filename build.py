@@ -1,13 +1,13 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-PYTHON = Path(r"C:\Users\Grayson Gollotte\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
-PACKAGER = ROOT / ".packager_gui_confirmed_rules"
-PYTHON_ROOT = PYTHON.parent
+PYTHON = Path(sys.executable)
+PACKAGER = ROOT / ".packager_securo_gui"
 
 
 def run(args):
@@ -16,13 +16,16 @@ def run(args):
 
 def main():
     python = PYTHON if PYTHON.exists() else Path(sys.executable)
-    if not (PACKAGER / "PyInstaller").exists():
+    python_root = python.parent
+    if (PACKAGER / "PyInstaller").exists() and not (PACKAGER / "PyInstaller" / "__main__.py").exists():
+        shutil.rmtree(PACKAGER, ignore_errors=True)
+    if not (PACKAGER / "PyInstaller" / "__main__.py").exists():
         run([str(python), "-m", "pip", "install", "--upgrade", "--target", str(PACKAGER), "pyinstaller"])
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PACKAGER)
-    env["TCL_LIBRARY"] = str(PYTHON_ROOT / "tcl" / "tcl8.6")
-    env["TK_LIBRARY"] = str(PYTHON_ROOT / "tcl" / "tk8.6")
+    env["TCL_LIBRARY"] = str(python_root / "tcl" / "tcl8.6")
+    env["TK_LIBRARY"] = str(python_root / "tcl" / "tk8.6")
     subprocess.run(
         [
             str(python),
@@ -35,15 +38,15 @@ def main():
             "--hidden-import",
             "tkinter",
             "--add-data",
-            f"{PYTHON_ROOT / 'tcl'};tcl",
+            f"{python_root / 'tcl'};tcl",
             "--add-data",
-            f"{PYTHON_ROOT / 'Lib' / 'tkinter'};tkinter",
+            f"{python_root / 'Lib' / 'tkinter'};tkinter",
             "--add-binary",
-            f"{PYTHON_ROOT / 'DLLs' / 'tcl86t.dll'};.",
+            f"{python_root / 'DLLs' / 'tcl86t.dll'};.",
             "--add-binary",
-            f"{PYTHON_ROOT / 'DLLs' / 'tk86t.dll'};.",
+            f"{python_root / 'DLLs' / 'tk86t.dll'};.",
             "--add-binary",
-            f"{PYTHON_ROOT / 'DLLs' / '_tkinter.pyd'};.",
+            f"{python_root / 'DLLs' / '_tkinter.pyd'};.",
             "--name",
             "SecuroChecker",
             "--add-data",
