@@ -1,13 +1,13 @@
 import os
-import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 PYTHON = Path(sys.executable)
-PACKAGER = ROOT / ".packager_securo_gui"
+PACKAGER_ROOT = Path(tempfile.gettempdir()) / "securo_pyinstaller_cache"
 
 
 def run(args):
@@ -17,13 +17,14 @@ def run(args):
 def main():
     python = PYTHON if PYTHON.exists() else Path(sys.executable)
     python_root = python.parent
-    if (PACKAGER / "PyInstaller").exists() and not (PACKAGER / "PyInstaller" / "__main__.py").exists():
-        shutil.rmtree(PACKAGER, ignore_errors=True)
-    if not (PACKAGER / "PyInstaller" / "__main__.py").exists():
-        run([str(python), "-m", "pip", "install", "--upgrade", "--target", str(PACKAGER), "pyinstaller"])
+    cache_name = f"pyinstaller-{python_root.name.lower()}-{sys.version_info.major}{sys.version_info.minor}"
+    packager = PACKAGER_ROOT / cache_name
+    if not (packager / "PyInstaller" / "__main__.py").exists():
+        packager.mkdir(parents=True, exist_ok=True)
+        run([str(python), "-m", "pip", "install", "--target", str(packager), "pyinstaller"])
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(PACKAGER)
+    env["PYTHONPATH"] = str(packager)
     env["TCL_LIBRARY"] = str(python_root / "tcl" / "tcl8.6")
     env["TK_LIBRARY"] = str(python_root / "tcl" / "tk8.6")
     subprocess.run(
