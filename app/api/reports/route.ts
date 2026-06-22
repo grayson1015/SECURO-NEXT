@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
   if (!summary.error) return NextResponse.json({ ok: true, reports: summary.data || [] });
   return NextResponse.json({
     ok: false,
-    error: "Report summaries are not installed in Supabase yet. Run the latest supabase/schema.sql function list_report_summaries_by_key."
+    error: `Report summaries failed: ${summary.error.message}. Run the latest supabase/schema.sql list_report_summaries_by_key function.`
   }, { status: 500 });
 }
 

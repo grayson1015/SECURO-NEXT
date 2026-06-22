@@ -115,6 +115,13 @@ create index if not exists access_keys_license_type_idx on public.access_keys(li
 create index if not exists business_license_users_license_idx on public.business_license_users(upper(license_key), last_seen_at desc);
 create unique index if not exists business_license_users_license_email_idx on public.business_license_users(upper(license_key), lower(email));
 
+update public.reports r
+set owner_email = p.owner_email
+from public.pins p
+where r.pin_id = p.id
+  and (r.owner_email is null or r.owner_email = '')
+  and p.owner_email is not null;
+
 alter table public.profiles enable row level security;
 alter table public.allowed_users enable row level security;
 alter table public.access_keys enable row level security;
@@ -470,8 +477,9 @@ set search_path = public
 as $$
   select r.*
   from public.reports r
+  left join public.pins p on p.id = r.pin_id
   where public.validate_key_session(input_email, input_key)
-    and lower(r.owner_email) = lower(input_email)
+    and lower(coalesce(r.owner_email, p.owner_email)) = lower(input_email)
   order by r.uploaded_at desc;
 $$;
 
@@ -499,7 +507,7 @@ as $$
     r.id,
     r.pin_id,
     r.owner_user_id,
-    r.owner_email,
+    coalesce(r.owner_email, p.owner_email) as owner_email,
     r.uploaded_at,
     r.hostname,
     r.scan_time,
@@ -560,8 +568,9 @@ as $$
       )
     ) as report_json
   from public.reports r
+  left join public.pins p on p.id = r.pin_id
   where public.validate_key_session(input_email, input_key)
-    and lower(r.owner_email) = lower(input_email)
+    and lower(coalesce(r.owner_email, p.owner_email)) = lower(input_email)
     and r.uploaded_at >= now() - make_interval(days => greatest(3, least(coalesce(input_days, 7), 30)))
   order by r.uploaded_at desc
   limit 200;
@@ -576,8 +585,9 @@ set search_path = public
 as $$
   select r.*
   from public.reports r
+  left join public.pins p on p.id = r.pin_id
   where public.validate_key_session(input_email, input_key)
-    and lower(r.owner_email) = lower(input_email)
+    and lower(coalesce(r.owner_email, p.owner_email)) = lower(input_email)
     and r.id = input_report_id
   limit 1;
 $$;
