@@ -67,6 +67,24 @@ export type RobloxLogArtifact = {
   rawLog?: string;
 };
 
+export type AccountIdentifier = {
+  platform?: "Roblox" | "Discord" | string;
+  userId?: string;
+  username?: string;
+  displayName?: string;
+  firstSeen?: string;
+  lastSeen?: string;
+  places?: string[];
+  jobs?: string[];
+  sources?: string[];
+};
+
+export type AccountIdentifierContext = {
+  privacyNote?: string;
+  roblox?: AccountIdentifier[];
+  discord?: AccountIdentifier[];
+};
+
 export type SecuroFinding = {
   name?: string;
   path?: string;
@@ -96,6 +114,7 @@ export type SecuroReportJson = {
   sessions: SecuroSession[];
   robloxLogs?: RobloxLogArtifact[];
   detectedFastFlags?: RobloxFastFlag[];
+  accountIdentifiers?: AccountIdentifierContext;
   findings: SecuroFinding[];
   limitations: string[];
   [key: string]: unknown;

@@ -957,6 +957,11 @@ class CoreTests(unittest.TestCase):
             "recoveryArtifacts": [],
             "antivirusLogs": [],
             "engineResults": [],
+            "accountIdentifiers": {
+                "privacyNote": "Only non-secret identifiers.",
+                "roblox": [{"platform": "Roblox", "userId": "123", "username": "ExampleUser", "displayName": "Example", "firstSeen": "2026-06-02 17:55:00", "lastSeen": "2026-06-02 17:55:00", "sources": ["Client.log"]}],
+                "discord": [{"platform": "Discord", "userId": "123456789012345678", "username": "", "firstSeen": "2026-06-02 17:55:00", "lastSeen": "2026-06-02 17:55:00", "sources": ["renderer.log"]}],
+            },
             "limitations": [],
             "finalStatement": "test",
         }
@@ -972,6 +977,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("FFlagUnit", rendered)
         self.assertIn("Key Artifacts", rendered)
         self.assertIn("PREFETCH FILE: Example.exe", rendered)
+        self.assertIn("Safe Account Identifiers", rendered)
+        self.assertIn("123456789012345678", rendered)
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json
@@ -1179,6 +1186,57 @@ class CoreTests(unittest.TestCase):
         self.assertIn("123456789012345678", discord_ids)
         self.assertNotIn("999999999999999999", discord_ids)
         self.assertIn("excludes tokens", result["privacyNote"].lower())
+
+    def test_historical_roblox_accounts_are_collected_outside_session_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "Roblox" / "logs"
+            log_dir.mkdir(parents=True)
+            old_log = log_dir / "old-session.log"
+            old_log.write_text(
+                "2025-01-01 12:00:00 userId: 24681012 username: OlderPlayer displayName: Older Display",
+                encoding="utf-8",
+            )
+            original_dirs = checker.get_common_roblox_log_dirs
+            original_command = checker.run_command
+            try:
+                checker.get_common_roblox_log_dirs = lambda: [log_dir]
+                checker.run_command = lambda *args, **kwargs: ""
+                result = checker.collect_safe_account_identifiers([], {
+                    "collect_safe_account_identifiers": True,
+                    "account_log_max_files": 20,
+                    "account_log_max_bytes": 100000,
+                })
+            finally:
+                checker.get_common_roblox_log_dirs = original_dirs
+                checker.run_command = original_command
+        self.assertEqual(result["roblox"][0]["userId"], "24681012")
+        self.assertEqual(result["roblox"][0]["username"], "OlderPlayer")
+        self.assertIn("old-session.log", result["roblox"][0]["sources"][0])
+
+    def test_discord_account_switch_log_extracts_only_user_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_appdata = os.environ.get("APPDATA")
+            old_localappdata = os.environ.get("LOCALAPPDATA")
+            os.environ["APPDATA"] = tmp
+            os.environ["LOCALAPPDATA"] = str(Path(tmp) / "Local")
+            logs = Path(tmp) / "discord" / "logs"
+            logs.mkdir(parents=True)
+            (logs / "renderer.log").write_text(
+                "[2026-06-20 12:30:00.000] MultiAccountActionCreators Switching account to 123456789012345678",
+                encoding="utf-8",
+            )
+            try:
+                result = checker.collect_safe_discord_identifiers({})
+            finally:
+                if old_appdata is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = old_appdata
+                if old_localappdata is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_localappdata
+        self.assertEqual({row["userId"] for row in result}, {"123456789012345678"})
 
     def test_verify_pin_returns_scan_profile(self):
         original = checker.post_json

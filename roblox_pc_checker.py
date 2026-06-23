@@ -349,6 +349,9 @@ def load_config() -> dict:
     config.setdefault("external_forensic_tools_enabled", False)
     config.setdefault("external_forensic_tools_dir", "")
     config.setdefault("external_forensic_tool_timeout_seconds", 55)
+    config.setdefault("collect_safe_account_identifiers", True)
+    config.setdefault("account_log_max_files", 600)
+    config.setdefault("account_log_max_bytes", 4_000_000)
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -484,6 +487,7 @@ def scan_profiles() -> dict:
             "file_artifact_time_budget_seconds": 35,
             "skip_browser_artifacts": True,
             "skip_recovery_metadata": True,
+            "collect_safe_account_identifiers": True,
             "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations.",
         },
         "standard": {
@@ -494,6 +498,7 @@ def scan_profiles() -> dict:
             "file_artifact_time_budget_seconds": 90,
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
+            "collect_safe_account_identifiers": True,
             "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
         },
         "deep": {
@@ -1930,8 +1935,35 @@ def collect_safe_account_identifiers(sessions: list[dict], config: dict) -> dict
         if session.get("log_file"):
             row["sources"].add(session["log_file"])
 
+    if config.get("collect_safe_account_identifiers", True):
+        for item in collect_historical_roblox_identifiers(config):
+            user_id = str(item.get("userId") or "").strip()
+            username = str(item.get("username") or "Unknown").strip() or "Unknown"
+            key = user_id or username.lower()
+            if not key:
+                continue
+            row = roblox_accounts.setdefault(key, {
+                "platform": "Roblox",
+                "userId": user_id,
+                "username": username,
+                "displayName": item.get("displayName", ""),
+                "firstSeen": item.get("timestamp", ""),
+                "lastSeen": item.get("timestamp", ""),
+                "places": set(),
+                "jobs": set(),
+                "sources": set(),
+            })
+            if row.get("username") in {"", "Unknown"} and username != "Unknown":
+                row["username"] = username
+            if not row.get("displayName") and item.get("displayName"):
+                row["displayName"] = item["displayName"]
+            row["firstSeen"] = first_time(row.get("firstSeen"), item.get("timestamp")) or row.get("firstSeen", "")
+            row["lastSeen"] = max([v for v in [row.get("lastSeen"), item.get("timestamp")] if v] or [""], default="")
+            if item.get("source"):
+                row["sources"].add(item["source"])
+
     discord_accounts = {}
-    if config.get("collect_safe_account_identifiers"):
+    if config.get("collect_safe_account_identifiers", True):
         for item in collect_safe_discord_identifiers(config):
             key = item.get("userId") or item.get("username") or item.get("source", "")
             if not key:
@@ -1961,6 +1993,81 @@ def collect_safe_account_identifiers(sessions: list[dict], config: dict) -> dict
         "roblox": [clean(row) for row in roblox_accounts.values()],
         "discord": [clean(row) for row in discord_accounts.values()],
     }
+
+
+def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
+    # Account history is independent from the selected session window. Only IDs/names and artifact timestamps are retained.
+    max_files = max(1, int(config.get("account_log_max_files", 600) or 600))
+    max_bytes = max(64_000, int(config.get("account_log_max_bytes", 4_000_000) or 4_000_000))
+    candidates = []
+    for folder in get_common_roblox_log_dirs():
+        try:
+            candidates.extend(path for path in folder.rglob("*.log") if path.is_file())
+        except OSError:
+            continue
+    def modified_time(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0
+
+    candidates = sorted(set(candidates), key=modified_time, reverse=True)[:max_files]
+    results = []
+    seen = set()
+    account_pattern = re.compile(
+        r"(?i)(?:userid|user[_\s-]?id|userId)[^\d]{0,40}(\d{2,20})"
+    )
+    username_pattern = re.compile(
+        r"(?i)(?:username|user[_\s-]?name)[^\w@.-]{0,20}([\w@.-]{2,64})"
+    )
+    display_pattern = re.compile(
+        r"(?i)(?:displayname|display[_\s-]?name)[^\w@.-]{0,20}([\w @.-]{2,64})"
+    )
+    for path in candidates:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(max_bytes)
+        except OSError:
+            continue
+        timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
+        for match in account_pattern.finditer(text):
+            user_id = match.group(1)
+            window = text[max(0, match.start() - 500):match.end() + 500]
+            username_match = username_pattern.search(window)
+            display_match = display_pattern.search(window)
+            key = (user_id, str(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                "platform": "Roblox",
+                "userId": user_id,
+                "username": username_match.group(1).strip() if username_match else "Unknown",
+                "displayName": display_match.group(1).strip() if display_match else "",
+                "timestamp": timestamp,
+                "source": str(path),
+            })
+
+    registry_text = run_command(["reg", "query", r"HKCU\Software\Roblox", "/s"], timeout=8)
+    registry_ids = set(re.findall(r"(?i)(?:roblox\.com/users/|user[_\s-]?id\D{0,20})(\d{2,20})", registry_text))
+    for user_id in registry_ids:
+        key = (user_id, "Roblox registry")
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({
+            "platform": "Roblox",
+            "userId": user_id,
+            "username": "Unknown",
+            "displayName": "",
+            "timestamp": "",
+            "source": r"HKCU\Software\Roblox",
+        })
+    return results
 
 
 def collect_safe_discord_identifiers(config: dict) -> list[dict]:
@@ -2014,7 +2121,12 @@ def collect_safe_discord_identifiers(config: dict) -> list[dict]:
         except OSError:
             continue
         timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
-        for match in re.finditer(r"(?i)(?:user[_\s-]?id|discord[_\s-]?id|id)[^\d]{0,30}(\d{17,20})", text):
+        patterns = [
+            r"(?i)(?:user[_\s-]?id|discord[_\s-]?id)[^\d]{0,30}(\d{17,20})",
+            r"(?i)MultiAccountActionCreators.*?Switching account to\s+(\d{17,20})",
+        ]
+        matches = [match for pattern in patterns for match in re.finditer(pattern, text)]
+        for match in matches:
             user_id = match.group(1)
             key = (user_id, str(path))
             if key in seen:
@@ -4511,7 +4623,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     if has_scan_time_for(config, 35):
         account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
     else:
-        account_identifiers = {"robloxUserIds": [], "discordUserIds": [], "privacyNote": "Skipped because the scan was near its configured timeout."}
+        account_identifiers = {"roblox": [], "discord": [], "privacyNote": "Skipped because the scan was near its configured timeout."}
         note_stage_skipped(config, progress, "Safe account identifier context", stage_limitations, 35, 94)
     if config.get("collect_system_reset_evidence") and has_scan_time_for(config, 45):
         reset_evidence, reset_timeline = collect_system_reset_evidence(days, config)
