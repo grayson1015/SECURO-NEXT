@@ -21,7 +21,7 @@ export default function DownloadPage() {
                 <p className="mt-1 text-sm text-zinc-400">Windows GUI app. No Python install required.</p>
               </div>
             </div>
-            <a className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-5 text-sm font-semibold text-black hover:brightness-110" href="/downloads/SecuroChecker.exe" download>
+            <a className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-5 text-sm font-semibold text-black hover:brightness-110" href="/downloads/SecuroChecker-DeepFix-625fd42e.exe" download>
               <Download size={18} /> Download
             </a>
           </div>

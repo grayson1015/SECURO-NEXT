@@ -83,7 +83,7 @@ export default function LandingPage() {
           <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-400">
             The desktop checker is distributed by Securo staff. It scans read-only, asks consent before upload, and does not collect passwords, cookies, tokens, credentials, or private messages.
           </p>
-          <a className="mt-5 inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-semibold text-black hover:brightness-110" href="/downloads/SecuroChecker.exe" download>
+          <a className="mt-5 inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-semibold text-black hover:brightness-110" href="/downloads/SecuroChecker-DeepFix-625fd42e.exe" download>
             Download SecuroChecker
           </a>
         </div>
