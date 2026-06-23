@@ -7,6 +7,7 @@
     "quick": {
       "scan_days": 3,
       "scan_timeout_seconds": 120,
+      "scan_finish_buffer_seconds": 20,
       "max_files_scanned": 5000,
       "file_artifact_time_budget_seconds": 35,
       "skip_browser_artifacts": true,
@@ -16,6 +17,7 @@
     "standard": {
       "scan_days": 10,
       "scan_timeout_seconds": 360,
+      "scan_finish_buffer_seconds": 35,
       "max_files_scanned": 10000,
       "file_artifact_time_budget_seconds": 90,
       "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage."
@@ -23,8 +25,9 @@
     "deep": {
       "scan_days": 90,
       "scan_timeout_seconds": 480,
+      "scan_finish_buffer_seconds": 55,
       "max_files_scanned": 60000,
-      "file_artifact_time_budget_seconds": 240,
+      "file_artifact_time_budget_seconds": 210,
       "collect_safe_account_identifiers": true,
       "collect_system_reset_evidence": true,
       "description": "Maximum coverage scan with an 8 minute hard stop and terminal report upload."

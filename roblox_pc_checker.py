@@ -457,6 +457,7 @@ def scan_profiles() -> dict:
         "quick": {
             "scan_days": 3,
             "scan_timeout_seconds": 120,
+            "scan_finish_buffer_seconds": 20,
             "max_files_scanned": 5000,
             "file_artifact_time_budget_seconds": 35,
             "skip_browser_artifacts": True,
@@ -466,6 +467,7 @@ def scan_profiles() -> dict:
         "standard": {
             "scan_days": 10,
             "scan_timeout_seconds": 360,
+            "scan_finish_buffer_seconds": 35,
             "max_files_scanned": 10000,
             "file_artifact_time_budget_seconds": 90,
             "skip_browser_artifacts": False,
@@ -475,8 +477,9 @@ def scan_profiles() -> dict:
         "deep": {
             "scan_days": 90,
             "scan_timeout_seconds": 480,
+            "scan_finish_buffer_seconds": 55,
             "max_files_scanned": 60000,
-            "file_artifact_time_budget_seconds": 240,
+            "file_artifact_time_budget_seconds": 210,
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
             "collect_safe_account_identifiers": True,
@@ -494,7 +497,7 @@ def normalize_scan_profile(profile: str | None) -> str:
 def apply_scan_profile(config: dict, profile: str | None) -> dict:
     selected = normalize_scan_profile(profile or config.get("default_scan_profile"))
     merged = dict(config)
-    for key in ("skip_browser_artifacts", "skip_recovery_metadata", "max_files_scanned", "file_artifact_time_budget_seconds", "scan_profile", "scan_profile_description"):
+    for key in ("skip_browser_artifacts", "skip_recovery_metadata", "max_files_scanned", "file_artifact_time_budget_seconds", "scan_finish_buffer_seconds", "scan_profile", "scan_profile_description"):
         merged.pop(key, None)
     profile_config = {**scan_profiles().get(selected, scan_profiles()["standard"]), **dict(config.get("scan_profiles", {}).get(selected, {}))}
     for key, value in profile_config.items():
@@ -3658,6 +3661,30 @@ def emit_progress(progress, stage: str, percent: int | None = None, files_scanne
         progress(message)
 
 
+def scan_time_remaining(config: dict) -> float | None:
+    deadline = config.get("_scan_deadline_monotonic")
+    if not deadline:
+        return None
+    try:
+        return float(deadline) - time.monotonic()
+    except (TypeError, ValueError):
+        return None
+
+
+def has_scan_time_for(config: dict, seconds: int) -> bool:
+    remaining = scan_time_remaining(config)
+    return remaining is None or remaining > seconds
+
+
+def note_stage_skipped(config: dict, progress, stage: str, limitations: list[str], min_remaining: int, percent: int):
+    remaining = scan_time_remaining(config)
+    detail = f"{stage} skipped so Securo can finish and upload before the configured scan timeout."
+    if remaining is not None:
+        detail += f" Remaining scan budget was about {max(0, int(remaining))} seconds; this stage needs about {min_remaining} seconds."
+    limitations.append(detail)
+    emit_progress(progress, detail, percent)
+
+
 class ScanDiagnostics:
     def __init__(self, config: dict):
         self.config = config
@@ -3761,6 +3788,10 @@ def diagnostic_report(status: str, reason: str, diagnostics: ScanDiagnostics, co
 
 def run_scan_with_timeout(days: int, config: dict, progress, timeout_seconds: int) -> tuple[str, dict]:
     diagnostics = ScanDiagnostics(config)
+    worker_config = dict(config)
+    timeout_seconds = max(1, int(timeout_seconds or 900))
+    finish_buffer = max(15, int(worker_config.get("scan_finish_buffer_seconds", 35) or 35))
+    worker_config["_scan_deadline_monotonic"] = time.monotonic() + max(1, timeout_seconds - finish_buffer)
 
     def tracked_progress(message: str, stage: str | None = None, percent: int | None = None, files_scanned: int | None = None):
         diagnostics.progress(message, stage=stage, percent=percent, files_scanned=files_scanned)
@@ -3773,7 +3804,7 @@ def run_scan_with_timeout(days: int, config: dict, progress, timeout_seconds: in
 
     def scan_target():
         try:
-            report = build_scan_report_with_progress(days, config, tracked_progress)
+            report = build_scan_report_with_progress(days, worker_config, tracked_progress)
             report["scanStatus"] = "completed"
             report["diagnostics"] = diagnostics.snapshot()
             try:
@@ -3783,7 +3814,7 @@ def run_scan_with_timeout(days: int, config: dict, progress, timeout_seconds: in
         except Exception as exc:
             diagnostics.fail(str(exc))
             try:
-                result_queue.put_nowait(("failed", diagnostic_report("failed", str(exc), diagnostics, config)))
+                result_queue.put_nowait(("failed", diagnostic_report("failed", str(exc), diagnostics, worker_config)))
             except queue.Full:
                 pass
 
@@ -3791,16 +3822,17 @@ def run_scan_with_timeout(days: int, config: dict, progress, timeout_seconds: in
     worker = threading.Thread(target=scan_target, daemon=True)
     worker.start()
     try:
-        return result_queue.get(timeout=max(1, int(timeout_seconds or 900)))
+        return result_queue.get(timeout=timeout_seconds)
     except queue.Empty:
         reason = f"Scan exceeded configured timeout of {timeout_seconds} seconds while at stage '{diagnostics.stage}'."
         diagnostics.fail(reason)
-        return "timeout", diagnostic_report("timeout", reason, diagnostics, config)
+        return "timeout", diagnostic_report("timeout", reason, diagnostics, worker_config)
 
 
 def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     days = int(config.get("scan_days", days) or days)
     scan_time = iso_now()
+    stage_limitations: list[str] = []
     emit_progress(progress, "Scan started", 0)
     emit_progress(progress, "Collecting Roblox logs", 5)
     sessions_raw, roblox_timeline = parse_roblox_logs(days, config)
@@ -3814,35 +3846,71 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     emit_progress(progress, "Checking file artifacts", 34)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
     emit_progress(progress, "Checking PowerShell history", 50)
-    ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
+    if has_scan_time_for(config, 170):
+        ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
+    else:
+        ps_findings, ps_timeline = [], []
+        note_stage_skipped(config, progress, "PowerShell history", stage_limitations, 170, 50)
     emit_progress(progress, "Checking Defender artifacts", 58)
-    defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
+    if has_scan_time_for(config, 145):
+        defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
+    else:
+        defender_findings, defender_timeline = [], []
+        note_stage_skipped(config, progress, "Defender artifacts", stage_limitations, 145, 58)
     emit_progress(progress, "Checking persistence entries", 66)
-    persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
+    if has_scan_time_for(config, 120):
+        persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
+    else:
+        persistence_findings, persistence_timeline = [], []
+        note_stage_skipped(config, progress, "Persistence entries", stage_limitations, 120, 66)
     emit_progress(progress, "Checking browser artifacts", 74)
     if config.get("skip_browser_artifacts"):
         browser_findings, browser_timeline = [], []
         emit_progress(progress, "Browser artifacts skipped by scan profile", 74)
+    elif not has_scan_time_for(config, 100):
+        browser_findings, browser_timeline = [], []
+        note_stage_skipped(config, progress, "Browser artifacts", stage_limitations, 100, 74)
     else:
         browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
     emit_progress(progress, "Checking ShellBag Analyzer context", 80)
-    shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
+    if has_scan_time_for(config, 80):
+        shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
+    else:
+        shellbag_findings, shellbag_timeline = [], []
+        note_stage_skipped(config, progress, "ShellBag Analyzer context", stage_limitations, 80, 80)
     emit_progress(progress, "Checking Recycle Bin context", 84)
-    recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
+    if has_scan_time_for(config, 65):
+        recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
+    else:
+        recycle_findings, recycle_timeline = [], []
+        note_stage_skipped(config, progress, "Recycle Bin context", stage_limitations, 65, 84)
     emit_progress(progress, "Checking recovery metadata", 88)
     if config.get("skip_recovery_metadata"):
         recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
         emit_progress(progress, "Recovery metadata skipped by scan profile", 88)
+    elif not has_scan_time_for(config, 55):
+        recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
+        note_stage_skipped(config, progress, "Recovery metadata", stage_limitations, 55, 88)
     else:
         recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
     emit_progress(progress, "Checking warning indicators", 92)
-    warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
+    if has_scan_time_for(config, 45):
+        warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
+    else:
+        warning_findings, warning_timeline, warning_logs = [], [], []
+        note_stage_skipped(config, progress, "Warning indicators", stage_limitations, 45, 92)
     emit_progress(progress, "Checking account and reset context", 94)
-    account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
-    if config.get("collect_system_reset_evidence"):
+    if has_scan_time_for(config, 35):
+        account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
+    else:
+        account_identifiers = {"robloxUserIds": [], "discordUserIds": [], "privacyNote": "Skipped because the scan was near its configured timeout."}
+        note_stage_skipped(config, progress, "Safe account identifier context", stage_limitations, 35, 94)
+    if config.get("collect_system_reset_evidence") and has_scan_time_for(config, 45):
         reset_evidence, reset_timeline = collect_system_reset_evidence(days, config)
     else:
         reset_evidence, reset_timeline = [], []
+        if config.get("collect_system_reset_evidence"):
+            note_stage_skipped(config, progress, "System reset evidence", stage_limitations, 45, 94)
     emit_progress(progress, "Building report", 96)
     raw_timeline = (
         roblox_timeline
@@ -3880,6 +3948,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     system = collect_system_info()
     system["scan_time"] = scan_time
     limitations = limitations_from_quality(quality)
+    limitations.extend(stage_limitations)
     if config.get("skip_browser_artifacts"):
         limitations.append("Browser artifacts were skipped by the selected scan profile.")
     if config.get("skip_recovery_metadata"):

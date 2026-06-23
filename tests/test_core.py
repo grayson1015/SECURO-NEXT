@@ -828,6 +828,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(report["scanStatus"], "timeout")
         self.assertIn("Last successful operation", " ".join(report["limitations"]))
 
+    def test_run_scan_with_timeout_passes_internal_deadline(self):
+        config = test_config()
+        config["scan_finish_buffer_seconds"] = 10
+        captured = {}
+        original = checker.build_scan_report_with_progress
+        try:
+            def fast_scan(days, cfg, progress):
+                captured["deadline"] = cfg.get("_scan_deadline_monotonic")
+                captured["remaining"] = checker.scan_time_remaining(cfg)
+                return {}
+
+            checker.build_scan_report_with_progress = fast_scan
+            status, report = checker.run_scan_with_timeout(7, config, lambda message: None, timeout_seconds=60)
+        finally:
+            checker.build_scan_report_with_progress = original
+        self.assertEqual(status, "completed")
+        self.assertEqual(report["scanStatus"], "completed")
+        self.assertIsNotNone(captured.get("deadline"))
+        self.assertGreater(captured.get("remaining", 0), 40)
+        self.assertLess(captured.get("remaining", 999), 60)
+
     def test_scan_profiles_apply_expected_coverage(self):
         quick = checker.apply_scan_profile(test_config(), "quick")
         standard = checker.apply_scan_profile(test_config(), "standard")
@@ -837,12 +858,15 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(quick["scan_timeout_seconds"], 120)
         self.assertEqual(standard["scan_timeout_seconds"], 360)
         self.assertEqual(deep["scan_timeout_seconds"], 480)
+        self.assertEqual(quick["scan_finish_buffer_seconds"], 20)
+        self.assertEqual(standard["scan_finish_buffer_seconds"], 35)
+        self.assertEqual(deep["scan_finish_buffer_seconds"], 55)
         self.assertLess(quick["scan_timeout_seconds"], standard["scan_timeout_seconds"])
         self.assertGreater(deep["scan_days"], standard["scan_days"])
         self.assertGreater(deep["max_files_scanned"], standard["max_files_scanned"])
         self.assertLessEqual(quick["file_artifact_time_budget_seconds"], 35)
         self.assertLessEqual(standard["file_artifact_time_budget_seconds"], 90)
-        self.assertLessEqual(deep["file_artifact_time_budget_seconds"], 240)
+        self.assertLessEqual(deep["file_artifact_time_budget_seconds"], 210)
         self.assertFalse(standard["skip_browser_artifacts"])
         self.assertFalse(deep["skip_browser_artifacts"])
         self.assertTrue(deep["collect_safe_account_identifiers"])
