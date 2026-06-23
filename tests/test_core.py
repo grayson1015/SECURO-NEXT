@@ -812,6 +812,18 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(report["warningLogs"])
         self.assertEqual(report["diagnostics"]["filesScanned"], 1500)
 
+    def test_dedupe_timeline_normalizes_datetime_objects(self):
+        events = [
+            {"time": "2026-06-23T00:45:50", "source": "String", "text": "later"},
+            {"time": dt.datetime(2026, 6, 23, 0, 45, 49), "source": "Datetime", "text": "earlier"},
+            {"time": dt.datetime(2026, 6, 23, 0, 45, 49), "source": "Datetime", "text": "earlier"},
+        ]
+        result = checker.dedupe_timeline(events)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["source"], "Datetime")
+        self.assertIsInstance(result[0]["time"], str)
+        self.assertEqual(result[1]["source"], "String")
+
     def test_run_scan_with_timeout_returns_terminal_report(self):
         config = test_config()
         original = checker.build_scan_report_with_progress

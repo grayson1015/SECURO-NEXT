@@ -920,6 +920,8 @@ def user_writable_path(path: str) -> bool:
 
 def parse_dt(value):
     if isinstance(value, dt.datetime):
+        if value.tzinfo is not None:
+            return value.astimezone().replace(tzinfo=None)
         return value
     if not value:
         return None
@@ -4037,12 +4039,17 @@ def dedupe_timeline(events: list[dict]) -> list[dict]:
     seen = set()
     clean = []
     for e in events:
-        key = (e.get("time", ""), e.get("source", ""), e.get("text", ""))
-        if key in seen or not e.get("time"):
+        parsed_time = parse_dt(e.get("time"))
+        if not parsed_time:
+            continue
+        item = dict(e)
+        item["time"] = parsed_time.isoformat(sep=" ", timespec="seconds")
+        key = (item.get("time", ""), item.get("source", ""), item.get("text", ""))
+        if key in seen:
             continue
         seen.add(key)
-        clean.append(e)
-    return sorted(clean, key=lambda x: x["time"])
+        clean.append(item)
+    return sorted(clean, key=lambda x: parse_dt(x.get("time")) or dt.datetime.min)
 
 
 def confidence_for_classification(classification: str) -> str:
