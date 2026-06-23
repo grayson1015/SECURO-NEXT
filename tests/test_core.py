@@ -44,6 +44,8 @@ def test_config():
         "storage_base_dir": "",
         "prefetch_dir": "C:/Windows/Prefetch",
         "recycle_bin_roots": [],
+        "collect_safe_account_identifiers": False,
+        "collect_system_reset_evidence": False,
         "ioc_file": "securo_iocs.json",
         "iocs": checker.normalize_iocs({}),
         "known_bad_hashes": [],
@@ -840,9 +842,14 @@ class CoreTests(unittest.TestCase):
         self.assertGreater(deep["max_files_scanned"], standard["max_files_scanned"])
         self.assertLessEqual(quick["file_artifact_time_budget_seconds"], 35)
         self.assertLessEqual(standard["file_artifact_time_budget_seconds"], 90)
-        self.assertLessEqual(deep["file_artifact_time_budget_seconds"], 150)
+        self.assertLessEqual(deep["file_artifact_time_budget_seconds"], 240)
         self.assertFalse(standard["skip_browser_artifacts"])
         self.assertFalse(deep["skip_browser_artifacts"])
+        self.assertTrue(deep["collect_safe_account_identifiers"])
+        self.assertTrue(deep["collect_system_reset_evidence"])
+        self.assertEqual(deep["scan_timeout_seconds"], 480)
+        self.assertGreaterEqual(deep["scan_days"], 90)
+        self.assertGreaterEqual(deep["max_files_scanned"], 60000)
 
     def test_switching_from_quick_to_deep_clears_quick_skips(self):
         quick = checker.apply_scan_profile(test_config(), "quick")
@@ -850,6 +857,42 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(deep["scan_profile"], "deep")
         self.assertFalse(deep["skip_browser_artifacts"])
         self.assertFalse(deep["skip_recovery_metadata"])
+
+    def test_safe_account_identifiers_include_roblox_and_skip_discord_sensitive_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_appdata = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = tmp
+            discord = Path(tmp) / "Discord"
+            safe_logs = discord / "logs"
+            sensitive = discord / "Local Storage" / "leveldb"
+            safe_logs.mkdir(parents=True)
+            sensitive.mkdir(parents=True)
+            (safe_logs / "main.log").write_text('user_id: "123456789012345678" username: ExampleDiscord', encoding="utf-8")
+            (sensitive / "000001.ldb").write_text('user_id: "999999999999999999"', encoding="utf-8")
+            config = test_config()
+            config["collect_safe_account_identifiers"] = True
+            sessions = [{
+                "user_id": "123456789",
+                "username": "ExampleRoblox",
+                "display_name": "Example",
+                "place_id": "987",
+                "job_id": "abc",
+                "start_time": "2026-06-02 12:00:00",
+                "end_time": "2026-06-02 12:30:00",
+                "log_file": "Client.log",
+            }]
+            try:
+                result = checker.collect_safe_account_identifiers(sessions, config)
+            finally:
+                if old_appdata is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = old_appdata
+        self.assertEqual(result["roblox"][0]["userId"], "123456789")
+        discord_ids = {item["userId"] for item in result["discord"]}
+        self.assertIn("123456789012345678", discord_ids)
+        self.assertNotIn("999999999999999999", discord_ids)
+        self.assertIn("excludes tokens", result["privacyNote"].lower())
 
     def test_verify_pin_returns_scan_profile(self):
         original = checker.post_json

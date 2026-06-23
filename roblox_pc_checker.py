@@ -366,6 +366,8 @@ def scan_transparency_metadata() -> dict:
             "Downloads, Desktop, Documents, AppData, Temp, ProgramData, and Roblox-related folders",
             "Prefetch, Windows Security/Sysmon event logs when available, Defender artifacts, browser download metadata, ShellBag context, and Recycle Bin metadata",
             "Roblox logs including user ID, username, display name when available, place ID/game ID, job ID, session time, duration, LoadClientSettings lines, and FastFlags",
+            "Safe account identifier context for Roblox and Discord when available, excluding tokens, cookies, Local Storage, IndexedDB, cache, and private messages",
+            "Windows install/reset context such as install date, setup logs, recovery folders, and setup event-log entries",
             "Suspicious executable/script metadata including SHA-256, Authenticode signer status, timestamps, and file path",
             "Optional IOC matches loaded from the local Securo IOC JSON file",
         ],
@@ -471,13 +473,15 @@ def scan_profiles() -> dict:
             "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
         },
         "deep": {
-            "scan_days": 21,
+            "scan_days": 90,
             "scan_timeout_seconds": 480,
-            "max_files_scanned": 18000,
-            "file_artifact_time_budget_seconds": 150,
+            "max_files_scanned": 60000,
+            "file_artifact_time_budget_seconds": 240,
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
-            "description": "Maximum coverage scan for stronger review. This can take significantly longer.",
+            "collect_safe_account_identifiers": True,
+            "collect_system_reset_evidence": True,
+            "description": "Maximum coverage scan with an 8 minute hard stop and terminal report upload.",
         },
     }
 
@@ -1758,6 +1762,183 @@ def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict]
             existing[field] = existing.get(field, []) + s.get(field, [])
         existing["log_file"] = "; ".join(sorted(set([existing.get("log_file", ""), s.get("log_file", "")]) - {""}))
     return list(deduped.values()), timeline
+
+
+def collect_safe_account_identifiers(sessions: list[dict], config: dict) -> dict:
+    # This collects non-secret account identifiers only. It deliberately skips browser-style stores that may contain tokens/cookies.
+    roblox_accounts = {}
+    for session in sessions:
+        user_id = str(session.get("user_id") or "").strip()
+        username = str(session.get("username") or "Unknown").strip() or "Unknown"
+        if not user_id and username == "Unknown":
+            continue
+        key = user_id or username.lower()
+        row = roblox_accounts.setdefault(key, {
+            "platform": "Roblox",
+            "userId": user_id,
+            "username": username,
+            "displayName": session.get("display_name", ""),
+            "firstSeen": session.get("start_time", ""),
+            "lastSeen": session.get("end_time") or session.get("start_time", ""),
+            "places": set(),
+            "jobs": set(),
+            "sources": set(),
+        })
+        row["firstSeen"] = first_time(row.get("firstSeen"), session.get("start_time")) or row.get("firstSeen", "")
+        row["lastSeen"] = max([v for v in [row.get("lastSeen"), session.get("end_time"), session.get("start_time")] if v] or [""], default="")
+        if session.get("place_id"):
+            row["places"].add(session["place_id"])
+        if session.get("job_id"):
+            row["jobs"].add(session["job_id"])
+        if session.get("log_file"):
+            row["sources"].add(session["log_file"])
+
+    discord_accounts = {}
+    if config.get("collect_safe_account_identifiers"):
+        for item in collect_safe_discord_identifiers(config):
+            key = item.get("userId") or item.get("username") or item.get("source", "")
+            if not key:
+                continue
+            row = discord_accounts.setdefault(key, {
+                "platform": "Discord",
+                "userId": item.get("userId", ""),
+                "username": item.get("username", ""),
+                "displayName": item.get("displayName", ""),
+                "firstSeen": item.get("timestamp", ""),
+                "lastSeen": item.get("timestamp", ""),
+                "sources": set(),
+            })
+            row["firstSeen"] = first_time(row.get("firstSeen"), item.get("timestamp")) or row.get("firstSeen", "")
+            row["lastSeen"] = max([v for v in [row.get("lastSeen"), item.get("timestamp")] if v] or [""], default="")
+            row["sources"].add(item.get("source", ""))
+
+    def clean(row: dict) -> dict:
+        result = dict(row)
+        for key in ("places", "jobs", "sources"):
+            if key in result:
+                result[key] = sorted(result[key])
+        return result
+
+    return {
+        "privacyNote": "Discord collection excludes tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, and private messages.",
+        "roblox": [clean(row) for row in roblox_accounts.values()],
+        "discord": [clean(row) for row in discord_accounts.values()],
+    }
+
+
+def collect_safe_discord_identifiers(config: dict) -> list[dict]:
+    appdata = Path(os.environ.get("APPDATA", ""))
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    roots = [
+        appdata / "Discord",
+        appdata / "discord",
+        appdata / "discordcanary",
+        appdata / "discordptb",
+        local / "Discord",
+        local / "DiscordCanary",
+        local / "DiscordPTB",
+    ]
+    blocked_markers = (
+        "local storage",
+        "leveldb",
+        "indexeddb",
+        "session storage",
+        "cookies",
+        "cookie",
+        "cache",
+        "code cache",
+        "gpucache",
+        "network",
+        "blob_storage",
+        "databases",
+    )
+    candidates = []
+    for root in roots:
+        if not safe_exists(root):
+            continue
+        try:
+            for path in root.rglob("*"):
+                low = str(path).lower()
+                if any(marker in low for marker in blocked_markers):
+                    continue
+                if path.suffix.lower() not in {".log", ".txt", ".json"}:
+                    continue
+                candidates.append(path)
+                if len(candidates) >= 120:
+                    break
+        except OSError:
+            continue
+    results = []
+    seen = set()
+    for path in candidates:
+        try:
+            stat = path.stat()
+            text = path.read_text(encoding="utf-8", errors="replace")[:300000]
+        except OSError:
+            continue
+        timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
+        for match in re.finditer(r"(?i)(?:user[_\s-]?id|discord[_\s-]?id|id)[^\d]{0,30}(\d{17,20})", text):
+            user_id = match.group(1)
+            key = (user_id, str(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            username = ""
+            window = text[max(0, match.start() - 300):match.end() + 300]
+            user_match = re.search(r"(?i)(?:username|global_name|display_name)[\"'\s:=]+([A-Za-z0-9_. -]{2,64})", window)
+            if user_match:
+                username = user_match.group(1).strip().strip('",')
+            results.append({
+                "platform": "Discord",
+                "userId": user_id,
+                "username": username,
+                "displayName": "",
+                "timestamp": timestamp,
+                "source": str(path),
+            })
+    return results
+
+
+def collect_system_reset_evidence(days: int, config: dict) -> tuple[list[dict], list[dict]]:
+    # Reset/install evidence is context only. It does not prove cheating by itself.
+    evidence = []
+    timeline = []
+    cut = cutoff(max(days, 90))
+    install_raw = run_command(["wmic", "os", "get", "InstallDate", "/value"], timeout=10).strip()
+    install_match = re.search(r"InstallDate=([0-9]{14})", install_raw)
+    if install_match:
+        install_time = parse_dt(dt.datetime.strptime(install_match.group(1), "%Y%m%d%H%M%S").isoformat(sep=" ", timespec="seconds"))
+        stamp = install_time.isoformat(sep=" ", timespec="seconds") if install_time else ""
+        evidence.append({"type": "Windows Install Date", "timestamp": stamp, "source": "WMIC Win32_OperatingSystem.InstallDate", "details": install_raw})
+        timeline.append({"time": stamp or iso_now(), "source": "System reset/install", "text": "Windows install date observed."})
+    paths = [
+        Path("C:/Windows/Panther/setupact.log"),
+        Path("C:/Windows/Panther/setuperr.log"),
+        Path("C:/Windows.old"),
+        Path("C:/$Windows.~BT"),
+        Path("C:/$SysReset"),
+        Path("C:/$GetCurrent"),
+        Path("C:/Recovery"),
+        Path("C:/Windows/System32/Recovery"),
+    ]
+    for path in paths:
+        if not safe_exists(path):
+            continue
+        try:
+            mtime = dt.datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            mtime = None
+        stamp = mtime.isoformat(sep=" ", timespec="seconds") if mtime else ""
+        evidence.append({"type": "Reset/Install Artifact", "timestamp": stamp, "source": str(path), "details": "Artifact exists"})
+        if mtime and mtime >= cut:
+            timeline.append({"time": stamp, "source": "System reset/install", "text": f"Reset/install artifact observed: {path}"})
+    setup_events = query_events("Setup", [1, 2, 3, 4, 13, 17, 19, 20, 31], days, max_events=80)
+    for event in setup_events[:40]:
+        text = " ".join(str(v) for v in event.get("data", {}).values())[:500]
+        stamp = event.get("time") or iso_now()
+        evidence.append({"type": "Windows Setup Event", "timestamp": stamp, "source": "Windows Setup Event Log", "eventId": event.get("id"), "details": text})
+        timeline.append({"time": stamp, "source": "System reset/install", "text": f"Windows Setup event {event.get('id')}: {text[:160]}"})
+    return evidence, timeline
 
 
 def query_events(log_name: str, event_ids: list[int], days: int, max_events=300) -> list[dict]:
@@ -3391,6 +3572,11 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     else:
         recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
     warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
+    account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
+    if config.get("collect_system_reset_evidence"):
+        reset_evidence, reset_timeline = collect_system_reset_evidence(days, config)
+    else:
+        reset_evidence, reset_timeline = [], []
     raw_timeline = (
         roblox_timeline
         + process_timeline
@@ -3405,6 +3591,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + shellbag_timeline
         + recycle_timeline
         + recovery_timeline
+        + reset_timeline
         + warning_timeline
     )
     findings = combine_findings(
@@ -3447,6 +3634,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
         "engineResults": engine_results,
+        "accountIdentifiers": account_identifiers,
+        "systemResetEvidence": reset_evidence,
         "limitations": limitations,
         "scanDays": days,
         "scanProfile": config.get("scan_profile", "standard"),
@@ -3648,6 +3837,12 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
     emit_progress(progress, "Checking warning indicators", 92)
     warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
+    emit_progress(progress, "Checking account and reset context", 94)
+    account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
+    if config.get("collect_system_reset_evidence"):
+        reset_evidence, reset_timeline = collect_system_reset_evidence(days, config)
+    else:
+        reset_evidence, reset_timeline = [], []
     emit_progress(progress, "Building report", 96)
     raw_timeline = (
         roblox_timeline
@@ -3663,6 +3858,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + shellbag_timeline
         + recycle_timeline
         + recovery_timeline
+        + reset_timeline
         + warning_timeline
     )
     findings = combine_findings(
@@ -3705,6 +3901,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
         "engineResults": engine_results,
+        "accountIdentifiers": account_identifiers,
+        "systemResetEvidence": reset_evidence,
         "limitations": limitations,
         "scanDays": days,
         "scanProfile": config.get("scan_profile", "standard"),
@@ -4022,6 +4220,24 @@ def render_html(report: dict) -> str:
         "VirusTotal": e.get("virusTotalStatus", ""),
         "Manual Review": "yes" if e.get("manualReviewRequired") else "no",
     } for e in report.get("engineResults", [])[:60]]
+    account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
+    account_rows = []
+    for row in account_context.get("roblox", []) + account_context.get("discord", []):
+        account_rows.append({
+            "Platform": row.get("platform", ""),
+            "User ID": row.get("userId", ""),
+            "Username": row.get("username", ""),
+            "Display Name": row.get("displayName", ""),
+            "First Seen": row.get("firstSeen", ""),
+            "Last Seen": row.get("lastSeen", ""),
+            "Sources": "; ".join(row.get("sources", [])[:4]) if isinstance(row.get("sources"), list) else "",
+        })
+    reset_rows = [{
+        "Type": item.get("type", ""),
+        "Timestamp": item.get("timestamp", ""),
+        "Source": item.get("source", ""),
+        "Details": item.get("details", ""),
+    } for item in report.get("systemResetEvidence", [])]
     correlation_html = ""
     if not report.get("correlationFindings"):
         correlation_html = "<p class='muted'>No cross-artifact correlation findings were generated.</p>"
@@ -4106,6 +4322,8 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Recovery</h2>{html_table(recovery_rows, ['Name','Path','Source','Timestamp','Manual Review'], 'Timestamp')}</section>
 <section><h2>Antivirus Logs</h2>{html_table(antivirus_rows, ['Source','Detection','Severity','Timestamp','Path'], 'Timestamp')}</section>
 <section><h2>Engines</h2>{html_table(engine_rows, ['File','Score','Local Hits','Detectability','VirusTotal','Manual Review'])}</section>
+<section><h2>Safe Account Identifiers</h2><p class="muted">{html.escape(str(account_context.get('privacyNote', 'Tokens, cookies, private messages, and credential stores are excluded.')))}</p>{html_table(account_rows, ['Platform','User ID','Username','Display Name','First Seen','Last Seen','Sources'], 'Last Seen')}</section>
+<section><h2>Windows Reset / Install Evidence</h2><p class="muted">Context only. These artifacts do not prove cheating by themselves.</p>{html_table(reset_rows, ['Type','Timestamp','Source','Details'], 'Timestamp')}</section>
 <section><h2>Session Information</h2><div class="sessions">{session_cards}</div>{html_table(sessions, ['Username','Display Name','User ID','Place ID','Job ID','Duration','Status'], 'Timestamp')}</section>
 <section><h2>Detected FastFlags</h2><p class="muted">FastFlags are grouped with the Roblox log where they were found.</p>{html_table(fastflag_rows, ['FastFlag','Value','Source Log','Timestamp','Place ID','Job ID'], 'Timestamp')}</section>
 <section><h2>Show All Roblox Logs</h2><p class="muted">Expand each log to inspect every captured Roblox event and the raw log text.</p>{roblox_log_html or "<p class='muted'>No raw Roblox logs were captured.</p>"}</section>
@@ -4323,6 +4541,8 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
         compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:profile["recoveryArtifacts"]]
         compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:profile["antivirusLogs"]]
         compacted["engineResults"] = list(report.get("engineResults", []))[:profile["engineResults"]]
+        compacted["accountIdentifiers"] = compact_account_identifiers(report.get("accountIdentifiers", {}))
+        compacted["systemResetEvidence"] = list(report.get("systemResetEvidence", []))[:80]
         compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), profile["robloxLogs"], include_raw=profile["rawRoblox"])
         compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:profile["fastFlags"]]
         if isinstance(compacted.get("rawArtifacts"), list):
@@ -4341,11 +4561,23 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:20]
     compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:30]
     compacted["engineResults"] = list(report.get("engineResults", []))[:40]
+    compacted["accountIdentifiers"] = compact_account_identifiers(report.get("accountIdentifiers", {}))
+    compacted["systemResetEvidence"] = list(report.get("systemResetEvidence", []))[:40]
     compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), 10, include_raw=False)
     compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:120]
     if isinstance(compacted.get("rawArtifacts"), list):
         compacted["rawArtifacts"] = []
     return compacted
+
+
+def compact_account_identifiers(value) -> dict:
+    if not isinstance(value, dict):
+        return {"privacyNote": "Tokens, cookies, private messages, and credential stores are excluded.", "roblox": [], "discord": []}
+    return {
+        "privacyNote": value.get("privacyNote", "Tokens, cookies, private messages, and credential stores are excluded."),
+        "roblox": list(value.get("roblox", []))[:80],
+        "discord": list(value.get("discord", []))[:80],
+    }
 
 
 def select_upload_findings(findings: list, limit: int) -> list:
