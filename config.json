@@ -151,7 +151,19 @@
     "mapper",
     "dllloader",
     "skript",
-    "skriptloader"
+    "skriptloader",
+    "fastflag",
+    "fflag",
+    "dfflag",
+    "dfint",
+    "flog",
+    "clientappsettings",
+    "robloxplayerbeta",
+    "clumsy",
+    "windivert",
+    "potassium",
+    "monaco",
+    "rbxscriptsignal"
   ],
   "suspicious_extensions": [
     ".dll",

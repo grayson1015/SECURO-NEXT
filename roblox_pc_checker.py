@@ -33,6 +33,8 @@ CONFIRMED_EXPLOIT_CATEGORIES = {
     "Tampered File",
     "A3",
     "Skript Loader Trace",
+    "Confirmed FastFlag Injector",
+    "Confirmed Executor Artifact",
     "Confirmed IOC",
 }
 HIGH_CONFIDENCE_CHEAT_CATEGORIES = {"S1", "DLL", "BSoD", "S2", "C3", "C4", "A"}
@@ -98,6 +100,9 @@ SPECIFIC_DETECTION_CATEGORIES = {
     "Game Instance Modification",
     "ActivitiesCache Disabled",
     "Executor Keyword Match",
+    "FastFlag Injector",
+    "Executor Bundle Artifact",
+    "Network Lag Tool / WinDivert Manipulation",
 }
 WARNING_DETECTION_CATEGORIES = {
     "Virtualization Check",
@@ -136,6 +141,14 @@ EXPLOIT_FAMILY_TERMS = {
     "skript",
     "skriptloader",
     "skript loader",
+    "fastflag",
+    "fflag",
+    "dfflag",
+    "dfint",
+    "flog",
+    "clientappsettings",
+    "clumsy",
+    "windivert",
 }
 VIRTUALIZATION_TERMS = ("qemu", "vmware", "sandboxie", "parallels", "virtualbox", "virtual pc", "vbox")
 NETWORK_PATH_PREFIXES = ("\\\\", "file://")
@@ -1382,7 +1395,9 @@ def cheap_artifact_candidate(path_text: str, times: list[dt.datetime], sessions:
         return True
     if re.search(r"\.(jpg|png|gif|txt|pdf|docx?)\.(exe|dll|scr|bat|cmd|ps1)$", name):
         return True
-    if ".minecraft" in low or "\\mods\\" in low or "clientsettings" in low or "fastflag" in low:
+    if any(term in low for term in ["clientsettings", "fastflag", "fflag", "dfflag", "dfint", "flog", "robloxplayerbeta", "clumsy", "windivert", "potassium", "\\monaco\\", "\\basic-languages\\lua\\", "rbxscriptsignal"]):
+        return True
+    if ".minecraft" in low or "\\mods\\" in low:
         return True
     return False
 
@@ -1400,9 +1415,16 @@ def engine_detected_executor_artifact(finding: dict, config: dict) -> bool:
     return bool(local_engine_hits >= 1 and score >= suspicious_threshold)
 
 
+def sample_verified_exploit_artifact(finding: dict) -> bool:
+    categories = set(finding.get("detection_categories", []))
+    return bool(categories & {"Confirmed FastFlag Injector", "Confirmed Executor Artifact"})
+
+
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
     if flagged_executor_binary_match(finding, config):
+        return True
+    if sample_verified_exploit_artifact(finding):
         return True
     if not confirmed_verification_gate(finding, config):
         return False
@@ -1440,6 +1462,41 @@ def inspect_file_indicators(path: str, finding: dict):
     lower = data.lower()
     name = Path(path).name.lower()
     path_lower = (path or "").lower()
+    search_text = lower[:300000].decode("latin1", errors="ignore")
+
+    fastflag_terms = [b"fflag", b"dfflag", b"dfint", b"flog", b"fastflag", b"clientappsettings"]
+    fastflag_hits = [term.decode("latin1") for term in fastflag_terms if term in lower]
+    roblox_memory_hits = [term for term in [b"robloxplayerbeta.exe", b"openprocess", b"writeprocessmemory", b"fvar container"] if term in lower]
+    if fastflag_hits and (b"roblox" in lower or roblox_memory_hits):
+        add_detection(finding, "FastFlag Injector", "File contains Roblox FastFlag modification/injection strings.", "High", 45)
+        finding["evidence_types"].append("fastflag_injector")
+        finding["supporting_evidence"].append("FastFlag indicators: " + ", ".join(sorted(set(fastflag_hits))[:8]))
+        if len(roblox_memory_hits) >= 2 or (b"robloxplayerbeta.exe" in lower and b"fvar container" in lower):
+            add_detection(finding, "Confirmed FastFlag Injector", "Roblox process targeting, FastFlag strings, and memory/injection indicators were found together.", "High Risk", 75)
+            finding["evidence_types"].append("confirmed_fastflag_injector")
+
+    executor_layout_hits = []
+    if "potassium" in path_lower or b"potassium" in lower:
+        executor_layout_hits.append("Potassium name")
+    for marker in ["\\monaco\\", "\\basic-languages\\lua\\", "rbxscriptsignal", "drawing.js", "crypt.js", "raknet.js", "\\scripts\\", "decompiler.exe", "loader.js"]:
+        if marker in path_lower or marker.encode("latin1", errors="ignore") in lower:
+            executor_layout_hits.append(marker.strip("\\"))
+    if len(set(executor_layout_hits)) >= 2 or ("potassium" in path_lower and suffix in {".exe", ".dll"}):
+        add_detection(finding, "Executor Bundle Artifact", "File or surrounding path matches a Roblox script executor bundle layout.", "High", 45)
+        finding["evidence_types"].append("executor_bundle")
+        finding["supporting_evidence"].append("Executor bundle indicators: " + ", ".join(sorted(set(executor_layout_hits))[:10]))
+        if "potassium" in path_lower and (suffix in {".exe", ".dll"} or len(set(executor_layout_hits)) >= 3):
+            add_detection(finding, "Confirmed Executor Artifact", "Known executor binary/layout indicators were found on an already-flagged artifact.", "High Risk", 75)
+            finding["evidence_types"].append("confirmed_executor_artifact")
+
+    windivert_hits = []
+    for marker in ["clumsy", "windivert", "windivert64.sys", "packet lag", "drop", "throttle", "duplicate", "tamper"]:
+        if marker in path_lower or marker in search_text:
+            windivert_hits.append(marker)
+    if "clumsy" in path_lower or "windivert" in path_lower or len(set(windivert_hits)) >= 2:
+        add_detection(finding, "Network Lag Tool / WinDivert Manipulation", "Network lag or WinDivert traffic manipulation artifact found.", "High", 45)
+        finding["evidence_types"].append("network_lag_tool")
+        finding["supporting_evidence"].append("Network manipulation indicators: " + ", ".join(sorted(set(windivert_hits))[:10]))
 
     if re.search(r"\.(jpg|png|gif|txt|pdf|docx?)\.(exe|dll|scr|bat|cmd|ps1)$", name):
         add_detection(finding, "Modified File Extension", "Executable uses a double-extension or disguised extension pattern", "High", 35)

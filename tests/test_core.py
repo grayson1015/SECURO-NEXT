@@ -509,6 +509,47 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(config.get("_external_forensic_output_dir"))
         self.assertTrue(any("PECmd" in note for note in notes))
 
+    def test_fastflag_injector_pattern_becomes_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fastflag_injector_gui_enhanced.exe"
+            path.write_bytes(
+                b"MZ RobloxPlayerBeta.exe Enhanced FastFlag Injector FFlag DFFlag DFInt FLog "
+                b"Inject Once OpenProcess WriteProcessMemory Failed to find FVar container in Roblox memory"
+            )
+            config = test_config()
+            finding = checker.make_finding(str(path), path.name, "unit", config)
+            checker.inspect_file_indicators(str(path), finding)
+            finding["first_seen"] = "2026-06-02 12:00:00"
+            result = checker.finalize_findings([finding], config)[0]
+        self.assertIn("Confirmed FastFlag Injector", result["detection_categories"])
+        self.assertEqual(result["classification"], "Confirmed Exploit")
+
+    def test_potassium_executor_bundle_pattern_becomes_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "OpXOyuApWKTlFzrV (3)" / "bin"
+            root.mkdir(parents=True)
+            path = root / "Potassium.exe"
+            path.write_bytes(b"MZ Potassium Potassium.dll monaco basic-languages lua RBXScriptSignal.js Drawing.js crypt.js raknet.js loader.js")
+            config = test_config()
+            finding = checker.make_finding(str(path), path.name, "unit", config)
+            checker.inspect_file_indicators(str(path), finding)
+            finding["first_seen"] = "2026-06-02 12:00:00"
+            result = checker.finalize_findings([finding], config)[0]
+        self.assertIn("Confirmed Executor Artifact", result["detection_categories"])
+        self.assertEqual(result["classification"], "Confirmed Exploit")
+
+    def test_clumsy_windivert_pattern_is_high_risk_but_not_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clumsy.exe"
+            path.write_bytes(b"MZ clumsy WinDivert WinDivert64.sys lag drop throttle duplicate tamper")
+            config = test_config()
+            finding = checker.make_finding(str(path), path.name, "unit", config)
+            checker.inspect_file_indicators(str(path), finding)
+            finding["first_seen"] = "2026-06-02 12:00:00"
+            result = checker.finalize_findings([finding], config)[0]
+        self.assertIn("Network Lag Tool / WinDivert Manipulation", result["detection_categories"])
+        self.assertNotEqual(result["classification"], "Confirmed Exploit")
+
     def test_key_artifacts_collect_prefetch_and_deleted_files_for_report(self):
         finding = checker.make_finding("C:/Users/Test/Downloads/Example.exe", "Example.exe", "unit", test_config())
         finding["first_seen"] = "2026-06-02 17:55:00"
