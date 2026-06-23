@@ -333,6 +333,9 @@ def load_config() -> dict:
     config.setdefault("forensic_export_dirs", [])
     config.setdefault("forensic_export_max_files", 80)
     config.setdefault("forensic_export_max_rows", 5000)
+    config.setdefault("external_forensic_tools_enabled", False)
+    config.setdefault("external_forensic_tools_dir", "")
+    config.setdefault("external_forensic_tool_timeout_seconds", 55)
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -622,6 +625,7 @@ def ensure_storage_dirs(config: dict) -> dict[str, Path]:
         "reports": root / "Reports",
         "history": root / "History",
         "logs": root / "Logs",
+        "tool_output": root / "ToolOutput",
     }
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
@@ -2066,14 +2070,118 @@ def jump_list_roots(config: dict | None = None) -> list[Path]:
 
 
 def forensic_parser_tools_available() -> bool:
-    root = app_dir()
-    tool_names = ["PECmd.exe", "MFTECmd.exe", "SBECmd.exe", "JLECmd.exe", "SrumECmd.exe", "AmcacheParser.exe", "AppCompatCacheParser.exe"]
-    return any(safe_exists(root / name) for name in tool_names)
+    return bool(available_forensic_tools({}))
+
+
+FORENSIC_TOOL_NAMES = {
+    "PECmd.exe",
+    "MFTECmd.exe",
+    "SBECmd.exe",
+    "JLECmd.exe",
+    "SrumECmd.exe",
+    "AmcacheParser.exe",
+    "AppCompatCacheParser.exe",
+}
+
+
+def forensic_tool_dirs(config: dict | None = None) -> list[Path]:
+    configured = str((config or {}).get("external_forensic_tools_dir") or "").strip()
+    roots = []
+    if configured:
+        roots.append(Path(os.path.expandvars(configured)).expanduser())
+    roots.extend([app_dir() / "Tools", app_dir()])
+    deduped = []
+    seen = set()
+    for root in roots:
+        key = str(root).lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(root)
+    return deduped
+
+
+def available_forensic_tools(config: dict | None = None) -> dict[str, Path]:
+    found = {}
+    for root in forensic_tool_dirs(config or {}):
+        for name in FORENSIC_TOOL_NAMES:
+            candidate = root / name
+            if safe_exists(candidate) and name not in found:
+                found[name] = candidate
+    return found
+
+
+def run_forensic_tool(args: list[str], config: dict, timeout: int) -> str:
+    try:
+        write_app_log(config, "running forensic helper: " + " ".join(args[:4]))
+    except Exception:
+        pass
+    return run_command(args, timeout=timeout)
+
+
+def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
+    # Runs only known read-only parser tools, with short timeouts, into Securo's local ToolOutput folder.
+    if not config.get("external_forensic_tools_enabled"):
+        return []
+    tools = available_forensic_tools(config)
+    if not tools:
+        return []
+    output_root = ensure_storage_dirs(config)["tool_output"] / now_stamp()
+    output_root.mkdir(parents=True, exist_ok=True)
+    timeout = max(10, int(config.get("external_forensic_tool_timeout_seconds") or 55))
+    notes = []
+
+    def note(message: str):
+        notes.append(message)
+        write_app_log(config, message)
+
+    prefetch_dir = Path(os.path.expandvars(str(config.get("prefetch_dir") or "C:/Windows/Prefetch"))).expanduser()
+    if "PECmd.exe" in tools and safe_exists(prefetch_dir):
+        out = run_forensic_tool([str(tools["PECmd.exe"]), "-d", str(prefetch_dir), "--csv", str(output_root)], config, timeout)
+        note("PECmd Prefetch parser completed." if "COMMAND_ERROR" not in out else f"PECmd Prefetch parser issue: {out[:180]}")
+
+    mft_path = Path("C:/$MFT")
+    if "MFTECmd.exe" in tools and safe_exists(mft_path):
+        out = run_forensic_tool([str(tools["MFTECmd.exe"]), "-f", str(mft_path), "--csv", str(output_root)], config, timeout)
+        note("MFTECmd MFT parser completed." if "COMMAND_ERROR" not in out else f"MFTECmd MFT parser issue: {out[:180]}")
+
+    for root in jump_list_roots(config):
+        if "JLECmd.exe" not in tools or not safe_exists(root):
+            continue
+        out = run_forensic_tool([str(tools["JLECmd.exe"]), "-d", str(root), "--csv", str(output_root)], config, timeout)
+        note("JLECmd Jump List parser completed." if "COMMAND_ERROR" not in out else f"JLECmd Jump List parser issue: {out[:180]}")
+
+    appdata = Path(os.environ.get("APPDATA", ""))
+    ntuser = Path(os.environ.get("USERPROFILE", "")) / "NTUSER.DAT"
+    if "SBECmd.exe" in tools and safe_exists(ntuser):
+        out = run_forensic_tool([str(tools["SBECmd.exe"]), "-d", str(appdata), "--csv", str(output_root)], config, timeout)
+        note("SBECmd ShellBag parser completed." if "COMMAND_ERROR" not in out else f"SBECmd ShellBag parser issue: {out[:180]}")
+
+    srum = Path("C:/Windows/System32/sru/SRUDB.dat")
+    if "SrumECmd.exe" in tools and safe_exists(srum):
+        out = run_forensic_tool([str(tools["SrumECmd.exe"]), "-f", str(srum), "--csv", str(output_root)], config, timeout)
+        note("SrumECmd SRUM parser completed." if "COMMAND_ERROR" not in out else f"SrumECmd SRUM parser issue: {out[:180]}")
+
+    amcache = Path(os.path.expandvars(str(config.get("amcache_path") or "C:/Windows/AppCompat/Programs/Amcache.hve"))).expanduser()
+    if "AmcacheParser.exe" in tools and safe_exists(amcache):
+        out = run_forensic_tool([str(tools["AmcacheParser.exe"]), "-f", str(amcache), "--csv", str(output_root)], config, timeout)
+        note("AmcacheParser completed." if "COMMAND_ERROR" not in out else f"AmcacheParser issue: {out[:180]}")
+
+    system_hive = Path("C:/Windows/System32/config/SYSTEM")
+    if "AppCompatCacheParser.exe" in tools and safe_exists(system_hive):
+        out = run_forensic_tool([str(tools["AppCompatCacheParser.exe"]), "-f", str(system_hive), "--csv", str(output_root)], config, timeout)
+        note("AppCompatCacheParser completed." if "COMMAND_ERROR" not in out else f"AppCompatCacheParser issue: {out[:180]}")
+
+    if notes:
+        config["_external_forensic_output_dir"] = str(output_root)
+    return notes
 
 
 def forensic_export_dirs(config: dict | None = None) -> list[Path]:
     configured = (config or {}).get("forensic_export_dirs") or []
     roots = [Path(os.path.expandvars(str(root))).expanduser() for root in configured]
+    generated = (config or {}).get("_external_forensic_output_dir")
+    if generated:
+        roots.append(Path(os.path.expandvars(str(generated))).expanduser())
     roots.extend([
         storage_root(config or {}) / "ToolOutput",
         app_dir() / "ToolOutput",
@@ -3959,6 +4067,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
     amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
+    external_tool_notes = execute_external_forensic_tools(days, config)
     external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=verbose)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
@@ -4019,6 +4128,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     system = collect_system_info()
     system["scan_time"] = scan_time
     limitations = limitations_from_quality(quality)
+    limitations.extend(external_tool_notes)
     if config.get("skip_browser_artifacts"):
         limitations.append("Browser artifacts were skipped by the selected scan profile.")
     if config.get("skip_recovery_metadata"):
@@ -4252,6 +4362,12 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     emit_progress(progress, "Checking forensic app artifacts", 31)
     jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
     amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
+    emit_progress(progress, "Running optional forensic parser tools", 32)
+    if has_scan_time_for(config, 90):
+        external_tool_notes = execute_external_forensic_tools(days, config)
+    else:
+        external_tool_notes = []
+        note_stage_skipped(config, progress, "Optional forensic parser tools", stage_limitations, 90, 32)
     emit_progress(progress, "Checking forensic parser exports", 32)
     external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
     emit_progress(progress, "Checking file artifacts", 34)
@@ -4358,6 +4474,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     system["scan_time"] = scan_time
     limitations = limitations_from_quality(quality)
     limitations.extend(stage_limitations)
+    limitations.extend(external_tool_notes)
     if config.get("skip_browser_artifacts"):
         limitations.append("Browser artifacts were skipped by the selected scan profile.")
     if config.get("skip_recovery_metadata"):

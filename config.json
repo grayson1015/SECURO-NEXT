@@ -41,6 +41,9 @@
   "forensic_export_dirs": [],
   "forensic_export_max_files": 80,
   "forensic_export_max_rows": 5000,
+  "external_forensic_tools_enabled": false,
+  "external_forensic_tools_dir": "",
+  "external_forensic_tool_timeout_seconds": 55,
   "ioc_file": "securo_iocs.json",
   "known_bad_hashes": [],
   "executor_confirmation_keywords": [

@@ -47,6 +47,9 @@ def test_config():
         "forensic_export_dirs": [],
         "forensic_export_max_files": 80,
         "forensic_export_max_rows": 5000,
+        "external_forensic_tools_enabled": False,
+        "external_forensic_tools_dir": "",
+        "external_forensic_tool_timeout_seconds": 55,
         "collect_safe_account_identifiers": False,
         "collect_system_reset_evidence": False,
         "ioc_file": "securo_iocs.json",
@@ -479,6 +482,32 @@ class CoreTests(unittest.TestCase):
         self.assertIn("recovery", findings[0]["evidence_types"])
         self.assertTrue(any(item.startswith("DELETED FILE:") for item in findings[0]["supporting_evidence"]))
         self.assertTrue(any("DELETED FILE: C:\\Users\\Test\\Downloads\\Wave.exe" in event["text"] for event in timeline))
+
+    def test_external_forensic_tool_runner_is_opt_in_and_whitelisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = root / "Tools"
+            prefetch = root / "Prefetch"
+            tools.mkdir()
+            prefetch.mkdir()
+            (tools / "PECmd.exe").write_text("fixture", encoding="utf-8")
+            config = test_config()
+            config["storage_base_dir"] = str(root / "Securo")
+            config["external_forensic_tools_enabled"] = True
+            config["external_forensic_tools_dir"] = str(tools)
+            config["prefetch_dir"] = str(prefetch)
+            calls = []
+            original = checker.run_command
+            try:
+                checker.run_command = lambda args, timeout=20: calls.append(args) or ""
+                notes = checker.execute_external_forensic_tools(7, config)
+            finally:
+                checker.run_command = original
+        self.assertTrue(calls)
+        self.assertEqual(Path(calls[0][0]).name, "PECmd.exe")
+        self.assertIn("--csv", calls[0])
+        self.assertTrue(config.get("_external_forensic_output_dir"))
+        self.assertTrue(any("PECmd" in note for note in notes))
 
     def test_key_artifacts_collect_prefetch_and_deleted_files_for_report(self):
         finding = checker.make_finding("C:/Users/Test/Downloads/Example.exe", "Example.exe", "unit", test_config())
