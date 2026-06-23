@@ -2119,9 +2119,12 @@ def collect_system_reset_evidence(days: int, config: dict) -> tuple[list[dict], 
     setup_events = query_events("Setup", [1, 2, 3, 4, 13, 17, 19, 20, 31], max(days, 3650), max_events=40, timeout=8)
     for event in setup_events[:40]:
         text = " ".join(str(v) for v in event.get("data", {}).values())[:500]
+        if not text or not re.search(r"\b(reset|install|reinstall|upgrade|recovery|rollback|setup)\b", text, re.I):
+            continue
         stamp = event.get("time") or iso_now()
-        evidence.append({"type": "Windows Setup Event", "timestamp": stamp, "source": "Windows Setup Event Log", "eventId": event.get("id"), "details": text})
-        timeline.append({"time": stamp, "source": "System reset/install", "text": f"Windows Setup event {event.get('id')}: {text[:160]}"})
+        event_id = event.get("event_id")
+        evidence.append({"type": "Windows Setup Event", "timestamp": stamp, "source": "Windows Setup Event Log", "eventId": event_id, "details": text})
+        timeline.append({"time": stamp, "source": "System reset/install", "text": f"Windows Setup event {event_id}: {text[:160]}"})
     return evidence, timeline
 
 

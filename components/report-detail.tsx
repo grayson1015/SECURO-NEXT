@@ -38,6 +38,13 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const accountRows = accountContext.roblox || [];
   const resetHistory = useMemo(
     () => [...(data.systemResetEvidence || [])].sort((a, b) => {
+      const priority = (item: { type?: string }) => {
+        if (item.type === "Possible Windows Reset/Reinstall") return 0;
+        if (item.type === "Reset/Install Artifact") return 1;
+        return 2;
+      };
+      const priorityDifference = priority(a) - priority(b);
+      if (priorityDifference) return priorityDifference;
       const left = parseTimestamp(a.timestamp)?.getTime() || 0;
       const right = parseTimestamp(b.timestamp)?.getTime() || 0;
       return right - left;

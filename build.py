@@ -2,13 +2,13 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
+import time
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 PYTHON = Path(sys.executable)
-PACKAGER_ROOT = Path(tempfile.gettempdir()) / "securo_pyinstaller_cache"
+PACKAGER_ROOT = ROOT / ".securo_build_tools"
 APP_NAME = "Securo"
 
 
@@ -17,6 +17,8 @@ def run(args):
 
 
 def main():
+    build_started = time.time()
+    build_id = time.strftime("%Y%m%d_%H%M%S")
     python = PYTHON if PYTHON.exists() else Path(sys.executable)
     python_root = python.parent
     cache_name = f"pyinstaller-{python_root.name.lower()}-{sys.version_info.major}{sys.version_info.minor}"
@@ -29,6 +31,13 @@ def main():
     env["PYTHONPATH"] = str(packager)
     env["TCL_LIBRARY"] = str(python_root / "tcl" / "tcl8.6")
     env["TK_LIBRARY"] = str(python_root / "tcl" / "tk8.6")
+    staging_root = ROOT / ".securo_staging" / build_id
+    staging_dist = staging_root / "dist"
+    staging_work = staging_root / "build"
+    staging_spec = staging_root / "spec"
+    staging_dist.mkdir(parents=True, exist_ok=True)
+    staging_work.mkdir(parents=True, exist_ok=True)
+    staging_spec.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
             str(python),
@@ -36,6 +45,12 @@ def main():
             "PyInstaller",
             "--noconfirm",
             "--clean",
+            "--distpath",
+            str(staging_dist),
+            "--workpath",
+            str(staging_work),
+            "--specpath",
+            str(staging_spec),
             "--onedir",
             "--windowed",
             "--hidden-import",
@@ -53,16 +68,16 @@ def main():
             "--name",
             APP_NAME,
             "--add-data",
-            "config.json;.",
+            f"{ROOT / 'config.json'};.",
             "--add-data",
-            "securo_iocs.json;.",
-            "roblox_pc_checker.py",
+            f"{ROOT / 'securo_iocs.json'};.",
+            str(ROOT / "roblox_pc_checker.py"),
         ],
         cwd=ROOT,
         env=env,
         check=True,
     )
-    portable_dir = ROOT / "dist" / APP_NAME
+    portable_dir = staging_dist / APP_NAME
     tools_src = ROOT / "Tools"
     tools_dst = portable_dir / "Tools"
     if tools_src.exists():
@@ -74,9 +89,13 @@ def main():
     downloads = ROOT / "public" / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     zip_base = downloads / APP_NAME
-    zip_path = shutil.make_archive(str(zip_base), "zip", ROOT / "dist", APP_NAME)
+    zip_path = shutil.make_archive(str(zip_base), "zip", staging_dist, APP_NAME)
+    zip_file = Path(zip_path)
+    source_mtime = max((ROOT / "roblox_pc_checker.py").stat().st_mtime, (ROOT / "config.json").stat().st_mtime)
+    if zip_file.stat().st_mtime < source_mtime or zip_file.stat().st_mtime < build_started:
+        raise RuntimeError("Securo.zip is stale; the build did not package the current scanner source.")
     print(portable_dir / f"{APP_NAME}.exe")
-    print(zip_path)
+    print(zip_file)
 
 
 if __name__ == "__main__":
