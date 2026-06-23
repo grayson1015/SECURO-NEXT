@@ -974,6 +974,52 @@ def json_safe(value):
     return value
 
 
+def key_artifacts_from_report_parts(findings: list[dict], timeline: list[dict], recovery_artifacts: list[dict]) -> list[dict]:
+    artifacts = []
+    seen = set()
+
+    def add(kind: str, label: str, path: str = "", timestamp: str = "", source: str = "", confidence: str = "Possible"):
+        label = str(label or "").strip()
+        if not label:
+            return
+        key = (kind, label.lower(), str(timestamp or ""))
+        if key in seen:
+            return
+        seen.add(key)
+        artifacts.append({
+            "type": kind,
+            "label": label,
+            "path": str(path or ""),
+            "timestamp": str(timestamp or ""),
+            "source": str(source or ""),
+            "confidence": str(confidence or "Possible"),
+        })
+
+    for finding in findings:
+        confidence = finding.get("confidence_level") or confidence_for_classification(finding.get("classification", "Indicator Found"))
+        timestamp = finding.get("first_seen", "")
+        for evidence in finding.get("supporting_evidence", []):
+            text = str(evidence)
+            if text.startswith("PREFETCH FILE:"):
+                add("Prefetch", text, finding.get("path", ""), timestamp, "Finding evidence", confidence)
+            elif text.startswith("DELETED FILE:"):
+                add("Deleted File", text, finding.get("path", ""), timestamp, "Finding evidence", confidence)
+
+    for event in timeline:
+        text = str(event.get("text", ""))
+        if text.startswith("PREFETCH FILE:"):
+            add("Prefetch", text, "", event.get("time", ""), event.get("source", "Timeline"), event.get("confidence", "Possible"))
+        elif text.startswith("DELETED FILE:"):
+            add("Deleted File", text, "", event.get("time", ""), event.get("source", "Timeline"), event.get("confidence", "Possible"))
+
+    for item in recovery_artifacts:
+        path = item.get("path", "")
+        if path:
+            add("Deleted File", f"DELETED FILE: {path}", path, item.get("timestamp", ""), item.get("source", "Recovery"), "Possible")
+
+    return sorted(artifacts, key=lambda item: parse_dt(item.get("timestamp")) or dt.datetime.min, reverse=True)
+
+
 def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     norm = path if "://" in (path or "") or str(path or "").startswith(NETWORK_PATH_PREFIXES) else (normalize_path(path) if path else "")
     suppressed = securo_internal_path(norm, config)
@@ -2423,8 +2469,8 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
             add_detection(finding, "Executed Suspicious File", "Prefetch indicates a suspicious executable or script was executed.", "High", 25)
         if near:
             add_score(finding, config["score_rules"]["near_roblox_session"], "Prefetch timestamp is within 30 minutes of Roblox activity")
-        finding["supporting_evidence"].append(f"Prefetch file: {pf}")
-        finding["supporting_evidence"].append(f"Prefetch executable name: {exe_name}")
+        finding["supporting_evidence"].append(f"PREFETCH FILE: {exe_name}")
+        finding["supporting_evidence"].append(f"Prefetch artifact: {pf}")
         if referenced_paths:
             finding["supporting_evidence"].append("Prefetch referenced paths: " + "; ".join(referenced_paths[:8]))
         if parsed.get("strings"):
@@ -2439,9 +2485,9 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
                 break
         apply_ioc_matches(finding, config, text_blob)
         merge_findings(findings, finding)
-        timeline_text = f"Prefetch execution hint: {exe_name} from {pf.name}"
+        timeline_text = f"PREFETCH FILE: {exe_name} from {pf.name}"
         if suspicious_hit:
-            timeline_text = f"Suspicious executable execution hint: {exe_name} from {pf.name}"
+            timeline_text = f"PREFETCH FILE: {exe_name} from {pf.name} (suspicious execution)"
         timeline.append({"time": finding["first_seen"], "source": "Prefetch", "text": timeline_text})
     for finding in findings.values():
         count = suspicious_prefetch_by_name.get(str(finding.get("name", "")).lower(), 0)
@@ -2622,8 +2668,9 @@ def collect_recycle_bin_context(days: int, config: dict, sessions: list[dict]) -
             executor_terms = [str(term).lower() for term in config.get("executor_confirmation_keywords", []) if str(term).strip()]
             executor_deleted = any(term in text.lower() for term in executor_terms)
             suspicious_deleted = suspicious_text(text, config) or ioc_text_matches(text, config) or executor_deleted
-            reason = f"Recycle Bin deletion metadata references: {original}"
+            reason = f"DELETED FILE: {original}"
             finding = make_possible_context_finding(original, Path(original).name or entry.name, "Recycle Bin", reason, deleted_when, config)
+            finding["supporting_evidence"].append(f"DELETED FILE: {original}")
             finding["supporting_evidence"].append(f"Recycle Bin metadata file: {entry}")
             finding["evidence_types"].append("recovery")
             if meta:
@@ -2704,10 +2751,11 @@ def collect_recovery_artifacts(days: int, config: dict, sessions: list[dict]) ->
                 original,
                 Path(original).name or entry.name,
                 "Recovered File Metadata",
-                "Recycle Bin metadata recovered for a deleted file. Manual review may be required.",
+                f"DELETED FILE: {original}",
                 parse_dt(when) or mtime,
                 config,
             )
+            finding["supporting_evidence"].append(f"DELETED FILE: {original}")
             finding["evidence_types"].append("recovery")
             finding["manual_review_required"] = True
             finding["recovered_metadata"] = meta
@@ -2730,7 +2778,7 @@ def collect_recovery_artifacts(days: int, config: dict, sessions: list[dict]) ->
                 "metadata": meta,
                 "manualReviewRequired": True,
             })
-            timeline.append({"time": when, "source": "Recovery", "text": f"Recovered deleted-file metadata: {original}"})
+            timeline.append({"time": when, "source": "Recovery", "text": f"DELETED FILE: {original}"})
     return list(findings.values()), timeline, recovered
 
 
@@ -3627,6 +3675,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
+    key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -3644,6 +3693,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "confidence": confidence_for(highest_result, quality),
         "evidenceSources": quality,
         "timeline": timeline,
+        "keyArtifacts": key_artifacts,
         "sessions": [camel_session(s) for s in sessions_raw],
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
@@ -3959,6 +4009,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
+    key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -3977,6 +4028,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "confidence": confidence_for(highest_result, quality),
         "evidenceSources": quality,
         "timeline": timeline,
+        "keyArtifacts": key_artifacts,
         "sessions": [camel_session(s) for s in sessions_raw],
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
@@ -4229,6 +4281,12 @@ def render_txt(report: dict) -> str:
     for item in report.get("engineResults", [])[:40]:
         lines.append(f"{item.get('detectabilityRange')} score={item.get('localHeuristicScore')} VT={item.get('virusTotalStatus')} {item.get('path')}")
     lines.append("")
+    lines += ["Key Artifacts", "-------------"]
+    if not report.get("keyArtifacts"):
+        lines.append("No Prefetch or deleted-file key artifacts found.")
+    for item in report.get("keyArtifacts", []):
+        lines.append(f"{item.get('timestamp')} [{item.get('type')}] {item.get('label')} Source={item.get('source')} Confidence={item.get('confidence')}")
+    lines.append("")
     lines += ["Evidence Limitations", "--------------------"]
     lines += [f"- {x}" for x in report["limitations"]]
     lines += ["", "Final Note", "----------", report["finalStatement"]]
@@ -4312,6 +4370,14 @@ def render_html(report: dict) -> str:
         "VirusTotal": e.get("virusTotalStatus", ""),
         "Manual Review": "yes" if e.get("manualReviewRequired") else "no",
     } for e in report.get("engineResults", [])[:60]]
+    key_artifact_rows = [{
+        "Type": item.get("type", ""),
+        "Artifact": item.get("label", ""),
+        "Path": item.get("path", ""),
+        "Timestamp": item.get("timestamp", ""),
+        "Source": item.get("source", ""),
+        "Confidence": item.get("confidence", ""),
+    } for item in report.get("keyArtifacts", [])]
     account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
     account_rows = []
     for row in account_context.get("roblox", []) + account_context.get("discord", []):
@@ -4408,6 +4474,7 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><div class="report-controls"><div><h2>Report Time Range</h2><p class="muted">Filter visible saved report entries without rescanning.</p></div><label for="report-time-filter">Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></div></section>
 <section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed Exploit','Suspicious'] else 'Not confirmed')}</div></div></div></section>
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'], 'First Seen')}</section>
+<section><h2>Key Artifacts</h2><p class="muted">Prefetch and deleted-file artifacts are listed here as key scan evidence. These are review artifacts, not automatic proof by themselves.</p>{html_table(key_artifact_rows, ['Type','Artifact','Path','Timestamp','Source','Confidence'], 'Timestamp')}</section>
 <section><h2>Forensic Correlation Findings</h2><p class="muted">These findings are built from multiple artifacts lining up in time, not from a single filename, hash, or keyword.</p>{correlation_html}</section>
 <section><h2>Interaction / Detect Logs</h2><div class="filters">{''.join(f"<span class='pill'>{x}</span>" for x in DETECT_LOG_TYPES)}</div>{html_table(detect_rows, ['Type','Detection','Severity','Confidence','Manual Review','Evidence','Timestamp','Explanation'], 'Timestamp')}</section>
 <section><h2>Warning Logs</h2><p class="muted">Warnings indicate modifications or behaviors that may reduce confidence or require review. They are not automatically cheating evidence.</p>{html_table(warning_rows, ['Detection','Severity','Confidence','Manual Review','Source','Timestamp','Explanation'], 'Timestamp')}</section>
@@ -4621,12 +4688,13 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     # Vercel rejects large function payloads before the API route can store them.
     # Keep the website report useful, but reserve the complete report for local files.
     size_profiles = [
-        {"timeline": 700, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "rawRoblox": False},
-        {"timeline": 350, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "rawRoblox": False},
-        {"timeline": 150, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "rawRoblox": False},
+        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "rawRoblox": False},
+        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "rawRoblox": False},
+        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "rawRoblox": False},
     ]
     for profile in size_profiles:
         compacted["timeline"] = list(report.get("timeline", []))[-profile["timeline"]:]
+        compacted["keyArtifacts"] = list(report.get("keyArtifacts", []))[:profile["keyArtifacts"]]
         compacted["sessions"] = compact_sessions_for_upload(list(report.get("sessions", [])), profile["sessions"])
         compacted["findings"] = select_upload_findings(report.get("findings", []), limit=profile["findings"])
         compacted["detectLogs"] = list(report.get("detectLogs", []))[:profile["detectLogs"]]
@@ -4647,6 +4715,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
             return compacted
 
     compacted["timeline"] = list(report.get("timeline", []))[-80:]
+    compacted["keyArtifacts"] = list(report.get("keyArtifacts", []))[:80]
     compacted["sessions"] = compact_sessions_for_upload(list(report.get("sessions", [])), 20)
     compacted["findings"] = select_upload_findings(report.get("findings", []), limit=40)
     compacted["detectLogs"] = list(report.get("detectLogs", []))[:40]

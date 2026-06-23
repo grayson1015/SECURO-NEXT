@@ -238,6 +238,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Prefetch Execution", findings[0]["detection_categories"])
         self.assertIn("prefetch_execution", findings[0]["evidence_types"])
         self.assertTrue(any("notepad.exe" in event["text"].lower() for event in timeline))
+        self.assertTrue(any(item.startswith("PREFETCH FILE:") for item in findings[0]["supporting_evidence"]))
 
     def test_xeno_detection_categories_are_confirmed(self):
         config = test_config()
@@ -412,6 +413,23 @@ class CoreTests(unittest.TestCase):
         self.assertIn("File Deletion", findings[0]["detection_categories"])
         self.assertNotIn("Suspicious File Deletion", findings[0]["detection_categories"])
         self.assertTrue(any("boring_document.txt" in event["text"] for event in timeline))
+        self.assertTrue(any(item.startswith("DELETED FILE:") for item in findings[0]["supporting_evidence"]))
+
+    def test_key_artifacts_collect_prefetch_and_deleted_files_for_report(self):
+        finding = checker.make_finding("C:/Users/Test/Downloads/Example.exe", "Example.exe", "unit", test_config())
+        finding["first_seen"] = "2026-06-02 17:55:00"
+        finding["supporting_evidence"] = [
+            "PREFETCH FILE: Example.exe",
+            "DELETED FILE: C:/Users/Test/Downloads/Example.exe",
+        ]
+        timeline = [
+            {"time": "2026-06-02 17:55:01", "source": "Prefetch", "text": "PREFETCH FILE: Example.exe from EXAMPLE.EXE-1234.pf"},
+            {"time": "2026-06-02 17:55:02", "source": "Recycle Bin", "text": "DELETED FILE: C:/Users/Test/Downloads/Example.exe"},
+        ]
+        artifacts = checker.key_artifacts_from_report_parts([finding], timeline, [])
+        labels = [item["label"] for item in artifacts]
+        self.assertTrue(any(label.startswith("PREFETCH FILE:") for label in labels))
+        self.assertTrue(any(label.startswith("DELETED FILE:") for label in labels))
 
     def test_warning_logs_do_not_become_confirmed(self):
         config = test_config()
@@ -752,6 +770,14 @@ class CoreTests(unittest.TestCase):
             }],
             "detectedFastFlags": [{"name": "FFlagUnit", "value": "true", "timestamp": "2026-06-02 17:55:00", "sourceLog": "Client.log"}],
             "findings": [],
+            "keyArtifacts": [{
+                "type": "Prefetch",
+                "label": "PREFETCH FILE: Example.exe",
+                "path": "C:/Windows/Prefetch/EXAMPLE.EXE-1234.pf",
+                "timestamp": "2026-06-02 17:55:00",
+                "source": "Prefetch",
+                "confidence": "Possible",
+            }],
             "detectLogs": [{
                 "type": "Generic",
                 "detectionName": "Unit",
@@ -779,6 +805,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Detected FastFlags", rendered)
         self.assertIn("Show All Roblox Logs", rendered)
         self.assertIn("FFlagUnit", rendered)
+        self.assertIn("Key Artifacts", rendered)
+        self.assertIn("PREFETCH FILE: Example.exe", rendered)
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json
