@@ -1,5 +1,6 @@
 import datetime as dt
 import importlib.util
+import inspect
 import json
 import os
 import sys
@@ -960,8 +961,13 @@ class CoreTests(unittest.TestCase):
             "accountIdentifiers": {
                 "privacyNote": "Only non-secret identifiers.",
                 "roblox": [{"platform": "Roblox", "userId": "123", "username": "ExampleUser", "displayName": "Example", "firstSeen": "2026-06-02 17:55:00", "lastSeen": "2026-06-02 17:55:00", "sources": ["Client.log"]}],
-                "discord": [{"platform": "Discord", "userId": "123456789012345678", "username": "", "firstSeen": "2026-06-02 17:55:00", "lastSeen": "2026-06-02 17:55:00", "sources": ["renderer.log"]}],
             },
+            "systemResetEvidence": [{
+                "type": "Possible Windows Reset/Reinstall",
+                "timestamp": "2026-05-01 10:30:00",
+                "source": "Windows CurrentVersion InstallDate",
+                "details": "Windows installation timestamp.",
+            }],
             "limitations": [],
             "finalStatement": "test",
         }
@@ -977,8 +983,9 @@ class CoreTests(unittest.TestCase):
         self.assertIn("FFlagUnit", rendered)
         self.assertIn("Key Artifacts", rendered)
         self.assertIn("PREFETCH FILE: Example.exe", rendered)
-        self.assertIn("Safe Account Identifiers", rendered)
-        self.assertIn("123456789012345678", rendered)
+        self.assertIn("Roblox Account History", rendered)
+        self.assertIn("Reset / Reinstall History", rendered)
+        self.assertIn("Possible Windows Reset/Reinstall", rendered)
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json
@@ -1139,6 +1146,8 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(standard["skip_browser_artifacts"])
         self.assertFalse(deep["skip_browser_artifacts"])
         self.assertTrue(deep["collect_safe_account_identifiers"])
+        self.assertTrue(quick["collect_system_reset_evidence"])
+        self.assertTrue(standard["collect_system_reset_evidence"])
         self.assertTrue(deep["collect_system_reset_evidence"])
         self.assertEqual(deep["scan_timeout_seconds"], 480)
         self.assertGreaterEqual(deep["scan_days"], 90)
@@ -1151,41 +1160,26 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(deep["skip_browser_artifacts"])
         self.assertFalse(deep["skip_recovery_metadata"])
 
-    def test_safe_account_identifiers_include_roblox_and_skip_discord_sensitive_dirs(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            old_appdata = os.environ.get("APPDATA")
-            os.environ["APPDATA"] = tmp
-            discord = Path(tmp) / "Discord"
-            safe_logs = discord / "logs"
-            sensitive = discord / "Local Storage" / "leveldb"
-            safe_logs.mkdir(parents=True)
-            sensitive.mkdir(parents=True)
-            (safe_logs / "main.log").write_text('user_id: "123456789012345678" username: ExampleDiscord', encoding="utf-8")
-            (sensitive / "000001.ldb").write_text('user_id: "999999999999999999"', encoding="utf-8")
-            config = test_config()
-            config["collect_safe_account_identifiers"] = True
-            sessions = [{
-                "user_id": "123456789",
-                "username": "ExampleRoblox",
-                "display_name": "Example",
-                "place_id": "987",
-                "job_id": "abc",
-                "start_time": "2026-06-02 12:00:00",
-                "end_time": "2026-06-02 12:30:00",
-                "log_file": "Client.log",
-            }]
-            try:
-                result = checker.collect_safe_account_identifiers(sessions, config)
-            finally:
-                if old_appdata is None:
-                    os.environ.pop("APPDATA", None)
-                else:
-                    os.environ["APPDATA"] = old_appdata
+    def test_safe_account_identifiers_include_roblox(self):
+        sessions = [{
+            "user_id": "123456789",
+            "username": "ExampleRoblox",
+            "display_name": "Example",
+            "place_id": "987",
+            "job_id": "abc",
+            "start_time": "2026-06-02 12:00:00",
+            "end_time": "2026-06-02 12:30:00",
+            "log_file": "Client.log",
+        }]
+        original_roblox = checker.collect_historical_roblox_identifiers
+        try:
+            checker.collect_historical_roblox_identifiers = lambda config: []
+            result = checker.collect_safe_account_identifiers(sessions, {"collect_safe_account_identifiers": True})
+        finally:
+            checker.collect_historical_roblox_identifiers = original_roblox
         self.assertEqual(result["roblox"][0]["userId"], "123456789")
-        discord_ids = {item["userId"] for item in result["discord"]}
-        self.assertIn("123456789012345678", discord_ids)
-        self.assertNotIn("999999999999999999", discord_ids)
-        self.assertIn("excludes tokens", result["privacyNote"].lower())
+        self.assertNotIn("discord", result)
+        self.assertIn("roblox", result["privacyNote"].lower())
 
     def test_historical_roblox_accounts_are_collected_outside_session_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1213,35 +1207,44 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["roblox"][0]["username"], "OlderPlayer")
         self.assertIn("old-session.log", result["roblox"][0]["sources"][0])
 
-    def test_discord_account_switch_log_extracts_only_user_id(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            old_appdata = os.environ.get("APPDATA")
-            old_localappdata = os.environ.get("LOCALAPPDATA")
-            os.environ["APPDATA"] = tmp
-            os.environ["LOCALAPPDATA"] = str(Path(tmp) / "Local")
-            logs = Path(tmp) / "discord" / "logs"
-            logs.mkdir(parents=True)
-            (logs / "renderer.log").write_text(
-                "[2026-06-20 12:30:00.000] MultiAccountActionCreators Switching account to 123456789012345678",
-                encoding="utf-8",
+    def test_reset_history_uses_windows_install_timestamp(self):
+        original_command = checker.run_command
+        original_exists = checker.safe_exists
+        original_events = checker.query_events
+        try:
+            checker.run_command = lambda command, **kwargs: (
+                "InstallDate    REG_DWORD    0x65ec8780"
+                if command[:2] == ["reg", "query"]
+                else ""
             )
-            try:
-                result = checker.collect_safe_discord_identifiers({})
-            finally:
-                if old_appdata is None:
-                    os.environ.pop("APPDATA", None)
-                else:
-                    os.environ["APPDATA"] = old_appdata
-                if old_localappdata is None:
-                    os.environ.pop("LOCALAPPDATA", None)
-                else:
-                    os.environ["LOCALAPPDATA"] = old_localappdata
-        self.assertEqual({row["userId"] for row in result}, {"123456789012345678"})
+            checker.safe_exists = lambda path: False
+            checker.query_events = lambda *args, **kwargs: []
+            evidence, timeline = checker.collect_system_reset_evidence(7, {})
+        finally:
+            checker.run_command = original_command
+            checker.safe_exists = original_exists
+            checker.query_events = original_events
+        self.assertEqual(evidence[0]["type"], "Possible Windows Reset/Reinstall")
+        self.assertTrue(evidence[0]["timestamp"])
+        self.assertIn("may represent", evidence[0]["details"].lower())
+        self.assertTrue(timeline)
+
+    def test_progress_scan_collects_account_history_before_slow_artifacts(self):
+        source = inspect.getsource(checker.build_scan_report_with_progress)
+        self.assertLess(
+            source.index('emit_progress(progress, "Checking account history", 8)'),
+            source.index('emit_progress(progress, "Checking event logs", 12)'),
+        )
+        self.assertNotIn('note_stage_skipped(config, progress, "Safe account identifier context"', source)
 
     def test_verify_pin_returns_scan_profile(self):
         original = checker.post_json
         try:
-            checker.post_json = lambda *args, **kwargs: (True, {"ok": True, "pinId": "abc", "scanProfile": "deep"})
+            checker.post_json = lambda *args, **kwargs: (True, {
+                "ok": True,
+                "pinId": "abc",
+                "scanProfile": "deep",
+            })
             ok, result = checker.verify_pin("https://example.test", "123456")
         finally:
             checker.post_json = original

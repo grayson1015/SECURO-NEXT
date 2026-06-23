@@ -35,7 +35,15 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredRobloxLogs = useMemo(() => filterTimedItems(data.robloxLogs || [], timeRange, (item) => item.startTime || item.modifiedTime), [data.robloxLogs, timeRange]);
   const filteredFastFlags = useMemo(() => filterTimedItems(data.detectedFastFlags || [], timeRange, (item) => item.timestamp), [data.detectedFastFlags, timeRange]);
   const accountContext = data.accountIdentifiers || {};
-  const accountRows = [...(accountContext.roblox || []), ...(accountContext.discord || [])];
+  const accountRows = accountContext.roblox || [];
+  const resetHistory = useMemo(
+    () => [...(data.systemResetEvidence || [])].sort((a, b) => {
+      const left = parseTimestamp(a.timestamp)?.getTime() || 0;
+      const right = parseTimestamp(b.timestamp)?.getTime() || 0;
+      return right - left;
+    }),
+    [data.systemResetEvidence]
+  );
   const filteredEvidence = useMemo(
     () => extraEvidence.map((group) => ({
       ...group,
@@ -133,22 +141,39 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           ) : null}
         </Card>
 
-        <Card className="mt-5">
-          <h2 className="mb-4 text-lg font-semibold">Timeline</h2>
-          <div className="space-y-2">
-            {filteredTimeline.map((event, index) => (
-              <div
-                key={`${event.time}-${event.text}-${index}`}
-                className={`grid max-w-full gap-3 overflow-hidden rounded-md border p-3 text-sm md:grid-cols-[160px_minmax(0,1fr)_180px] md:gap-4 ${confidenceClasses(event.confidence || "Possible")}`}
-              >
-                <div className="text-zinc-400">{formatDate(event.time)}</div>
-                <div className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{event.text || "Timeline event"}</div>
-                <div className="text-zinc-500 md:whitespace-nowrap">{event.source || "Evidence"}</div>
-              </div>
-            ))}
-            {!filteredTimeline.length ? <p className="text-sm text-zinc-500">No timeline entries in this time range.</p> : null}
-          </div>
-        </Card>
+        <section className="mt-5 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <Card>
+            <h2 className="mb-4 text-lg font-semibold">Timeline</h2>
+            <div className="space-y-2">
+              {filteredTimeline.map((event, index) => (
+                <div
+                  key={`${event.time}-${event.text}-${index}`}
+                  className={`grid max-w-full gap-3 overflow-hidden rounded-md border p-3 text-sm md:grid-cols-[160px_minmax(0,1fr)_180px] md:gap-4 ${confidenceClasses(event.confidence || "Possible")}`}
+                >
+                  <div className="text-zinc-400">{formatDate(event.time)}</div>
+                  <div className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">{event.text || "Timeline event"}</div>
+                  <div className="text-zinc-500 md:whitespace-nowrap">{event.source || "Evidence"}</div>
+                </div>
+              ))}
+              {!filteredTimeline.length ? <p className="text-sm text-zinc-500">No timeline entries in this time range.</p> : null}
+            </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold">Reset / Reinstall History</h2>
+            <p className="mt-1 text-xs text-zinc-500">Windows evidence can indicate a reset or reinstall, but may not prove a factory reset.</p>
+            <div className="mt-4 space-y-3">
+              {resetHistory.slice(0, 12).map((item, index) => (
+                <div key={`${item.timestamp}-${item.source}-${index}`} className="border-l-2 border-primary/50 pl-3 text-sm">
+                  <div className="font-medium text-zinc-200">{item.type || "Reset/install evidence"}</div>
+                  <div className="mt-0.5 text-xs text-primary">{item.timestamp ? formatDate(item.timestamp) : "Time unavailable"}</div>
+                  <div className="mt-1 break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">{item.source || "Windows evidence"}</div>
+                </div>
+              ))}
+              {!resetHistory.length ? <p className="text-sm text-zinc-500">No reset or reinstall evidence was available.</p> : null}
+            </div>
+          </Card>
+        </section>
 
         <Card className="mt-5">
           <h2 className="mb-4 text-lg font-semibold">Findings</h2>
@@ -480,7 +505,7 @@ function buildExportHtml(report: ReportRow) {
     </details>
   `)).join("");
   const accountContext = data.accountIdentifiers || {};
-  const accounts = [...(accountContext.roblox || []), ...(accountContext.discord || [])].map((account) => `
+  const accounts = (accountContext.roblox || []).map((account) => `
     <div class="report-entry">
       <p><b>${escape(account.platform || "Account")}</b> · ${escape(account.userId || "ID unavailable")}</p>
       <p>Username: ${escape(account.username || "Unknown")} ${account.displayName ? `· Display Name: ${escape(account.displayName)}` : ""}</p>
@@ -488,6 +513,11 @@ function buildExportHtml(report: ReportRow) {
       <p>Sources: ${escape((account.sources || []).join("; "))}</p>
     </div>
   `).join("");
+  const resetHistory = (data.systemResetEvidence || []).slice(0, 12).map((item) => entry(item.timestamp, `
+    <p><b>${escape(item.type || "Reset/install evidence")}</b></p>
+    <p>${escape(item.timestamp || "Time unavailable")}</p>
+    <p>${escape(item.source || "Windows evidence")}</p>
+  `)).join("");
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
     <style>
@@ -498,18 +528,19 @@ function buildExportHtml(report: ReportRow) {
       .controls{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
       select{background:#050807;color:#eefaf1;border:1px solid #264234;border-radius:6px;padding:8px 10px}
       .report-entry{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 0}
+      .timeline-reset-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}
       .timeline-entry{display:grid;grid-template-columns:160px minmax(0,1fr) 180px;gap:16px;align-items:start;overflow:hidden}
       .timeline-message{min-width:0;overflow-wrap:anywhere;word-break:break-word;white-space:normal}
       .timeline-source{white-space:nowrap;color:#8b93a7}
       .hidden-by-time{display:none!important}
-      @media(max-width:720px){.timeline-entry{grid-template-columns:1fr}.timeline-source{white-space:normal}}
+      @media(max-width:720px){.timeline-entry,.timeline-reset-grid{grid-template-columns:1fr}.timeline-source{white-space:normal}}
     </style>
     </head><body>
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
     <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
-    <section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section>
-    <section><h2>Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret account identifiers are collected.")}</p>${accounts || "<p>No account identifiers available.</p>"}</section>
+    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><section><h2>Reset / Reinstall History</h2><p>Windows evidence may indicate a reset or reinstall, but may not prove a factory reset.</p>${resetHistory || "<p>No reset or reinstall evidence available.</p>"}</section></div>
+    <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Sessions</h2>${data.sessions.map((session) => entry(session.launchTime || session.exitTime, `<p><b>${escape(session.username || "Unknown user")}</b></p><p>User ID: ${escape(session.userId || "")}</p><p>Place: ${escape(session.placeId || session.gameId || "")}</p><p>Duration: ${escape(session.duration || "unknown")}</p><p>Status: ${escape(session.status || "Clean")}</p>`)).join("") || "<p>No sessions.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>

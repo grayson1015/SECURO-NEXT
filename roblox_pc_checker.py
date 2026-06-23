@@ -352,6 +352,9 @@ def load_config() -> dict:
     config.setdefault("collect_safe_account_identifiers", True)
     config.setdefault("account_log_max_files", 600)
     config.setdefault("account_log_max_bytes", 4_000_000)
+    config.setdefault("account_log_total_bytes", 32_000_000)
+    config.setdefault("account_scan_time_budget_seconds", 12)
+    config.setdefault("collect_system_reset_evidence", True)
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -391,7 +394,7 @@ def scan_transparency_metadata() -> dict:
             "Prefetch, deleted-file metadata, Jump Lists, Amcache string context, Windows Security/Sysmon event logs when available, Defender artifacts, browser download metadata, ShellBag context, and Recycle Bin metadata",
             "Optional forensic parser CSV exports from PECmd, MFTECmd, SBECmd, JLECmd, SrumECmd, AmcacheParser, and AppCompatCacheParser when placed in the configured Securo ToolOutput folders",
             "Roblox logs including user ID, username, display name when available, place ID/game ID, job ID, session time, duration, LoadClientSettings lines, and FastFlags",
-            "Safe account identifier context for Roblox and Discord when available, excluding tokens, cookies, Local Storage, IndexedDB, cache, and private messages",
+            "Roblox account identifier context from retained Roblox logs and registry artifacts",
             "Windows install/reset context such as install date, setup logs, recovery folders, and setup event-log entries",
             "Suspicious executable/script metadata including SHA-256, Authenticode signer status, timestamps, and file path",
             "Optional IOC matches loaded from the local Securo IOC JSON file",
@@ -488,6 +491,7 @@ def scan_profiles() -> dict:
             "skip_browser_artifacts": True,
             "skip_recovery_metadata": True,
             "collect_safe_account_identifiers": True,
+            "collect_system_reset_evidence": True,
             "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations.",
         },
         "standard": {
@@ -499,6 +503,7 @@ def scan_profiles() -> dict:
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
             "collect_safe_account_identifiers": True,
+            "collect_system_reset_evidence": True,
             "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
         },
         "deep": {
@@ -1962,25 +1967,6 @@ def collect_safe_account_identifiers(sessions: list[dict], config: dict) -> dict
             if item.get("source"):
                 row["sources"].add(item["source"])
 
-    discord_accounts = {}
-    if config.get("collect_safe_account_identifiers", True):
-        for item in collect_safe_discord_identifiers(config):
-            key = item.get("userId") or item.get("username") or item.get("source", "")
-            if not key:
-                continue
-            row = discord_accounts.setdefault(key, {
-                "platform": "Discord",
-                "userId": item.get("userId", ""),
-                "username": item.get("username", ""),
-                "displayName": item.get("displayName", ""),
-                "firstSeen": item.get("timestamp", ""),
-                "lastSeen": item.get("timestamp", ""),
-                "sources": set(),
-            })
-            row["firstSeen"] = first_time(row.get("firstSeen"), item.get("timestamp")) or row.get("firstSeen", "")
-            row["lastSeen"] = max([v for v in [row.get("lastSeen"), item.get("timestamp")] if v] or [""], default="")
-            row["sources"].add(item.get("source", ""))
-
     def clean(row: dict) -> dict:
         result = dict(row)
         for key in ("places", "jobs", "sources"):
@@ -1989,9 +1975,8 @@ def collect_safe_account_identifiers(sessions: list[dict], config: dict) -> dict
         return result
 
     return {
-        "privacyNote": "Discord collection excludes tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, and private messages.",
+        "privacyNote": "Only non-secret Roblox account identifiers from retained Roblox artifacts are included.",
         "roblox": [clean(row) for row in roblox_accounts.values()],
-        "discord": [clean(row) for row in discord_accounts.values()],
     }
 
 
@@ -1999,6 +1984,8 @@ def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
     # Account history is independent from the selected session window. Only IDs/names and artifact timestamps are retained.
     max_files = max(1, int(config.get("account_log_max_files", 600) or 600))
     max_bytes = max(64_000, int(config.get("account_log_max_bytes", 4_000_000) or 4_000_000))
+    max_total_bytes = max(max_bytes, int(config.get("account_log_total_bytes", 32_000_000) or 32_000_000))
+    deadline = time.monotonic() + max(2, int(config.get("account_scan_time_budget_seconds", 12) or 12))
     candidates = []
     for folder in get_common_roblox_log_dirs():
         try:
@@ -2014,6 +2001,7 @@ def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
     candidates = sorted(set(candidates), key=modified_time, reverse=True)[:max_files]
     results = []
     seen = set()
+    bytes_read = 0
     account_pattern = re.compile(
         r"(?i)(?:userid|user[_\s-]?id|userId)[^\d]{0,40}(\d{2,20})"
     )
@@ -2024,15 +2012,21 @@ def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
         r"(?i)(?:displayname|display[_\s-]?name)[^\w@.-]{0,20}([\w @.-]{2,64})"
     )
     for path in candidates:
+        if time.monotonic() >= deadline or bytes_read >= max_total_bytes:
+            break
         try:
             stat = path.stat()
         except OSError:
             continue
+        read_size = min(max_bytes, max(0, max_total_bytes - bytes_read))
+        if read_size <= 0:
+            break
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
-                text = handle.read(max_bytes)
+                text = handle.read(read_size)
         except OSError:
             continue
+        bytes_read += len(text.encode("utf-8", errors="replace"))
         timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
         for match in account_pattern.finditer(text):
             user_id = match.group(1)
@@ -2052,7 +2046,9 @@ def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
                 "source": str(path),
             })
 
-    registry_text = run_command(["reg", "query", r"HKCU\Software\Roblox", "/s"], timeout=8)
+    registry_text = ""
+    if time.monotonic() < deadline:
+        registry_text = run_command(["reg", "query", r"HKCU\Software\Roblox", "/s"], timeout=3)
     registry_ids = set(re.findall(r"(?i)(?:roblox\.com/users/|user[_\s-]?id\D{0,20})(\d{2,20})", registry_text))
     for user_id in registry_ids:
         key = (user_id, "Roblox registry")
@@ -2070,96 +2066,30 @@ def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
     return results
 
 
-def collect_safe_discord_identifiers(config: dict) -> list[dict]:
-    appdata = Path(os.environ.get("APPDATA", ""))
-    local = Path(os.environ.get("LOCALAPPDATA", ""))
-    roots = [
-        appdata / "Discord",
-        appdata / "discord",
-        appdata / "discordcanary",
-        appdata / "discordptb",
-        local / "Discord",
-        local / "DiscordCanary",
-        local / "DiscordPTB",
-    ]
-    blocked_markers = (
-        "local storage",
-        "leveldb",
-        "indexeddb",
-        "session storage",
-        "cookies",
-        "cookie",
-        "cache",
-        "code cache",
-        "gpucache",
-        "network",
-        "blob_storage",
-        "databases",
-    )
-    candidates = []
-    for root in roots:
-        if not safe_exists(root):
-            continue
-        try:
-            for path in root.rglob("*"):
-                low = str(path).lower()
-                if any(marker in low for marker in blocked_markers):
-                    continue
-                if path.suffix.lower() not in {".log", ".txt", ".json"}:
-                    continue
-                candidates.append(path)
-                if len(candidates) >= 120:
-                    break
-        except OSError:
-            continue
-    results = []
-    seen = set()
-    for path in candidates:
-        try:
-            stat = path.stat()
-            text = path.read_text(encoding="utf-8", errors="replace")[:300000]
-        except OSError:
-            continue
-        timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
-        patterns = [
-            r"(?i)(?:user[_\s-]?id|discord[_\s-]?id)[^\d]{0,30}(\d{17,20})",
-            r"(?i)MultiAccountActionCreators.*?Switching account to\s+(\d{17,20})",
-        ]
-        matches = [match for pattern in patterns for match in re.finditer(pattern, text)]
-        for match in matches:
-            user_id = match.group(1)
-            key = (user_id, str(path))
-            if key in seen:
-                continue
-            seen.add(key)
-            username = ""
-            window = text[max(0, match.start() - 300):match.end() + 300]
-            user_match = re.search(r"(?i)(?:username|global_name|display_name)[\"'\s:=]+([A-Za-z0-9_. -]{2,64})", window)
-            if user_match:
-                username = user_match.group(1).strip().strip('",')
-            results.append({
-                "platform": "Discord",
-                "userId": user_id,
-                "username": username,
-                "displayName": "",
-                "timestamp": timestamp,
-                "source": str(path),
-            })
-    return results
-
-
 def collect_system_reset_evidence(days: int, config: dict) -> tuple[list[dict], list[dict]]:
-    # Reset/install evidence is context only. It does not prove cheating by itself.
+    # Windows usually preserves install/reset context, not a definitive factory-reset ledger.
     evidence = []
     timeline = []
-    cut = cutoff(max(days, 90))
-    install_raw = run_command(["wmic", "os", "get", "InstallDate", "/value"], timeout=10).strip()
-    install_match = re.search(r"InstallDate=([0-9]{14})", install_raw)
+    cut = cutoff(max(days, 3650))
+    install_raw = run_command(
+        ["reg", "query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "InstallDate"],
+        timeout=3,
+    ).strip()
+    install_match = re.search(r"InstallDate\s+REG_DWORD\s+(0x[0-9a-f]+|\d+)", install_raw, re.I)
     if install_match:
-        install_time = parse_dt(dt.datetime.strptime(install_match.group(1), "%Y%m%d%H%M%S").isoformat(sep=" ", timespec="seconds"))
-        stamp = install_time.isoformat(sep=" ", timespec="seconds") if install_time else ""
-        evidence.append({"type": "Windows Install Date", "timestamp": stamp, "source": "WMIC Win32_OperatingSystem.InstallDate", "details": install_raw})
-        timeline.append({"time": stamp or iso_now(), "source": "System reset/install", "text": "Windows install date observed."})
+        raw_value = install_match.group(1)
+        try:
+            installed_at = dt.datetime.fromtimestamp(int(raw_value, 16 if raw_value.lower().startswith("0x") else 10))
+            stamp = installed_at.isoformat(sep=" ", timespec="seconds")
+            evidence.append({
+                "type": "Possible Windows Reset/Reinstall",
+                "timestamp": stamp,
+                "source": "Windows CurrentVersion InstallDate",
+                "details": "Windows installation timestamp. This may represent a factory reset, clean install, or major reinstall.",
+            })
+            timeline.append({"time": stamp, "source": "System reset/install", "text": "Windows installation timestamp observed."})
+        except (ValueError, OSError, OverflowError):
+            pass
     paths = [
         Path("C:/Windows/Panther/setupact.log"),
         Path("C:/Windows/Panther/setuperr.log"),
@@ -2178,10 +2108,15 @@ def collect_system_reset_evidence(days: int, config: dict) -> tuple[list[dict], 
         except OSError:
             mtime = None
         stamp = mtime.isoformat(sep=" ", timespec="seconds") if mtime else ""
-        evidence.append({"type": "Reset/Install Artifact", "timestamp": stamp, "source": str(path), "details": "Artifact exists"})
+        evidence.append({
+            "type": "Reset/Install Artifact",
+            "timestamp": stamp,
+            "source": str(path),
+            "details": "Windows reset, recovery, or installation artifact exists. Manual review is required.",
+        })
         if mtime and mtime >= cut:
             timeline.append({"time": stamp, "source": "System reset/install", "text": f"Reset/install artifact observed: {path}"})
-    setup_events = query_events("Setup", [1, 2, 3, 4, 13, 17, 19, 20, 31], days, max_events=80)
+    setup_events = query_events("Setup", [1, 2, 3, 4, 13, 17, 19, 20, 31], max(days, 3650), max_events=40, timeout=8)
     for event in setup_events[:40]:
         text = " ".join(str(v) for v in event.get("data", {}).values())[:500]
         stamp = event.get("time") or iso_now()
@@ -2190,11 +2125,11 @@ def collect_system_reset_evidence(days: int, config: dict) -> tuple[list[dict], 
     return evidence, timeline
 
 
-def query_events(log_name: str, event_ids: list[int], days: int, max_events=300) -> list[dict]:
+def query_events(log_name: str, event_ids: list[int], days: int, max_events=300, timeout=45) -> list[dict]:
     ms = days * 24 * 60 * 60 * 1000
     ids = " or ".join([f"EventID={i}" for i in event_ids])
     query = f"*[System[({ids}) and TimeCreated[timediff(@SystemTime) <= {ms}]]]"
-    out = run_command(["wevtutil", "qe", log_name, "/q:" + query, "/f:xml", "/rd:true", "/c:" + str(max_events)], timeout=45)
+    out = run_command(["wevtutil", "qe", log_name, "/q:" + query, "/f:xml", "/rd:true", "/c:" + str(max_events)], timeout=timeout)
     events = []
     for chunk in re.findall(r"<Event[\s\S]*?</Event>", out):
         try:
@@ -4304,7 +4239,6 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + browser_timeline
         + shellbag_timeline
         + recovery_timeline
-        + reset_timeline
         + warning_timeline
     )
     findings = combine_findings(
@@ -4549,6 +4483,10 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     emit_progress(progress, "Scan started", 0)
     emit_progress(progress, "Collecting Roblox logs", 5)
     sessions_raw, roblox_timeline = parse_roblox_logs(days, config)
+    emit_progress(progress, "Checking account history", 8)
+    account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
+    emit_progress(progress, "Checking reset and reinstall history", 10)
+    reset_evidence, reset_timeline = collect_system_reset_evidence(days, config) if config.get("collect_system_reset_evidence", True) else ([], [])
     emit_progress(progress, "Checking event logs", 12)
     process_findings, process_timeline = collect_process_evidence(days, config, sessions_raw)
     emit_progress(progress, "Checking running processes", 16)
@@ -4619,18 +4557,6 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     else:
         warning_findings, warning_timeline, warning_logs = [], [], []
         note_stage_skipped(config, progress, "Warning indicators", stage_limitations, 45, 92)
-    emit_progress(progress, "Checking account and reset context", 94)
-    if has_scan_time_for(config, 35):
-        account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
-    else:
-        account_identifiers = {"roblox": [], "discord": [], "privacyNote": "Skipped because the scan was near its configured timeout."}
-        note_stage_skipped(config, progress, "Safe account identifier context", stage_limitations, 35, 94)
-    if config.get("collect_system_reset_evidence") and has_scan_time_for(config, 45):
-        reset_evidence, reset_timeline = collect_system_reset_evidence(days, config)
-    else:
-        reset_evidence, reset_timeline = [], []
-        if config.get("collect_system_reset_evidence"):
-            note_stage_skipped(config, progress, "System reset evidence", stage_limitations, 45, 94)
     emit_progress(progress, "Building report", 96)
     raw_timeline = (
         roblox_timeline
@@ -4649,7 +4575,6 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + browser_timeline
         + shellbag_timeline
         + recovery_timeline
-        + reset_timeline
         + warning_timeline
     )
     findings = combine_findings(
@@ -5037,7 +4962,7 @@ def render_html(report: dict) -> str:
     } for item in report.get("keyArtifacts", [])]
     account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
     account_rows = []
-    for row in account_context.get("roblox", []) + account_context.get("discord", []):
+    for row in account_context.get("roblox", []):
         account_rows.append({
             "Platform": row.get("platform", ""),
             "User ID": row.get("userId", ""),
@@ -5121,11 +5046,19 @@ def render_html(report: dict) -> str:
             f"<h4>Raw Roblox Log</h4><pre>{html.escape(str(item.get('rawLog', '')))}</pre>"
             f"</details>"
         )
+    reset_list_html = "".join(
+        f"<div class='reset-entry report-entry'{html_data_timestamp(item.get('Timestamp'))}>"
+        f"<b>{html.escape(str(item.get('Type') or 'Reset/install evidence'))}</b>"
+        f"<time>{html.escape(str(item.get('Timestamp') or 'Time unavailable'))}</time>"
+        f"<small>{html.escape(str(item.get('Source') or 'Windows evidence'))}</small>"
+        f"</div>"
+        for item in reset_rows[:12]
+    )
     raw = html.escape(json.dumps(report, indent=2))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
 <style>
-body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}.report-controls{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}.report-controls label{{font-weight:700}}.report-controls select{{border:1px solid #cfd6df;border-radius:6px;background:white;padding:8px 10px;font:inherit}}.hidden-by-time{{display:none!important}}
+body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline-reset-grid{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}}.timeline-reset-grid section{{margin:0}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.reset-entry{{border-left:3px solid #16a34a;padding:4px 0 8px 10px;margin:10px 0}}.reset-entry time,.reset-entry small{{display:block;color:#667085;font-size:12px;margin-top:3px;overflow-wrap:anywhere}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}.report-controls{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}.report-controls label{{font-weight:700}}.report-controls select{{border:1px solid #cfd6df;border-radius:6px;background:white;padding:8px 10px;font:inherit}}.hidden-by-time{{display:none!important}}@media(max-width:800px){{.timeline-reset-grid{{grid-template-columns:1fr}}}}
 </style></head><body><header><h1>{APP_NAME} Report</h1><p>No confirmed result means only that available logs did not prove it. Logging coverage may be incomplete.</p></header><main>
 <section><h2>Summary</h2><div class="summary"><div class="card"><div>Scan Date</div><div class="value">{html.escape(report['scanTime'])}</div></div><div class="card"><div>Highest Result</div><div class="value">{report['highestResult']}</div></div><div class="card"><div>Top Score</div><div class="value">{report.get('topScore', 0)}</div></div><div class="card"><div>Roblox Sessions</div><div class="value">{len(report['sessions'])}</div></div></div></section>
 <section><div class="report-controls"><div><h2>Report Time Range</h2><p class="muted">Filter visible saved report entries without rescanning.</p></div><label for="report-time-filter">Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></div></section>
@@ -5138,12 +5071,11 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Recovery</h2>{html_table(recovery_rows, ['Name','Path','Source','Timestamp','Manual Review'], 'Timestamp')}</section>
 <section><h2>Antivirus Logs</h2>{html_table(antivirus_rows, ['Source','Detection','Severity','Timestamp','Path'], 'Timestamp')}</section>
 <section><h2>Engines</h2>{html_table(engine_rows, ['File','Score','Local Hits','Detectability','VirusTotal','Manual Review'])}</section>
-<section><h2>Safe Account Identifiers</h2><p class="muted">{html.escape(str(account_context.get('privacyNote', 'Tokens, cookies, private messages, and credential stores are excluded.')))}</p>{html_table(account_rows, ['Platform','User ID','Username','Display Name','First Seen','Last Seen','Sources'], 'Last Seen')}</section>
-<section><h2>Windows Reset / Install Evidence</h2><p class="muted">Context only. These artifacts do not prove cheating by themselves.</p>{html_table(reset_rows, ['Type','Timestamp','Source','Details'], 'Timestamp')}</section>
+<section><h2>Roblox Account History</h2><p class="muted">{html.escape(str(account_context.get('privacyNote', 'Only non-secret Roblox account identifiers are included.')))}</p>{html_table(account_rows, ['Platform','User ID','Username','Display Name','First Seen','Last Seen','Sources'], 'Last Seen')}</section>
 <section><h2>Session Information</h2><div class="sessions">{session_cards}</div>{html_table(sessions, ['Username','Display Name','User ID','Place ID','Job ID','Duration','Status'], 'Timestamp')}</section>
 <section><h2>Detected FastFlags</h2><p class="muted">FastFlags are grouped with the Roblox log where they were found.</p>{html_table(fastflag_rows, ['FastFlag','Value','Source Log','Timestamp','Place ID','Job ID'], 'Timestamp')}</section>
 <section><h2>Show All Roblox Logs</h2><p class="muted">Expand each log to inspect every captured Roblox event and the raw log text.</p>{roblox_log_html or "<p class='muted'>No raw Roblox logs were captured.</p>"}</section>
-<section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section>
+<div class="timeline-reset-grid"><section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section><section><h2>Reset / Reinstall History</h2><p class="muted">Windows evidence may indicate a reset or reinstall, but may not prove a factory reset.</p>{reset_list_html or "<p class='muted'>No reset or reinstall evidence was available.</p>"}</section></div>
 <section><h2>Findings</h2>{findings_html}</section>
 <section><h2>Evidence Limitations</h2><ul>{quality}</ul></section>
 <section><h2>Raw Artifacts</h2><pre>{raw}</pre></section>
@@ -5224,7 +5156,11 @@ def verify_pin(api_base_url: str, pin: str) -> tuple[bool, dict | str]:
         return False, data.get("error", "invalid_or_expired_pin") if isinstance(data, dict) else "bad_server_response"
     if not data.get("pinId"):
         return False, "bad_server_response"
-    return True, {"sessionId": data["pinId"], "uploadToken": pin, "scanProfile": normalize_scan_profile(data.get("scanProfile") or data.get("scan_profile"))}
+    return True, {
+        "sessionId": data["pinId"],
+        "uploadToken": pin,
+        "scanProfile": normalize_scan_profile(data.get("scanProfile") or data.get("scan_profile")),
+    }
 
 
 def upload_report(api_base_url: str, session_id: str, upload_token: str, report: dict) -> tuple[bool, str]:
@@ -5391,11 +5327,10 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
 
 def compact_account_identifiers(value) -> dict:
     if not isinstance(value, dict):
-        return {"privacyNote": "Tokens, cookies, private messages, and credential stores are excluded.", "roblox": [], "discord": []}
+        return {"privacyNote": "Only non-secret Roblox account identifiers are included.", "roblox": []}
     return {
-        "privacyNote": value.get("privacyNote", "Tokens, cookies, private messages, and credential stores are excluded."),
+        "privacyNote": value.get("privacyNote", "Only non-secret Roblox account identifiers are included."),
         "roblox": list(value.get("roblox", []))[:80],
-        "discord": list(value.get("discord", []))[:80],
     }
 
 

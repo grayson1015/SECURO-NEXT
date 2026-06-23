@@ -13,6 +13,7 @@
       "skip_browser_artifacts": true,
       "skip_recovery_metadata": true,
       "collect_safe_account_identifiers": true,
+      "collect_system_reset_evidence": true,
       "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations."
     },
     "standard": {
@@ -22,6 +23,7 @@
       "max_files_scanned": 10000,
       "file_artifact_time_budget_seconds": 90,
       "collect_safe_account_identifiers": true,
+      "collect_system_reset_evidence": true,
       "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage."
     },
     "deep": {
@@ -49,6 +51,9 @@
   "collect_safe_account_identifiers": true,
   "account_log_max_files": 600,
   "account_log_max_bytes": 4000000,
+  "account_log_total_bytes": 32000000,
+  "account_scan_time_budget_seconds": 12,
+  "collect_system_reset_evidence": true,
   "ioc_file": "securo_iocs.json",
   "known_bad_hashes": [],
   "executor_confirmation_keywords": [

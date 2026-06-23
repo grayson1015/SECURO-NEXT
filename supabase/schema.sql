@@ -75,6 +75,13 @@ create table if not exists public.reports (
   report_json jsonb not null
 );
 
+drop function if exists public.create_discord_oauth_state(text, text);
+drop function if exists public.create_discord_oauth_state(uuid, text);
+drop function if exists public.complete_discord_oauth(text, text, text, text);
+drop function if exists public.list_verified_discord_accounts_by_pin(text);
+drop table if exists public.discord_oauth_states;
+drop table if exists public.discord_verified_accounts;
+
 alter table public.pins alter column owner_user_id drop not null;
 alter table public.reports alter column owner_user_id drop not null;
 alter table public.pins add column if not exists owner_email text;

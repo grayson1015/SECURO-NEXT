@@ -68,7 +68,7 @@ export type RobloxLogArtifact = {
 };
 
 export type AccountIdentifier = {
-  platform?: "Roblox" | "Discord" | string;
+  platform?: "Roblox" | string;
   userId?: string;
   username?: string;
   displayName?: string;
@@ -82,7 +82,14 @@ export type AccountIdentifier = {
 export type AccountIdentifierContext = {
   privacyNote?: string;
   roblox?: AccountIdentifier[];
-  discord?: AccountIdentifier[];
+};
+
+export type SystemResetEvidence = {
+  type?: string;
+  timestamp?: string;
+  source?: string;
+  details?: string;
+  eventId?: number;
 };
 
 export type SecuroFinding = {
@@ -115,6 +122,7 @@ export type SecuroReportJson = {
   robloxLogs?: RobloxLogArtifact[];
   detectedFastFlags?: RobloxFastFlag[];
   accountIdentifiers?: AccountIdentifierContext;
+  systemResetEvidence?: SystemResetEvidence[];
   findings: SecuroFinding[];
   limitations: string[];
   [key: string]: unknown;
