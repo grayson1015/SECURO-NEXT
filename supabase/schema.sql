@@ -526,52 +526,19 @@ as $$
     r.risk_level,
     r.evidence_score,
     jsonb_build_object(
-      'scanTime', coalesce(r.report_json->>'scanTime', r.scan_time::text),
-      'hostname', coalesce(r.report_json->>'hostname', r.hostname),
-      'highestResult', coalesce(r.report_json->>'highestResult', r.risk_level),
-      'confidence', coalesce(r.report_json->>'confidence', ''),
-      'evidenceSources', coalesce(r.report_json->'evidenceSources', '{}'::jsonb),
+      'scanTime', r.scan_time::text,
+      'hostname', r.hostname,
+      'highestResult', r.risk_level,
+      'confidence', '',
+      'evidenceSources', '{}'::jsonb,
       'timeline', '[]'::jsonb,
-      'sessions',
-        case
-          when jsonb_typeof(r.report_json->'sessions') = 'array' and jsonb_array_length(r.report_json->'sessions') > 0
-            then jsonb_build_array(jsonb_build_object(
-              'gameId', ((r.report_json->'sessions')->0)->'gameId',
-              'placeId', ((r.report_json->'sessions')->0)->'placeId',
-              'jobId', ((r.report_json->'sessions')->0)->'jobId',
-              'userId', ((r.report_json->'sessions')->0)->'userId',
-              'username', ((r.report_json->'sessions')->0)->'username',
-              'displayName', ((r.report_json->'sessions')->0)->'displayName',
-              'launchTime', ((r.report_json->'sessions')->0)->'launchTime',
-              'exitTime', ((r.report_json->'sessions')->0)->'exitTime',
-              'duration', ((r.report_json->'sessions')->0)->'duration',
-              'status', ((r.report_json->'sessions')->0)->'status'
-            ))
-          else '[]'::jsonb
-        end,
-      'findings', coalesce((
-        select jsonb_agg(jsonb_build_object(
-          'name', finding.value->'name',
-          'path', finding.value->'path',
-          'score', finding.value->'score',
-          'category', finding.value->'category',
-          'classification', finding.value->'classification',
-          'confidenceLevel', finding.value->'confidenceLevel',
-          'detectionCategories', finding.value->'detectionCategories',
-          'detections', finding.value->'detections',
-          'evidenceTypes', finding.value->'evidenceTypes'
-        ))
-        from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) with ordinality as finding(value, ordinality)
-        where finding.ordinality <= 80
-      ), '[]'::jsonb),
-      'limitations', coalesce(r.report_json->'limitations', '[]'::jsonb),
+      'sessions', '[]'::jsonb,
+      'findings', '[]'::jsonb,
+      'limitations', '[]'::jsonb,
       '_summary', jsonb_build_object(
-        'findingCount',
-          case when jsonb_typeof(r.report_json->'findings') = 'array' then jsonb_array_length(r.report_json->'findings') else 0 end,
-        'sessionCount',
-          case when jsonb_typeof(r.report_json->'sessions') = 'array' then jsonb_array_length(r.report_json->'sessions') else 0 end,
-        'robloxLogCount',
-          case when jsonb_typeof(r.report_json->'robloxLogs') = 'array' then jsonb_array_length(r.report_json->'robloxLogs') else 0 end,
+        'findingCount', null,
+        'sessionCount', null,
+        'robloxLogCount', null,
         'summaryOnly', true
       )
     ) as report_json
