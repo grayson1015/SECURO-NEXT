@@ -1628,6 +1628,8 @@ def categorize_finding(finding: dict, config: dict) -> str:
         return "Trusted Safe" if not categories else "Likely False Positive"
     if (dependency or finding.get("low_signal_path")) and not behavior and not exploit_specific:
         return "Likely False Positive" if categories else "Trusted Safe"
+    if "possible_context" in types and categories & {"Network Lag Tool / WinDivert Manipulation", "Suspicious File Deletion", "Suspicious DLL Deletion", "Prefetch Deleted"}:
+        return "Suspicious"
     if "possible_context" in types:
         return "Indicator Found"
     if confirmed_exploit_artifact(finding, config):
@@ -1640,6 +1642,8 @@ def categorize_finding(finding: dict, config: dict) -> str:
         return "Indicator Found"
     if "Suspicious DLL Loading" in categories and not ("suspicious_module_load" in types or finding.get("signer", {}).get("status", "").lower() in {"notsigned", "unknown", "missing"}):
         return "Indicator Found"
+    if "Network Lag Tool / WinDivert Manipulation" in categories:
+        return "Suspicious"
     if score >= config["category_thresholds"]["suspicious"]:
         return "Suspicious"
     if score >= config["category_thresholds"]["weak"]:
@@ -3150,13 +3154,15 @@ def collect_recycle_bin_context(days: int, config: dict, sessions: list[dict]) -
         except OSError:
             continue
         for entry in entries[:5000]:
+            if entry.is_dir():
+                continue
             try:
                 mtime = dt.datetime.fromtimestamp(entry.stat().st_mtime)
             except OSError:
                 continue
             if mtime < cut:
                 continue
-            meta = parse_recycle_i_record(entry) if entry.name.lower().startswith("$i") else {}
+            meta = recycle_metadata_for_entry(entry)
             original = meta.get("original_path") or str(entry)
             deleted_when = parse_dt(meta.get("deleted_time")) or mtime
             text = " ".join([str(entry), original])
@@ -3171,6 +3177,8 @@ def collect_recycle_bin_context(days: int, config: dict, sessions: list[dict]) -
             finding["evidence_types"].append("recovery")
             if meta:
                 finding["supporting_evidence"].append(f"deleted_time={meta.get('deleted_time', '')} size={meta.get('size', '')}")
+                if meta.get("recovered_content_file"):
+                    finding["supporting_evidence"].append(f"Recoverable Recycle Bin content file: {meta.get('recovered_content_file')}")
             add_detection(finding, "File Deletion", "Recycle Bin metadata shows this file was deleted.", "Info", 5)
             if is_prefetch:
                 add_detection(finding, "Deleted Prefetch File", "Recycle Bin metadata shows a Prefetch artifact was deleted.", "High", 30)
@@ -3196,6 +3204,18 @@ def recycle_bin_roots(config: dict | None = None) -> list[Path]:
     return [Path(drive + ":\\$Recycle.Bin") for drive in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(drive + ":\\").exists()]
 
 
+def recycle_metadata_for_entry(path: Path) -> dict:
+    if path.name.lower().startswith("$i"):
+        return parse_recycle_i_record(path)
+    if path.name.lower().startswith("$r") and len(path.name) > 2:
+        sibling = path.with_name("$I" + path.name[2:])
+        meta = parse_recycle_i_record(sibling)
+        if meta.get("original_path"):
+            meta["recovered_content_file"] = str(path)
+            return meta
+    return {}
+
+
 def parse_recycle_i_record(path: Path) -> dict:
     # Windows $Recycle.Bin $I files store deleted-file metadata. This reads metadata only.
     try:
@@ -3216,7 +3236,15 @@ def parse_recycle_i_record(path: Path) -> dict:
         original = text.split("\x00", 1)[0]
     except Exception:
         pass
-    return {"original_path": original, "deleted_time": deleted_time, "size": size, "metadata_file": str(path)}
+    result = {"original_path": original, "deleted_time": deleted_time, "size": size, "metadata_file": str(path)}
+    if path.name.lower().startswith("$i") and len(path.name) > 2:
+        content = path.with_name("$R" + path.name[2:])
+        if safe_exists(content):
+            result["recovered_content_file"] = str(content)
+            result["recoverable"] = True
+        else:
+            result["recoverable"] = False
+    return result
 
 
 def collect_recovery_artifacts(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
@@ -3255,6 +3283,8 @@ def collect_recovery_artifacts(days: int, config: dict, sessions: list[dict]) ->
             finding["evidence_types"].append("recovery")
             finding["manual_review_required"] = True
             finding["recovered_metadata"] = meta
+            if meta.get("recovered_content_file"):
+                finding["supporting_evidence"].append(f"Recoverable Recycle Bin content file: {meta.get('recovered_content_file')}")
             add_detection(finding, "File Deletion", "Deleted file metadata recovered from Recycle Bin", "Info", 5)
             if original.lower().endswith(".pf") or "\\prefetch\\" in original.lower():
                 add_detection(finding, "Deleted Prefetch File", "Deleted Prefetch metadata recovered from Recycle Bin", "High", 30)

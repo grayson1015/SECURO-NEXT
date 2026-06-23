@@ -425,6 +425,34 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(any("boring_document.txt" in event["text"] for event in timeline))
         self.assertTrue(any(item.startswith("DELETED FILE:") for item in findings[0]["supporting_evidence"]))
 
+    def test_recycle_bin_skips_sid_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "S-1-5-21-123-456-789-1001").mkdir()
+            config = test_config()
+            config["recycle_bin_roots"] = [tmp]
+            findings, timeline = checker.collect_recycle_bin_context(7, config, [])
+        self.assertFalse(findings)
+        self.assertFalse(timeline)
+
+    def test_recycle_bin_r_file_uses_i_metadata_original_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deleted_time = dt.datetime(2026, 6, 2, 14, 27)
+            filetime = int((deleted_time - dt.datetime(1601, 1, 1)).total_seconds() * 10_000_000)
+            original = "C:\\Users\\Test\\Downloads\\Potassium.exe"
+            i_file = root / "$IABC123.exe"
+            r_file = root / "$RABC123.exe"
+            i_file.write_bytes((1).to_bytes(8, "little") + (123).to_bytes(8, "little") + filetime.to_bytes(8, "little") + original.encode("utf-16-le") + b"\x00\x00")
+            r_file.write_text("deleted content fixture", encoding="utf-8")
+            config = test_config()
+            config["recycle_bin_roots"] = [tmp]
+            findings, timeline = checker.collect_recycle_bin_context(30, config, [])
+        self.assertTrue(findings)
+        self.assertTrue(any(f.get("path") == original for f in findings))
+        self.assertTrue(any("DELETED FILE: C:\\Users\\Test\\Downloads\\Potassium.exe" in event["text"] for event in timeline))
+        self.assertTrue(any("Recoverable Recycle Bin content file" in item for f in findings for item in f["supporting_evidence"]))
+
     def test_jump_list_context_extracts_suspicious_recent_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -548,6 +576,8 @@ class CoreTests(unittest.TestCase):
             finding["first_seen"] = "2026-06-02 12:00:00"
             result = checker.finalize_findings([finding], config)[0]
         self.assertIn("Network Lag Tool / WinDivert Manipulation", result["detection_categories"])
+        self.assertEqual(result["classification"], "Suspicious")
+        self.assertEqual(result["confidence_level"], "Likely")
         self.assertNotEqual(result["classification"], "Confirmed Exploit")
 
     def test_key_artifacts_collect_prefetch_and_deleted_files_for_report(self):
