@@ -81,6 +81,8 @@ SPECIFIC_DETECTION_CATEGORIES = {
     "Suspicious File Deletion",
     "Suspicious File Modification",
     "Suspicious File Execution",
+    "File Deletion",
+    "Prefetch Execution",
     "Deleted Prefetch File",
     "Prefetch Deleted",
     "Duplicate Prefetch Behavior",
@@ -2208,15 +2210,16 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
         ioc_hit = bool(ioc_text_matches(text_blob, config))
         executor_prefetch_hit = any(term in text_blob.lower() for term in executor_terms)
         suspicious_hit = suspicious_name(exe_name, config) or suspicious_text(text_blob, config) or executor_prefetch_hit or bool(matched_paths) or ioc_hit
-        if not suspicious_hit:
-            continue
-        suspicious_prefetch_by_name[exe_name.lower()] += 1
+        if suspicious_hit:
+            suspicious_prefetch_by_name[exe_name.lower()] += 1
         near = find_near_roblox_launch(mtime, roblox_times) or near_any_session(mtime, sessions)
         primary_path = matched_paths[0] if matched_paths else ""
         finding = make_finding(primary_path, exe_name, "prefetch", config)
         finding["first_seen"] = mtime.isoformat(sep=" ", timespec="seconds")
-        add_score(finding, config["score_rules"]["prefetch_execution"], "Prefetch indicates suspicious executable ran")
-        add_detection(finding, "Executed Suspicious File", "Prefetch indicates a suspicious executable or script was executed.", "High", 25)
+        add_detection(finding, "Prefetch Execution", "Prefetch indicates this executable ran.", "Info", 5)
+        if suspicious_hit:
+            add_score(finding, config["score_rules"]["prefetch_execution"], "Prefetch indicates suspicious executable ran")
+            add_detection(finding, "Executed Suspicious File", "Prefetch indicates a suspicious executable or script was executed.", "High", 25)
         if near:
             add_score(finding, config["score_rules"]["near_roblox_session"], "Prefetch timestamp is within 30 minutes of Roblox activity")
         finding["supporting_evidence"].append(f"Prefetch file: {pf}")
@@ -2235,7 +2238,10 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
                 break
         apply_ioc_matches(finding, config, text_blob)
         merge_findings(findings, finding)
-        timeline.append({"time": finding["first_seen"], "source": "Prefetch", "text": f"Suspicious executable execution hint: {exe_name} from {pf.name}"})
+        timeline_text = f"Prefetch execution hint: {exe_name} from {pf.name}"
+        if suspicious_hit:
+            timeline_text = f"Suspicious executable execution hint: {exe_name} from {pf.name}"
+        timeline.append({"time": finding["first_seen"], "source": "Prefetch", "text": timeline_text})
     for finding in findings.values():
         count = suspicious_prefetch_by_name.get(str(finding.get("name", "")).lower(), 0)
         if count >= 3:
@@ -2414,19 +2420,19 @@ def collect_recycle_bin_context(days: int, config: dict, sessions: list[dict]) -
             is_prefetch = original.lower().endswith(".pf") or "\\prefetch\\" in original.lower()
             executor_terms = [str(term).lower() for term in config.get("executor_confirmation_keywords", []) if str(term).strip()]
             executor_deleted = any(term in text.lower() for term in executor_terms)
-            if not (suspicious_text(text, config) or ioc_text_matches(text, config) or executor_deleted or is_prefetch):
-                continue
+            suspicious_deleted = suspicious_text(text, config) or ioc_text_matches(text, config) or executor_deleted
             reason = f"Recycle Bin deletion metadata references: {original}"
             finding = make_possible_context_finding(original, Path(original).name or entry.name, "Recycle Bin", reason, deleted_when, config)
             finding["supporting_evidence"].append(f"Recycle Bin metadata file: {entry}")
             finding["evidence_types"].append("recovery")
             if meta:
                 finding["supporting_evidence"].append(f"deleted_time={meta.get('deleted_time', '')} size={meta.get('size', '')}")
+            add_detection(finding, "File Deletion", "Recycle Bin metadata shows this file was deleted.", "Info", 5)
             if is_prefetch:
                 add_detection(finding, "Deleted Prefetch File", "Recycle Bin metadata shows a Prefetch artifact was deleted.", "High", 30)
                 add_detection(finding, "Prefetch Deleted", "Deleted Prefetch metadata can indicate anti-forensic cleanup after execution.", "High", 30)
                 finding["evidence_types"].append("prefetch_deleted")
-            else:
+            elif suspicious_deleted:
                 add_detection(finding, "Suspicious File Deletion", "Recycle Bin metadata shows a suspicious file was deleted.", "Medium", 25)
                 if Path(original).suffix.lower() == ".dll":
                     add_detection(finding, "Suspicious DLL Deletion", "Recycle Bin metadata shows a suspicious DLL was deleted.", "High", 30)
@@ -2491,21 +2497,29 @@ def collect_recovery_artifacts(days: int, config: dict, sessions: list[dict]) ->
                 continue
             meta = parse_recycle_i_record(entry)
             original = meta.get("original_path") or str(entry)
-            if not suspicious_text(original, config):
-                continue
             when = meta.get("deleted_time") or mtime.isoformat(sep=" ", timespec="seconds")
+            suspicious_deleted = suspicious_text(original, config) or ioc_text_matches(original, config)
             finding = make_possible_context_finding(
                 original,
                 Path(original).name or entry.name,
                 "Recovered File Metadata",
-                "Recycle Bin metadata recovered for a suspicious deleted path. Manual review required.",
+                "Recycle Bin metadata recovered for a deleted file. Manual review may be required.",
                 parse_dt(when) or mtime,
                 config,
             )
             finding["evidence_types"].append("recovery")
             finding["manual_review_required"] = True
             finding["recovered_metadata"] = meta
-            add_detection(finding, "Suspicious File Deletion", "Deleted suspicious file metadata recovered from Recycle Bin", "Medium", 20)
+            add_detection(finding, "File Deletion", "Deleted file metadata recovered from Recycle Bin", "Info", 5)
+            if original.lower().endswith(".pf") or "\\prefetch\\" in original.lower():
+                add_detection(finding, "Deleted Prefetch File", "Deleted Prefetch metadata recovered from Recycle Bin", "High", 30)
+                add_detection(finding, "Prefetch Deleted", "Deleted Prefetch metadata can indicate anti-forensic cleanup after execution.", "High", 30)
+                finding["evidence_types"].append("prefetch_deleted")
+            elif suspicious_deleted:
+                add_detection(finding, "Suspicious File Deletion", "Deleted suspicious file metadata recovered from Recycle Bin", "Medium", 20)
+                if Path(original).suffix.lower() == ".dll":
+                    add_detection(finding, "Suspicious DLL Deletion", "Deleted suspicious DLL metadata recovered from Recycle Bin", "High", 30)
+                    finding["evidence_types"].append("suspicious_dll_deleted")
             merge_findings(findings, finding)
             recovered.append({
                 "name": finding["name"],

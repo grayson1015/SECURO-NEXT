@@ -223,6 +223,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(checker.prefetch_executable_name("SYNAPSE-Z.EXE-ABCDEF12.pf"), "SYNAPSE-Z.EXE")
         self.assertEqual(checker.prefetch_executable_name("ROBLOXPLAYERBETA.EXE-12345678.pf"), "ROBLOXPLAYERBETA.EXE")
 
+    def test_all_prefetch_entries_are_flagged_as_execution_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "NOTEPAD.EXE-1234ABCD.pf"
+            pf.write_bytes(b"SCCA")
+            now = dt.datetime.now().timestamp()
+            os.utime(pf, (now, now))
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            findings, timeline = checker.collect_prefetch_evidence(7, config, [])
+        self.assertTrue(findings)
+        self.assertIn("Prefetch Execution", findings[0]["detection_categories"])
+        self.assertIn("prefetch_execution", findings[0]["evidence_types"])
+        self.assertTrue(any("notepad.exe" in event["text"].lower() for event in timeline))
+
     def test_xeno_detection_categories_are_confirmed(self):
         config = test_config()
         config["suspicious_name_terms"].append("xeno")
@@ -383,6 +397,19 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Prefetch Deleted", categories)
         self.assertIn("prefetch_deleted", findings[0]["evidence_types"])
         self.assertTrue(any("POTASSIUM.EXE" in event["text"] for event in timeline))
+
+    def test_all_recycle_bin_deletions_are_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deleted = root / "boring_document.txt"
+            deleted.write_text("deleted fixture", encoding="utf-8")
+            config = test_config()
+            config["recycle_bin_roots"] = [tmp]
+            findings, timeline = checker.collect_recycle_bin_context(7, config, [])
+        self.assertTrue(findings)
+        self.assertIn("File Deletion", findings[0]["detection_categories"])
+        self.assertNotIn("Suspicious File Deletion", findings[0]["detection_categories"])
+        self.assertTrue(any("boring_document.txt" in event["text"] for event in timeline))
 
     def test_warning_logs_do_not_become_confirmed(self):
         config = test_config()
