@@ -67,6 +67,8 @@ class CoreTests(unittest.TestCase):
             "collect_running_processes",
             "collect_network_ioc_evidence",
             "collect_prefetch_evidence",
+            "collect_jump_list_context",
+            "collect_amcache_context",
             "collect_file_artifacts",
             "collect_powershell_history",
             "collect_defender_history",
@@ -86,6 +88,8 @@ class CoreTests(unittest.TestCase):
             checker.collect_running_processes = lambda config, sessions: ([], [])
             checker.collect_network_ioc_evidence = lambda config: ([], [])
             checker.collect_prefetch_evidence = lambda days, config, sessions: ([], [])
+            checker.collect_jump_list_context = lambda days, config, sessions: ([], [])
+            checker.collect_amcache_context = lambda days, config, sessions: ([], [])
             checker.collect_file_artifacts = lambda days, config, sessions, verbose=False: ([], [])
             checker.collect_powershell_history = lambda days, config, sessions: ([], [])
             checker.collect_defender_history = lambda days, config, sessions: ([], [])
@@ -414,6 +418,31 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("Suspicious File Deletion", findings[0]["detection_categories"])
         self.assertTrue(any("boring_document.txt" in event["text"] for event in timeline))
         self.assertTrue(any(item.startswith("DELETED FILE:") for item in findings[0]["supporting_evidence"]))
+
+    def test_jump_list_context_extracts_suspicious_recent_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact = root / "unit.automaticDestinations-ms"
+            artifact.write_bytes("C:\\Users\\Test\\Downloads\\Solara.exe\x00".encode("utf-16-le"))
+            config = test_config()
+            config["jump_list_roots"] = [tmp]
+            findings, timeline = checker.collect_jump_list_context(7, config, [])
+        self.assertTrue(findings)
+        self.assertIn("Jump List Recent Item Context", findings[0]["detection_categories"])
+        self.assertIn("jump_list_context", findings[0]["evidence_types"])
+        self.assertTrue(any("Solara.exe" in event["text"] for event in timeline))
+
+    def test_amcache_context_extracts_suspicious_program_references(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hive = Path(tmp) / "Amcache.hve"
+            hive.write_bytes("C:\\Users\\Test\\Downloads\\Xeno.exe\x00".encode("utf-16-le"))
+            config = test_config()
+            config["amcache_path"] = str(hive)
+            findings, timeline = checker.collect_amcache_context(7, config, [])
+        self.assertTrue(findings)
+        self.assertIn("Amcache Execution/Install Context", findings[0]["detection_categories"])
+        self.assertIn("amcache_context", findings[0]["evidence_types"])
+        self.assertTrue(any("Xeno.exe" in event["text"] for event in timeline))
 
     def test_key_artifacts_collect_prefetch_and_deleted_files_for_report(self):
         finding = checker.make_finding("C:/Users/Test/Downloads/Example.exe", "Example.exe", "unit", test_config())
@@ -916,6 +945,8 @@ class CoreTests(unittest.TestCase):
             "collect_network_ioc_evidence",
             "collect_prefetch_evidence",
             "collect_recycle_bin_context",
+            "collect_jump_list_context",
+            "collect_amcache_context",
             "collect_file_artifacts",
             "collect_safe_account_identifiers",
             "evidence_quality",
@@ -929,6 +960,8 @@ class CoreTests(unittest.TestCase):
             checker.collect_network_ioc_evidence = lambda cfg: ([], [])
             checker.collect_prefetch_evidence = lambda days, cfg, sessions: (calls.append("prefetch") or ([], []))
             checker.collect_recycle_bin_context = lambda days, cfg, sessions: (calls.append("deleted") or ([], [{"time": "2026-06-02 17:55:00", "source": "Recycle Bin", "text": "DELETED FILE: C:/Temp/a.exe"}]))
+            checker.collect_jump_list_context = lambda days, cfg, sessions: (calls.append("jump") or ([], []))
+            checker.collect_amcache_context = lambda days, cfg, sessions: (calls.append("amcache") or ([], []))
             checker.collect_file_artifacts = lambda days, cfg, sessions, verbose=False, progress=None: (calls.append("files") or ([], []))
             checker.collect_safe_account_identifiers = lambda sessions, cfg: {}
             checker.evidence_quality = lambda days: {"Prefetch available": True}
@@ -938,6 +971,8 @@ class CoreTests(unittest.TestCase):
             for name, value in originals.items():
                 setattr(checker, name, value)
         self.assertLess(calls.index("deleted"), calls.index("files"))
+        self.assertLess(calls.index("jump"), calls.index("files"))
+        self.assertLess(calls.index("amcache"), calls.index("files"))
         self.assertIn("DELETED FILE:", json.dumps(report))
 
     def test_scan_profiles_apply_expected_coverage(self):

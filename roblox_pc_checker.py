@@ -328,6 +328,8 @@ def load_config() -> dict:
     config.setdefault("storage_base_dir", "")
     config.setdefault("prefetch_dir", "C:/Windows/Prefetch")
     config.setdefault("recycle_bin_roots", [])
+    config.setdefault("jump_list_roots", [])
+    config.setdefault("amcache_path", "C:/Windows/AppCompat/Programs/Amcache.hve")
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -364,7 +366,7 @@ def scan_transparency_metadata() -> dict:
             "Running process metadata, process names, paths, parent process IDs, and command lines when available",
             "Startup folders, Run registry keys, scheduled tasks, services, and WMI persistence metadata",
             "Downloads, Desktop, Documents, AppData, Temp, ProgramData, and Roblox-related folders",
-            "Prefetch, Windows Security/Sysmon event logs when available, Defender artifacts, browser download metadata, ShellBag context, and Recycle Bin metadata",
+            "Prefetch, deleted-file metadata, Jump Lists, Amcache string context, Windows Security/Sysmon event logs when available, Defender artifacts, browser download metadata, ShellBag context, and Recycle Bin metadata",
             "Roblox logs including user ID, username, display name when available, place ID/game ID, job ID, session time, duration, LoadClientSettings lines, and FastFlags",
             "Safe account identifier context for Roblox and Discord when available, excluding tokens, cookies, Local Storage, IndexedDB, cache, and private messages",
             "Windows install/reset context such as install date, setup logs, recovery folders, and setup event-log entries",
@@ -2050,6 +2052,53 @@ def safe_glob_any(base: Path, pattern: str) -> bool:
         return False
 
 
+def jump_list_roots(config: dict | None = None) -> list[Path]:
+    configured = (config or {}).get("jump_list_roots") or []
+    if configured:
+        return [Path(os.path.expandvars(str(root))).expanduser() for root in configured]
+    appdata = Path(os.environ.get("APPDATA", ""))
+    base = appdata / "Microsoft" / "Windows" / "Recent"
+    return [base / "AutomaticDestinations", base / "CustomDestinations"]
+
+
+def forensic_parser_tools_available() -> bool:
+    root = app_dir()
+    tool_names = ["PECmd.exe", "MFTECmd.exe", "SBECmd.exe", "JLECmd.exe", "SrumECmd.exe", "AmcacheParser.exe", "AppCompatCacheParser.exe"]
+    return any(safe_exists(root / name) for name in tool_names)
+
+
+def extract_artifact_strings(path: Path, max_bytes: int = 2_000_000) -> dict:
+    info = {"referenced_paths": [], "strings": [], "size": 0}
+    try:
+        with path.open("rb") as f:
+            data = f.read(max_bytes)
+        info["size"] = len(data)
+    except OSError:
+        return info
+    texts = []
+    for encoding in ("utf-16-le", "latin1"):
+        for blob in (data, data[1:]):
+            try:
+                texts.append(blob.decode(encoding, errors="ignore"))
+            except Exception:
+                continue
+    joined = "\n".join(texts)
+    path_pattern = r"(?:[A-Za-z]:\\|\\\\|\\Device\\HarddiskVolume\d+\\)[^\x00\r\n\t\"<>|]{3,260}"
+    paths = []
+    for match in re.finditer(path_pattern, joined, re.I):
+        value = match.group(0).strip()
+        if value and len(value) <= 260:
+            paths.append(value)
+    string_hits = []
+    suspicious_terms = list(EXPLOIT_FAMILY_TERMS) + ["inject", "loader", "executor", "bypass", "roblox", "dll", "powershell"]
+    for token in re.findall(r"[A-Za-z0-9_ .:\\/()$%#@+\-]{5,160}", joined):
+        if suspicious_text(token, {"suspicious_name_terms": suspicious_terms}):
+            string_hits.append(token.strip())
+    info["referenced_paths"] = sorted(set(paths))[:80]
+    info["strings"] = sorted(set(s for s in string_hits if s))[:40]
+    return info
+
+
 def evidence_quality(days: int) -> dict:
     sysmon_exists = event_log_exists("Microsoft-Windows-Sysmon/Operational")
     security_exists = event_log_exists("Security")
@@ -2064,6 +2113,11 @@ def evidence_quality(days: int) -> dict:
         "Security 4688 command line available": False,
         "Prefetch available": safe_exists(Path("C:/Windows/Prefetch")),
         "Amcache available": safe_exists(Path("C:/Windows/AppCompat/Programs/Amcache.hve")),
+        "Jump Lists available": any(safe_exists(path) for path in jump_list_roots({})),
+        "SRUM database available": safe_exists(Path("C:/Windows/System32/sru/SRUDB.dat")),
+        "AppCompat/ShimCache hive available": safe_exists(Path("C:/Windows/System32/config/SYSTEM")),
+        "MFT direct access available": safe_exists(Path("C:/$MFT")),
+        "External forensic parser tools bundled": forensic_parser_tools_available(),
         "Defender logs available": defender_exists,
         "Defender history folders available": safe_exists(Path("C:/ProgramData/Microsoft/Windows Defender/Scans/History/Service")),
         "PowerShell history available": safe_glob_any(Path(os.environ.get("APPDATA", "")), "Microsoft/Windows/PowerShell/PSReadLine/*history*.txt"),
@@ -2494,6 +2548,89 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
         if count >= 3:
             add_detection(finding, "Duplicate Prefetch Behavior", f"Multiple Prefetch variants were present for the same suspicious executable name ({count}).", "Medium", 15)
             finding["evidence_types"].append("duplicate_prefetch")
+    return list(findings.values()), timeline
+
+
+def collect_jump_list_context(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
+    # Jump Lists record recently opened apps/files. Treat as context, not proof by itself.
+    findings = {}
+    timeline = []
+    cut = cutoff(days)
+    for root in jump_list_roots(config):
+        if not safe_exists(root):
+            continue
+        try:
+            entries = list(root.glob("*.automaticDestinations-ms")) + list(root.glob("*.customDestinations-ms"))
+        except OSError:
+            continue
+        for entry in entries[:2500]:
+            try:
+                mtime = dt.datetime.fromtimestamp(entry.stat().st_mtime)
+            except OSError:
+                continue
+            if mtime < cut:
+                continue
+            parsed = extract_artifact_strings(entry)
+            text_blob = " ".join([str(entry)] + parsed.get("referenced_paths", []) + parsed.get("strings", []))
+            matched_paths = [
+                path for path in parsed.get("referenced_paths", [])
+                if suspicious_text(path, config)
+                or ioc_text_matches(path, config)
+                or (user_writable_path(path) and suspicious_extension(path, config))
+            ]
+            suspicious_strings = [item for item in parsed.get("strings", []) if suspicious_text(item, config) or ioc_text_matches(item, config)]
+            if not matched_paths and not suspicious_strings:
+                continue
+            target = matched_paths[0] if matched_paths else str(entry)
+            reason = f"Jump List artifact references suspicious recent item: {target}"
+            finding = make_possible_context_finding(target, Path(target).name or entry.name, "Jump List", reason, mtime, config)
+            finding["supporting_evidence"].append(f"Jump List artifact: {entry}")
+            if matched_paths:
+                finding["supporting_evidence"].append("Jump List referenced paths: " + "; ".join(matched_paths[:8]))
+            if suspicious_strings:
+                finding["supporting_evidence"].append("Jump List suspicious strings: " + "; ".join(suspicious_strings[:8]))
+            finding["evidence_types"].append("jump_list_context")
+            add_detection(finding, "Jump List Recent Item Context", "Jump List metadata referenced a suspicious executable/script/archive path.", "Medium", 15)
+            if near_any_session(mtime, sessions):
+                add_score(finding, config["score_rules"].get("near_roblox_session", 25), "Jump List artifact timestamp is near Roblox activity")
+            apply_ioc_matches(finding, config, text_blob)
+            merge_findings(findings, finding)
+            timeline.append({"time": finding["first_seen"], "source": "Jump List", "text": reason})
+    return list(findings.values()), timeline
+
+
+def collect_amcache_context(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
+    # Amcache can retain program execution/install traces. This lightweight pass extracts suspicious strings only.
+    findings = {}
+    timeline = []
+    path = Path(os.path.expandvars(str(config.get("amcache_path") or "C:/Windows/AppCompat/Programs/Amcache.hve"))).expanduser()
+    if not safe_exists(path):
+        return [], []
+    try:
+        mtime = dt.datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        mtime = dt.datetime.now()
+    parsed = extract_artifact_strings(path, max_bytes=int(config.get("amcache_scan_max_bytes") or 3_000_000))
+    text_blob = " ".join([str(path)] + parsed.get("referenced_paths", []) + parsed.get("strings", []))
+    matched_paths = [
+        item for item in parsed.get("referenced_paths", [])
+        if suspicious_text(item, config)
+        or ioc_text_matches(item, config)
+        or (user_writable_path(item) and suspicious_extension(item, config))
+    ][:25]
+    suspicious_strings = [item for item in parsed.get("strings", []) if suspicious_text(item, config) or ioc_text_matches(item, config)][:25]
+    for item in matched_paths or suspicious_strings[:10]:
+        target = item if re.match(r"^(?:[A-Za-z]:\\|\\\\)", item) else str(path)
+        name = Path(target).name if target != str(path) else "Amcache suspicious context"
+        reason = f"Amcache artifact references suspicious program context: {item}"
+        finding = make_possible_context_finding(target, name, "Amcache", reason, mtime, config)
+        finding["supporting_evidence"].append(f"Amcache hive: {path}")
+        finding["supporting_evidence"].append(f"Amcache reference: {item}")
+        finding["evidence_types"].append("amcache_context")
+        add_detection(finding, "Amcache Execution/Install Context", "Amcache string context referenced a suspicious executable/script/archive.", "Medium", 20)
+        apply_ioc_matches(finding, config, text_blob)
+        merge_findings(findings, finding)
+        timeline.append({"time": finding["first_seen"], "source": "Amcache", "text": reason})
     return list(findings.values()), timeline
 
 
@@ -3626,6 +3763,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     network_findings, network_timeline = collect_network_ioc_evidence(config)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
+    jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
+    amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=verbose)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
     defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
@@ -3651,19 +3790,21 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + running_timeline
         + network_timeline
         + prefetch_timeline
+        + recycle_timeline
+        + jump_list_timeline
+        + amcache_timeline
         + file_timeline
         + ps_timeline
         + defender_timeline
         + persistence_timeline
         + browser_timeline
         + shellbag_timeline
-        + recycle_timeline
         + recovery_timeline
         + reset_timeline
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -3912,6 +4053,9 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
     emit_progress(progress, "Checking deleted file artifacts", 28)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
+    emit_progress(progress, "Checking forensic app artifacts", 31)
+    jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
+    amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
     emit_progress(progress, "Checking file artifacts", 34)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
     emit_progress(progress, "Checking PowerShell history", 50)
@@ -3981,19 +4125,21 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + running_timeline
         + network_timeline
         + prefetch_timeline
+        + recycle_timeline
+        + jump_list_timeline
+        + amcache_timeline
         + file_timeline
         + ps_timeline
         + defender_timeline
         + persistence_timeline
         + browser_timeline
         + shellbag_timeline
-        + recycle_timeline
         + recovery_timeline
         + reset_timeline
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recycle_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
