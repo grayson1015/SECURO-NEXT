@@ -32,6 +32,7 @@
   "ruin_mode_enabled": false,
   "storage_base_dir": "",
   "prefetch_dir": "C:/Windows/Prefetch",
+  "recycle_bin_roots": [],
   "ioc_file": "securo_iocs.json",
   "known_bad_hashes": [],
   "executor_confirmation_keywords": [

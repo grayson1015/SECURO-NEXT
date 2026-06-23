@@ -325,6 +325,7 @@ def load_config() -> dict:
     config.setdefault("scan_profiles", {})
     config.setdefault("storage_base_dir", "")
     config.setdefault("prefetch_dir", "C:/Windows/Prefetch")
+    config.setdefault("recycle_bin_roots", [])
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -2393,7 +2394,7 @@ def collect_recycle_bin_context(days: int, config: dict, sessions: list[dict]) -
     findings = {}
     timeline = []
     cut = cutoff(days)
-    recycle_roots = [Path(drive + ":\\$Recycle.Bin") for drive in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(drive + ":\\").exists()]
+    recycle_roots = recycle_bin_roots(config)
     for root in recycle_roots:
         try:
             entries = list(root.rglob("*"))
@@ -2406,14 +2407,43 @@ def collect_recycle_bin_context(days: int, config: dict, sessions: list[dict]) -
                 continue
             if mtime < cut:
                 continue
-            text = str(entry)
-            if not suspicious_text(text, config):
+            meta = parse_recycle_i_record(entry) if entry.name.lower().startswith("$i") else {}
+            original = meta.get("original_path") or str(entry)
+            deleted_when = parse_dt(meta.get("deleted_time")) or mtime
+            text = " ".join([str(entry), original])
+            is_prefetch = original.lower().endswith(".pf") or "\\prefetch\\" in original.lower()
+            executor_terms = [str(term).lower() for term in config.get("executor_confirmation_keywords", []) if str(term).strip()]
+            executor_deleted = any(term in text.lower() for term in executor_terms)
+            if not (suspicious_text(text, config) or ioc_text_matches(text, config) or executor_deleted or is_prefetch):
                 continue
-            reason = f"Recycle Bin metadata/path contains possible exploit-related name: {text}"
-            finding = make_possible_context_finding(text, entry.name, "Recycle Bin", reason, mtime, config)
+            reason = f"Recycle Bin deletion metadata references: {original}"
+            finding = make_possible_context_finding(original, Path(original).name or entry.name, "Recycle Bin", reason, deleted_when, config)
+            finding["supporting_evidence"].append(f"Recycle Bin metadata file: {entry}")
+            finding["evidence_types"].append("recovery")
+            if meta:
+                finding["supporting_evidence"].append(f"deleted_time={meta.get('deleted_time', '')} size={meta.get('size', '')}")
+            if is_prefetch:
+                add_detection(finding, "Deleted Prefetch File", "Recycle Bin metadata shows a Prefetch artifact was deleted.", "High", 30)
+                add_detection(finding, "Prefetch Deleted", "Deleted Prefetch metadata can indicate anti-forensic cleanup after execution.", "High", 30)
+                finding["evidence_types"].append("prefetch_deleted")
+            else:
+                add_detection(finding, "Suspicious File Deletion", "Recycle Bin metadata shows a suspicious file was deleted.", "Medium", 25)
+                if Path(original).suffix.lower() == ".dll":
+                    add_detection(finding, "Suspicious DLL Deletion", "Recycle Bin metadata shows a suspicious DLL was deleted.", "High", 30)
+                    finding["evidence_types"].append("suspicious_dll_deleted")
+            if near_any_session(deleted_when, sessions):
+                add_score(finding, config["score_rules"].get("near_roblox_session", 25), "Deletion timestamp is within 30 minutes of Roblox activity")
+            apply_ioc_matches(finding, config, text)
             merge_findings(findings, finding)
             timeline.append({"time": finding["first_seen"], "source": "Recycle Bin", "text": reason})
     return list(findings.values()), timeline
+
+
+def recycle_bin_roots(config: dict | None = None) -> list[Path]:
+    configured = (config or {}).get("recycle_bin_roots") or []
+    if configured:
+        return [Path(os.path.expandvars(str(root))).expanduser() for root in configured]
+    return [Path(drive + ":\\$Recycle.Bin") for drive in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(drive + ":\\").exists()]
 
 
 def parse_recycle_i_record(path: Path) -> dict:
@@ -2444,7 +2474,7 @@ def collect_recovery_artifacts(days: int, config: dict, sessions: list[dict]) ->
     timeline = []
     recovered = []
     cut = cutoff(days)
-    roots = [Path(f"{letter}:/$Recycle.Bin") for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ"]
+    roots = recycle_bin_roots(config)
     for root in roots:
         if not safe_exists(root):
             continue

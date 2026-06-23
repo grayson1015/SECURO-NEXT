@@ -43,6 +43,7 @@ def test_config():
         "scan_profiles": {},
         "storage_base_dir": "",
         "prefetch_dir": "C:/Windows/Prefetch",
+        "recycle_bin_roots": [],
         "ioc_file": "securo_iocs.json",
         "iocs": checker.normalize_iocs({}),
         "known_bad_hashes": [],
@@ -213,6 +214,8 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(findings)
         self.assertEqual(findings[0]["name"], "Potassium.exe")
         self.assertIn("prefetch_execution", findings[0]["evidence_types"])
+        self.assertIn("executed_deleted", findings[0]["evidence_types"])
+        self.assertIn("Executed & Deleted", findings[0]["detection_categories"])
         self.assertTrue(any("Potassium.exe" in item for item in findings[0]["supporting_evidence"]))
         self.assertTrue(any("potassium.exe" in event["text"].lower() for event in timeline))
 
@@ -347,6 +350,39 @@ class CoreTests(unittest.TestCase):
             finding["score"] = 100
             result = checker.finalize_findings([finding], config)[0]
             self.assertEqual(result["classification"], "Indicator Found", source)
+
+    def test_recycle_bin_deleted_suspicious_file_is_key_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deleted = root / "Xeno.exe"
+            deleted.write_text("deleted fixture", encoding="utf-8")
+            config = test_config()
+            config["recycle_bin_roots"] = [tmp]
+            findings, timeline = checker.collect_recycle_bin_context(7, config, [])
+        self.assertTrue(findings)
+        self.assertIn("Suspicious File Deletion", findings[0]["detection_categories"])
+        self.assertIn("recovery", findings[0]["evidence_types"])
+        self.assertTrue(any("Recycle Bin" == event["source"] for event in timeline))
+
+    def test_recycle_bin_deleted_prefetch_is_key_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = root / "$I123456"
+            original = "C:\\Windows\\Prefetch\\POTASSIUM.EXE-1234ABCD.pf"
+            # Minimal $I record: version, size, Windows FILETIME, then UTF-16 original path.
+            deleted_time = dt.datetime(2026, 6, 2, 14, 27)
+            filetime = int((deleted_time - dt.datetime(1601, 1, 1)).total_seconds() * 10_000_000)
+            payload = (1).to_bytes(8, "little") + (123).to_bytes(8, "little") + filetime.to_bytes(8, "little") + original.encode("utf-16-le") + b"\x00\x00"
+            record.write_bytes(payload)
+            config = test_config()
+            config["recycle_bin_roots"] = [tmp]
+            findings, timeline = checker.collect_recycle_bin_context(30, config, [])
+        self.assertTrue(findings)
+        categories = set(findings[0]["detection_categories"])
+        self.assertIn("Deleted Prefetch File", categories)
+        self.assertIn("Prefetch Deleted", categories)
+        self.assertIn("prefetch_deleted", findings[0]["evidence_types"])
+        self.assertTrue(any("POTASSIUM.EXE" in event["text"] for event in timeline))
 
     def test_warning_logs_do_not_become_confirmed(self):
         config = test_config()
