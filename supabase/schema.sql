@@ -503,11 +503,23 @@ stable
 security definer
 set search_path = public
 as $$
+  with authorized as (
+    select public.validate_key_session(input_email, input_key) as ok
+  ),
+  filtered_reports as (
+    select r.*
+    from public.reports r, authorized a
+    where a.ok
+      and lower(r.owner_email) = lower(input_email)
+      and r.uploaded_at >= now() - make_interval(days => greatest(3, least(coalesce(input_days, 7), 30)))
+    order by r.uploaded_at desc
+    limit 100
+  )
   select
     r.id,
     r.pin_id,
     r.owner_user_id,
-    coalesce(r.owner_email, p.owner_email) as owner_email,
+    r.owner_email,
     r.uploaded_at,
     r.hostname,
     r.scan_time,
@@ -549,12 +561,8 @@ as $$
           'detections', finding.value->'detections',
           'evidenceTypes', finding.value->'evidenceTypes'
         ))
-        from (
-          select value, ordinality
-          from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) with ordinality
-          order by case when coalesce(value->>'score', '') ~ '^-?[0-9]+$' then (value->>'score')::integer else 0 end desc, ordinality
-          limit 250
-        ) finding
+        from jsonb_array_elements(coalesce(r.report_json->'findings', '[]'::jsonb)) with ordinality as finding(value, ordinality)
+        where finding.ordinality <= 80
       ), '[]'::jsonb),
       'limitations', coalesce(r.report_json->'limitations', '[]'::jsonb),
       '_summary', jsonb_build_object(
@@ -567,13 +575,8 @@ as $$
         'summaryOnly', true
       )
     ) as report_json
-  from public.reports r
-  left join public.pins p on p.id = r.pin_id
-  where public.validate_key_session(input_email, input_key)
-    and lower(coalesce(r.owner_email, p.owner_email)) = lower(input_email)
-    and r.uploaded_at >= now() - make_interval(days => greatest(3, least(coalesce(input_days, 7), 30)))
-  order by r.uploaded_at desc
-  limit 200;
+  from filtered_reports r
+  order by r.uploaded_at desc;
 $$;
 
 create or replace function public.get_report_by_key(input_email text, input_key text, input_report_id uuid)
