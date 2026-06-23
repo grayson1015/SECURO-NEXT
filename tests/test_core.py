@@ -904,6 +904,42 @@ class CoreTests(unittest.TestCase):
         self.assertGreater(captured.get("remaining", 0), 40)
         self.assertLess(captured.get("remaining", 999), 60)
 
+    def test_deleted_file_artifacts_run_before_optional_deadline_skips(self):
+        config = test_config()
+        config["_scan_deadline_monotonic"] = time.monotonic() - 1
+        calls = []
+        originals = {}
+        for name in [
+            "parse_roblox_logs",
+            "collect_process_evidence",
+            "collect_running_processes",
+            "collect_network_ioc_evidence",
+            "collect_prefetch_evidence",
+            "collect_recycle_bin_context",
+            "collect_file_artifacts",
+            "collect_safe_account_identifiers",
+            "evidence_quality",
+            "collect_system_info",
+        ]:
+            originals[name] = getattr(checker, name)
+        try:
+            checker.parse_roblox_logs = lambda days, cfg: ([], [])
+            checker.collect_process_evidence = lambda days, cfg, sessions: ([], [])
+            checker.collect_running_processes = lambda cfg, sessions: ([], [])
+            checker.collect_network_ioc_evidence = lambda cfg: ([], [])
+            checker.collect_prefetch_evidence = lambda days, cfg, sessions: (calls.append("prefetch") or ([], []))
+            checker.collect_recycle_bin_context = lambda days, cfg, sessions: (calls.append("deleted") or ([], [{"time": "2026-06-02 17:55:00", "source": "Recycle Bin", "text": "DELETED FILE: C:/Temp/a.exe"}]))
+            checker.collect_file_artifacts = lambda days, cfg, sessions, verbose=False, progress=None: (calls.append("files") or ([], []))
+            checker.collect_safe_account_identifiers = lambda sessions, cfg: {}
+            checker.evidence_quality = lambda days: {"Prefetch available": True}
+            checker.collect_system_info = lambda: {"hostname": "unit-host", "scan_time": "old"}
+            report = checker.build_scan_report_with_progress(7, config, lambda message: None)
+        finally:
+            for name, value in originals.items():
+                setattr(checker, name, value)
+        self.assertLess(calls.index("deleted"), calls.index("files"))
+        self.assertIn("DELETED FILE:", json.dumps(report))
+
     def test_scan_profiles_apply_expected_coverage(self):
         quick = checker.apply_scan_profile(test_config(), "quick")
         standard = checker.apply_scan_profile(test_config(), "standard")

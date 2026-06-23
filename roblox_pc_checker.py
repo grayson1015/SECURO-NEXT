@@ -3625,6 +3625,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     running_findings, running_timeline = collect_running_processes(config, sessions_raw)
     network_findings, network_timeline = collect_network_ioc_evidence(config)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
+    recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=verbose)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
     defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
@@ -3634,7 +3635,6 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     else:
         browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
     shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
-    recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     if config.get("skip_recovery_metadata"):
         recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
     else:
@@ -3910,6 +3910,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     network_findings, network_timeline = collect_network_ioc_evidence(config)
     emit_progress(progress, "Checking Prefetch artifacts", 22)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
+    emit_progress(progress, "Checking deleted file artifacts", 28)
+    recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     emit_progress(progress, "Checking file artifacts", 34)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
     emit_progress(progress, "Checking PowerShell history", 50)
@@ -3945,12 +3947,6 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     else:
         shellbag_findings, shellbag_timeline = [], []
         note_stage_skipped(config, progress, "ShellBag Analyzer context", stage_limitations, 80, 80)
-    emit_progress(progress, "Checking Recycle Bin context", 84)
-    if has_scan_time_for(config, 65):
-        recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
-    else:
-        recycle_findings, recycle_timeline = [], []
-        note_stage_skipped(config, progress, "Recycle Bin context", stage_limitations, 65, 84)
     emit_progress(progress, "Checking recovery metadata", 88)
     if config.get("skip_recovery_metadata"):
         recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
