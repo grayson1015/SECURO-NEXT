@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -8,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 PYTHON = Path(sys.executable)
 PACKAGER_ROOT = Path(tempfile.gettempdir()) / "securo_pyinstaller_cache"
+APP_NAME = "Securo"
 
 
 def run(args):
@@ -34,7 +36,7 @@ def main():
             "PyInstaller",
             "--noconfirm",
             "--clean",
-            "--onefile",
+            "--onedir",
             "--windowed",
             "--hidden-import",
             "tkinter",
@@ -49,7 +51,7 @@ def main():
             "--add-binary",
             f"{python_root / 'DLLs' / '_tkinter.pyd'};.",
             "--name",
-            "SecuroChecker",
+            APP_NAME,
             "--add-data",
             "config.json;.",
             "--add-data",
@@ -60,7 +62,21 @@ def main():
         env=env,
         check=True,
     )
-    print(ROOT / "dist" / "SecuroChecker.exe")
+    portable_dir = ROOT / "dist" / APP_NAME
+    tools_src = ROOT / "Tools"
+    tools_dst = portable_dir / "Tools"
+    if tools_src.exists():
+        shutil.copytree(tools_src, tools_dst, dirs_exist_ok=True)
+    for name in ("config.json", "securo_iocs.json"):
+        src = ROOT / name
+        if src.exists():
+            shutil.copy2(src, portable_dir / name)
+    downloads = ROOT / "public" / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    zip_base = downloads / APP_NAME
+    zip_path = shutil.make_archive(str(zip_base), "zip", ROOT / "dist", APP_NAME)
+    print(portable_dir / f"{APP_NAME}.exe")
+    print(zip_path)
 
 
 if __name__ == "__main__":

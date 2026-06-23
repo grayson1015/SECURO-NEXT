@@ -17,11 +17,11 @@ export default function DownloadPage() {
             <div className="flex items-center gap-4">
               <div className="rounded-md bg-primary/15 p-3 text-primary"><ShieldCheck /></div>
               <div>
-                <h2 className="text-xl font-bold">Securo.exe</h2>
-                <p className="mt-1 text-sm text-zinc-400">Windows GUI app. No Python install required.</p>
+                <h2 className="text-xl font-bold">Securo.zip</h2>
+                <p className="mt-1 text-sm text-zinc-400">Portable Windows folder with Securo.exe and forensic helper tools. No Python install required.</p>
               </div>
             </div>
-            <a className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-5 text-sm font-semibold text-black hover:brightness-110" href="/downloads/Securo.exe" download>
+            <a className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-5 text-sm font-semibold text-black hover:brightness-110" href="/downloads/Securo.zip" download>
               <Download size={18} /> Download
             </a>
           </div>

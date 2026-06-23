@@ -1,4 +1,4 @@
-# Roblox PC Checker
+# Securo
 
 Portable read-only Windows scanner focused on Roblox process interaction evidence.
 
@@ -7,23 +7,39 @@ Portable read-only Windows scanner focused on Roblox process interaction evidenc
 Run:
 
 ```powershell
-.\build.ps1
+python build.py
 ```
 
-The executable will be created in:
+The portable folder and website download ZIP will be created in:
 
 ```txt
-dist\RobloxPCChecker\RobloxPCChecker.exe
+dist\Securo\Securo.exe
+dist\Securo\Tools\
+public\downloads\Securo.zip
 ```
+
+Put approved forensic parser helpers in `Tools\` before building if you want the portable folder to include them:
+
+```txt
+PECmd.exe
+MFTECmd.exe
+SBECmd.exe
+JLECmd.exe
+SrumECmd.exe
+AmcacheParser.exe
+AppCompatCacheParser.exe
+```
+
+Set `external_forensic_tools_enabled` to `true` in `config.json` to let Securo run those helpers read-only with timeouts, write CSV output to `Documents\Securo\ToolOutput`, and import that evidence into the report.
 
 ## Usage
 
 ```powershell
-RobloxPCChecker.exe --api-base-url https://your-vercel-app.vercel.app --days 7
-RobloxPCChecker.exe --local-only --days 7
-RobloxPCChecker.exe --html-only
-RobloxPCChecker.exe --json-only
-RobloxPCChecker.exe --portable --no-color --verbose
+Securo.exe --api-base-url https://your-vercel-app.vercel.app --days 7
+Securo.exe --local-only --days 7
+Securo.exe --html-only
+Securo.exe --json-only
+Securo.exe --portable --no-color --verbose
 ```
 
 For the Securo website PIN flow, set `api_base_url` in `config.json`, set the `SECURO_API_BASE_URL`
