@@ -42,6 +42,7 @@ def test_config():
         "default_scan_profile": "standard",
         "scan_profiles": {},
         "storage_base_dir": "",
+        "prefetch_dir": "C:/Windows/Prefetch",
         "ioc_file": "securo_iocs.json",
         "iocs": checker.normalize_iocs({}),
         "known_bad_hashes": [],
@@ -197,6 +198,27 @@ class CoreTests(unittest.TestCase):
                 checker.scan_roots = original_roots
         self.assertTrue(findings)
         self.assertGreaterEqual(findings[0]["score"], 40)
+
+    def test_prefetch_scanner_extracts_embedded_suspicious_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pf = root / "POTASSIUM.EXE-1234ABCD.pf"
+            embedded = "C:\\Users\\timmy\\Downloads\\Potassium.exe\x00C:\\Users\\timmy\\Downloads\\Potassium.dll"
+            pf.write_bytes(b"SCCA" + embedded.encode("utf-16-le"))
+            now = dt.datetime.now().timestamp()
+            os.utime(pf, (now, now))
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            findings, timeline = checker.collect_prefetch_evidence(7, config, [])
+        self.assertTrue(findings)
+        self.assertEqual(findings[0]["name"], "Potassium.exe")
+        self.assertIn("prefetch_execution", findings[0]["evidence_types"])
+        self.assertTrue(any("Potassium.exe" in item for item in findings[0]["supporting_evidence"]))
+        self.assertTrue(any("potassium.exe" in event["text"].lower() for event in timeline))
+
+    def test_prefetch_name_parser_keeps_hyphenated_executor_names(self):
+        self.assertEqual(checker.prefetch_executable_name("SYNAPSE-Z.EXE-ABCDEF12.pf"), "SYNAPSE-Z.EXE")
+        self.assertEqual(checker.prefetch_executable_name("ROBLOXPLAYERBETA.EXE-12345678.pf"), "ROBLOXPLAYERBETA.EXE")
 
     def test_xeno_detection_categories_are_confirmed(self):
         config = test_config()

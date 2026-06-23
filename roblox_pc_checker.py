@@ -324,6 +324,7 @@ def load_config() -> dict:
     config.setdefault("default_scan_profile", "standard")
     config.setdefault("scan_profiles", {})
     config.setdefault("storage_base_dir", "")
+    config.setdefault("prefetch_dir", "C:/Windows/Prefetch")
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -1202,8 +1203,9 @@ def finding_has_later_modification(finding: dict) -> bool:
     return bool(accessed and first_seen and accessed > first_seen + dt.timedelta(seconds=60))
 
 
-def matching_prefetch_exists(finding: dict) -> bool:
-    folder = Path("C:/Windows/Prefetch")
+def matching_prefetch_exists(finding: dict, config: dict | None = None) -> bool:
+    config = config or {}
+    folder = Path(config.get("prefetch_dir") or "C:/Windows/Prefetch")
     if not safe_exists(folder):
         return True
     stem = Path(finding.get("name") or finding.get("path") or "").stem
@@ -1262,7 +1264,7 @@ def enrich_artifact_relationships(findings: list[dict], config: dict) -> None:
             add_detection(finding, "Untrusted File", "Multiple local heuristic flags matched an unsigned or untrusted artifact.", "High", 30)
         if {"packed", "ruin_mode"} <= set(finding.get("evidence_types", [])):
             add_detection(finding, "Generic Packed Mod", "Game/mod artifact shows packed or obfuscated traits.", "Medium", 25)
-        if finding_has_execution(finding) and not matching_prefetch_exists(finding) and (suspicious_name(finding.get("name", ""), config) or exploit_specific_artifact(finding, config)):
+        if finding_has_execution(finding) and not matching_prefetch_exists(finding, config) and (suspicious_name(finding.get("name", ""), config) or exploit_specific_artifact(finding, config)):
             add_detection(finding, "Prefetch Deleted", "Suspicious execution was observed but no matching Prefetch file is currently present.", "Medium", 25)
             finding["evidence_types"].append("prefetch_deleted")
 
@@ -2020,6 +2022,52 @@ def collect_process_evidence(days: int, config: dict, sessions: list[dict]) -> t
     return list(findings.values()), timeline
 
 
+def prefetch_executable_name(pf_name: str) -> str:
+    name = Path(pf_name).name
+    match = re.match(r"^(.+?\.exe)-[0-9A-F]{6,}\.pf$", name, re.I)
+    if match:
+        return match.group(1)
+    stem = Path(name).stem
+    if "-" in stem:
+        return stem.rsplit("-", 1)[0] + ".exe"
+    return stem + ".exe"
+
+
+def parse_prefetch_artifact(path: Path) -> dict:
+    # This is intentionally heuristic: it reads Prefetch metadata and embedded strings without modifying anything.
+    info = {"referenced_paths": [], "strings": [], "size": 0}
+    try:
+        data = path.read_bytes()
+        info["size"] = len(data)
+    except OSError:
+        return info
+    texts = []
+    for encoding in ("utf-16-le", "latin1"):
+        for blob in (data, data[1:]):
+            try:
+                decoded = blob.decode(encoding, errors="ignore")
+            except Exception:
+                continue
+            texts.append(decoded)
+    joined = "\n".join(texts)
+    path_pattern = r"(?:[A-Za-z]:\\|\\\\|\\Device\\HarddiskVolume\d+\\)[^\x00\r\n\t\"<>|]{3,260}"
+    paths = []
+    for match in re.finditer(path_pattern, joined, re.I):
+        value = match.group(0).strip()
+        if not value or len(value) > 260:
+            continue
+        if not re.search(r"\.(?:exe|dll|ps1|bat|cmd|vbs|js|ahk|jar|zip|rar|7z)\b", value, re.I):
+            continue
+        paths.append(value)
+    string_hits = []
+    for token in re.findall(r"[A-Za-z0-9_ .:\\/()$%-]{5,120}", joined):
+        if suspicious_text(token, {"suspicious_name_terms": list(EXPLOIT_FAMILY_TERMS) + ["inject", "loader", "executor", "bypass", "roblox"]}):
+            string_hits.append(token.strip())
+    info["referenced_paths"] = sorted(set(paths))[:40]
+    info["strings"] = sorted(set(s for s in string_hits if s))[:20]
+    return info
+
+
 def collect_running_processes(config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
     # Live process inventory is read-only and captures path/hash/signer/command-line context.
     findings = {}
@@ -2115,7 +2163,7 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
     # Prefetch records execution hints even when Security/Sysmon process creation logs are absent.
     findings = {}
     timeline = []
-    folder = Path("C:/Windows/Prefetch")
+    folder = Path(config.get("prefetch_dir") or "C:/Windows/Prefetch")
     if not safe_exists(folder):
         return [], []
     cut = cutoff(days)
@@ -2131,10 +2179,11 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
             continue
         if mtime < cut:
             continue
-        exe_name = pf.name.split("-")[0] + ".exe" if "-" in pf.name else pf.stem + ".exe"
+        exe_name = prefetch_executable_name(pf.name)
         if ROBLOX_EXE.lower().replace(".exe", "") in pf.name.lower():
             roblox_times.append(mtime)
             timeline.append({"time": mtime.isoformat(sep=" ", timespec="seconds"), "source": "Prefetch", "text": f"Prefetch execution hint for {ROBLOX_EXE}"})
+    suspicious_prefetch_by_name = defaultdict(int)
     for pf in entries:
         try:
             mtime = dt.datetime.fromtimestamp(pf.stat().st_mtime)
@@ -2142,19 +2191,55 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
             continue
         if mtime < cut:
             continue
-        exe_name = pf.name.split("-")[0] + ".exe" if "-" in pf.name else pf.stem + ".exe"
-        if not suspicious_name(exe_name, config):
+        exe_name = prefetch_executable_name(pf.name)
+        parsed = parse_prefetch_artifact(pf)
+        referenced_paths = parsed.get("referenced_paths", [])
+        executor_terms = [str(term).lower() for term in config.get("executor_confirmation_keywords", []) if str(term).strip()]
+        matched_paths = [
+            item for item in referenced_paths
+            if suspicious_text(item, config)
+            or ioc_text_matches(item, config)
+            or any(term in item.lower() for term in executor_terms)
+            or (user_writable_path(item) and suspicious_extension(item, config))
+        ]
+        matched_paths = sorted(matched_paths, key=lambda item: (Path(item).suffix.lower() != ".exe", item.lower()))
+        text_blob = " ".join([pf.name, exe_name] + referenced_paths + parsed.get("strings", []))
+        ioc_hit = bool(ioc_text_matches(text_blob, config))
+        executor_prefetch_hit = any(term in text_blob.lower() for term in executor_terms)
+        suspicious_hit = suspicious_name(exe_name, config) or suspicious_text(text_blob, config) or executor_prefetch_hit or bool(matched_paths) or ioc_hit
+        if not suspicious_hit:
             continue
+        suspicious_prefetch_by_name[exe_name.lower()] += 1
         near = find_near_roblox_launch(mtime, roblox_times) or near_any_session(mtime, sessions)
-        finding = make_finding("", exe_name, "prefetch", config)
+        primary_path = matched_paths[0] if matched_paths else ""
+        finding = make_finding(primary_path, exe_name, "prefetch", config)
         finding["first_seen"] = mtime.isoformat(sep=" ", timespec="seconds")
         add_score(finding, config["score_rules"]["prefetch_execution"], "Prefetch indicates suspicious executable ran")
+        add_detection(finding, "Executed Suspicious File", "Prefetch indicates a suspicious executable or script was executed.", "High", 25)
         if near:
             add_score(finding, config["score_rules"]["near_roblox_session"], "Prefetch timestamp is within 30 minutes of Roblox activity")
         finding["supporting_evidence"].append(f"Prefetch file: {pf}")
+        finding["supporting_evidence"].append(f"Prefetch executable name: {exe_name}")
+        if referenced_paths:
+            finding["supporting_evidence"].append("Prefetch referenced paths: " + "; ".join(referenced_paths[:8]))
+        if parsed.get("strings"):
+            finding["supporting_evidence"].append("Prefetch suspicious strings: " + "; ".join(parsed.get("strings", [])[:8]))
         finding["evidence_types"].append("prefetch_execution")
+        if matched_paths:
+            finding["evidence_types"].append("prefetch_path_context")
+        for path_text in matched_paths[:4]:
+            if re.match(r"^[A-Za-z]:\\", path_text) and not Path(path_text).exists():
+                add_detection(finding, "Executed & Deleted", f"Prefetch references suspicious executable path that is no longer present: {path_text}", "High", 35)
+                finding["evidence_types"].append("executed_deleted")
+                break
+        apply_ioc_matches(finding, config, text_blob)
         merge_findings(findings, finding)
-        timeline.append({"time": finding["first_seen"], "source": "Prefetch", "text": f"Suspicious executable execution hint: {exe_name}"})
+        timeline.append({"time": finding["first_seen"], "source": "Prefetch", "text": f"Suspicious executable execution hint: {exe_name} from {pf.name}"})
+    for finding in findings.values():
+        count = suspicious_prefetch_by_name.get(str(finding.get("name", "")).lower(), 0)
+        if count >= 3:
+            add_detection(finding, "Duplicate Prefetch Behavior", f"Multiple Prefetch variants were present for the same suspicious executable name ({count}).", "Medium", 15)
+            finding["evidence_types"].append("duplicate_prefetch")
     return list(findings.values()), timeline
 
 
