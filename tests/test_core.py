@@ -44,6 +44,9 @@ def test_config():
         "storage_base_dir": "",
         "prefetch_dir": "C:/Windows/Prefetch",
         "recycle_bin_roots": [],
+        "forensic_export_dirs": [],
+        "forensic_export_max_files": 80,
+        "forensic_export_max_rows": 5000,
         "collect_safe_account_identifiers": False,
         "collect_system_reset_evidence": False,
         "ioc_file": "securo_iocs.json",
@@ -443,6 +446,39 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Amcache Execution/Install Context", findings[0]["detection_categories"])
         self.assertIn("amcache_context", findings[0]["evidence_types"])
         self.assertTrue(any("Xeno.exe" in event["text"] for event in timeline))
+
+    def test_external_pecmd_export_adds_prefetch_key_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export = Path(tmp) / "PECmd_Output.csv"
+            export.write_text(
+                "ExecutableName,LastRun,SourceFile\n"
+                "Potassium.exe,2026-06-02 17:55:00,C:\\Windows\\Prefetch\\POTASSIUM.EXE-12345678.pf\n",
+                encoding="utf-8",
+            )
+            config = test_config()
+            config["forensic_export_dirs"] = [tmp]
+            findings, timeline = checker.collect_external_forensic_exports(30, config, [])
+        self.assertTrue(findings)
+        self.assertIn("prefetch_execution", findings[0]["evidence_types"])
+        self.assertTrue(any(item.startswith("PREFETCH FILE:") for item in findings[0]["supporting_evidence"]))
+        self.assertTrue(any("PREFETCH FILE: Potassium.exe" in event["text"] for event in timeline))
+
+    def test_external_mftecmd_export_adds_deleted_file_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export = Path(tmp) / "MFTECmd_Output.csv"
+            export.write_text(
+                "FullPath,IsDeleted,DeletedTime\n"
+                "C:\\Users\\Test\\Downloads\\Wave.exe,true,2026-06-02 18:05:00\n",
+                encoding="utf-8",
+            )
+            config = test_config()
+            config["forensic_export_dirs"] = [tmp]
+            findings, timeline = checker.collect_external_forensic_exports(30, config, [])
+        self.assertTrue(findings)
+        self.assertIn("File Deletion", findings[0]["detection_categories"])
+        self.assertIn("recovery", findings[0]["evidence_types"])
+        self.assertTrue(any(item.startswith("DELETED FILE:") for item in findings[0]["supporting_evidence"]))
+        self.assertTrue(any("DELETED FILE: C:\\Users\\Test\\Downloads\\Wave.exe" in event["text"] for event in timeline))
 
     def test_key_artifacts_collect_prefetch_and_deleted_files_for_report(self):
         finding = checker.make_finding("C:/Users/Test/Downloads/Example.exe", "Example.exe", "unit", test_config())

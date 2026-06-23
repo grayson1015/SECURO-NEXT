@@ -330,6 +330,9 @@ def load_config() -> dict:
     config.setdefault("recycle_bin_roots", [])
     config.setdefault("jump_list_roots", [])
     config.setdefault("amcache_path", "C:/Windows/AppCompat/Programs/Amcache.hve")
+    config.setdefault("forensic_export_dirs", [])
+    config.setdefault("forensic_export_max_files", 80)
+    config.setdefault("forensic_export_max_rows", 5000)
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -367,6 +370,7 @@ def scan_transparency_metadata() -> dict:
             "Startup folders, Run registry keys, scheduled tasks, services, and WMI persistence metadata",
             "Downloads, Desktop, Documents, AppData, Temp, ProgramData, and Roblox-related folders",
             "Prefetch, deleted-file metadata, Jump Lists, Amcache string context, Windows Security/Sysmon event logs when available, Defender artifacts, browser download metadata, ShellBag context, and Recycle Bin metadata",
+            "Optional forensic parser CSV exports from PECmd, MFTECmd, SBECmd, JLECmd, SrumECmd, AmcacheParser, and AppCompatCacheParser when placed in the configured Securo ToolOutput folders",
             "Roblox logs including user ID, username, display name when available, place ID/game ID, job ID, session time, duration, LoadClientSettings lines, and FastFlags",
             "Safe account identifier context for Roblox and Discord when available, excluding tokens, cookies, Local Storage, IndexedDB, cache, and private messages",
             "Windows install/reset context such as install date, setup logs, recovery folders, and setup event-log entries",
@@ -2067,6 +2071,195 @@ def forensic_parser_tools_available() -> bool:
     return any(safe_exists(root / name) for name in tool_names)
 
 
+def forensic_export_dirs(config: dict | None = None) -> list[Path]:
+    configured = (config or {}).get("forensic_export_dirs") or []
+    roots = [Path(os.path.expandvars(str(root))).expanduser() for root in configured]
+    roots.extend([
+        storage_root(config or {}) / "ToolOutput",
+        app_dir() / "ToolOutput",
+    ])
+    deduped = []
+    seen = set()
+    for root in roots:
+        key = str(root).lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(root)
+    return deduped
+
+
+def forensic_exports_available(config: dict | None = None) -> bool:
+    for root in forensic_export_dirs(config or {}):
+        try:
+            if root.exists() and any(root.rglob("*.csv")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def forensic_export_family(path: Path, headers: list[str]) -> str:
+    name = path.name.lower()
+    header_text = " ".join(headers).lower()
+    text = name + " " + header_text
+    if "pecmd" in text or "prefetch" in text:
+        return "PECmd"
+    if "mftecmd" in text or "mft" in text or "deleted" in text:
+        return "MFTECmd"
+    if "sbecmd" in text or "shellbag" in text or "shell bag" in text:
+        return "SBECmd"
+    if "jlecmd" in text or "jumplist" in text or "jump list" in text:
+        return "JLECmd"
+    if "srum" in text:
+        return "SrumECmd"
+    if "amcache" in text:
+        return "AmcacheParser"
+    if "appcompat" in text or "shimcache" in text:
+        return "AppCompatCacheParser"
+    return "Forensic Export"
+
+
+def csv_value(row: dict, *names: str) -> str:
+    folded = {str(k).strip().lower().replace(" ", "").replace("_", ""): v for k, v in row.items()}
+    for name in names:
+        key = name.strip().lower().replace(" ", "").replace("_", "")
+        value = folded.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def forensic_row_time(row: dict) -> dt.datetime | None:
+    for key in (
+        "Timestamp", "Time", "Created", "Created0x10", "Modified", "LastModified", "LastModified0x30",
+        "LastRun", "LastRun0", "LastRunTime", "LastWriteTime", "KeyLastWriteTimestamp",
+        "SourceCreated", "SourceModified", "DeletedTime", "DeletionTime",
+    ):
+        parsed = parse_dt(csv_value(row, key))
+        if parsed:
+            return parsed
+    return None
+
+
+def forensic_row_path(row: dict) -> str:
+    for key in (
+        "FullPath", "Path", "FilePath", "TargetPath", "LocalPath", "ExecutablePath",
+        "ProgramPath", "ApplicationPath", "Name", "Filename", "FileName", "ExecutableName",
+        "SourceFile", "SourceFilename", "Application", "AppId",
+    ):
+        value = csv_value(row, key)
+        if value:
+            return value
+    return ""
+
+
+def forensic_row_deleted(row: dict) -> bool:
+    text = " ".join(str(v) for v in row.values()).lower()
+    if any(marker in text for marker in ("isdeleted=true", "deleted=true", " in use=false")):
+        return True
+    for key in ("IsDeleted", "Deleted", "FileDeleted", "DeletedTime", "DeletionTime"):
+        value = csv_value(row, key).lower()
+        if value in {"true", "yes", "1", "deleted"} or (key.lower().endswith("time") and value):
+            return True
+    return False
+
+
+def collect_external_forensic_exports(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
+    # Optional CSV exports from common forensic tools give Securo stronger artifact coverage without slow full-disk brute force.
+    findings = {}
+    timeline = []
+    cut = cutoff(days)
+    max_files = int(config.get("forensic_export_max_files") or 80)
+    max_rows = int(config.get("forensic_export_max_rows") or 5000)
+    scanned_files = 0
+    scanned_rows = 0
+    for root in forensic_export_dirs(config):
+        if not safe_exists(root):
+            continue
+        try:
+            csv_files = sorted(root.rglob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            continue
+        for csv_path in csv_files:
+            if scanned_files >= max_files or scanned_rows >= max_rows:
+                break
+            scanned_files += 1
+            try:
+                with csv_path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+                    reader = csv.DictReader(f)
+                    headers = list(reader.fieldnames or [])
+                    family = forensic_export_family(csv_path, headers)
+                    for row in reader:
+                        if scanned_rows >= max_rows:
+                            break
+                        scanned_rows += 1
+                        when = forensic_row_time(row)
+                        if when and when < cut:
+                            continue
+                        path_text = forensic_row_path(row)
+                        row_blob = " ".join([str(csv_path), family, path_text] + [str(v) for v in row.values()])
+                        if not path_text and not suspicious_text(row_blob, config) and not ioc_text_matches(row_blob, config):
+                            continue
+
+                        is_prefetch = family == "PECmd" or path_text.lower().endswith(".pf") or "prefetch" in row_blob.lower()
+                        is_deleted = forensic_row_deleted(row)
+                        is_suspicious = (
+                            suspicious_text(row_blob, config)
+                            or bool(ioc_text_matches(row_blob, config))
+                            or (path_text and user_writable_path(path_text) and suspicious_extension(path_text, config))
+                            or is_deleted
+                            or is_prefetch
+                        )
+                        if family not in {"PECmd", "MFTECmd"} and not is_suspicious:
+                            continue
+
+                        source = f"{family} Export"
+                        name = Path(path_text).name if path_text else source
+                        reason = f"{source} row references {path_text or 'artifact context'}"
+                        finding = make_possible_context_finding(path_text or str(csv_path), name, source, reason, when, config)
+                        finding["supporting_evidence"].append(f"Forensic export CSV: {csv_path}")
+                        finding["supporting_evidence"].append(f"Forensic export source: {family}")
+                        finding["evidence_types"].append("external_forensic_export")
+                        if is_prefetch:
+                            exe = prefetch_executable_name(name) if name.lower().endswith(".pf") else name
+                            add_detection(finding, "Prefetch Execution", "External PECmd/Prefetch export indicates this executable ran.", "Info", 5)
+                            finding["supporting_evidence"].append(f"PREFETCH FILE: {exe}")
+                            finding["evidence_types"].append("prefetch_execution")
+                            timeline.append({"time": finding["first_seen"], "source": source, "text": f"PREFETCH FILE: {exe} from {csv_path.name}"})
+                        if is_deleted:
+                            add_detection(finding, "File Deletion", "External forensic export indicates this file was deleted.", "Info", 5)
+                            finding["supporting_evidence"].append(f"DELETED FILE: {path_text or name}")
+                            finding["evidence_types"].append("recovery")
+                            timeline.append({"time": finding["first_seen"], "source": source, "text": f"DELETED FILE: {path_text or name}"})
+                        if family == "MFTECmd" and is_deleted and (suspicious_text(row_blob, config) or ioc_text_matches(row_blob, config)):
+                            add_detection(finding, "Suspicious File Deletion/Execution/Modification", "MFT export shows a suspicious deleted or modified file artifact.", "High", 30)
+                            finding["evidence_types"].append("executed_deleted")
+                        if family == "SBECmd":
+                            add_detection(finding, "ShellBag Analyzer Context", "ShellBag export shows folder browsing context for a suspicious or review-worthy path.", "Medium", 15)
+                            finding["evidence_types"].append("shellbag_context")
+                        elif family == "JLECmd":
+                            add_detection(finding, "Jump List Recent Item Context", "Jump List export referenced a suspicious or review-worthy recent item.", "Medium", 15)
+                            finding["evidence_types"].append("jump_list_context")
+                        elif family == "SrumECmd":
+                            add_detection(finding, "SRUM App/Network Usage Context", "SRUM export referenced app or network usage context for a suspicious item.", "Medium", 15)
+                            finding["evidence_types"].append("srum_context")
+                        elif family == "AmcacheParser":
+                            add_detection(finding, "Amcache Execution/Install Context", "Amcache export referenced execution or install context.", "Medium", 20)
+                            finding["evidence_types"].append("amcache_context")
+                        elif family == "AppCompatCacheParser":
+                            add_detection(finding, "ShimCache/AppCompat Context", "AppCompat/ShimCache export referenced execution compatibility context.", "Medium", 20)
+                            finding["evidence_types"].append("appcompat_context")
+                        if near_any_session(when, sessions):
+                            add_score(finding, config["score_rules"].get("near_roblox_session", 25), f"{family} export timestamp is near Roblox activity")
+                        apply_ioc_matches(finding, config, row_blob)
+                        merge_findings(findings, finding)
+                        if not is_prefetch and not is_deleted:
+                            timeline.append({"time": finding["first_seen"], "source": source, "text": reason})
+            except (OSError, csv.Error):
+                continue
+    return list(findings.values()), timeline
+
+
 def extract_artifact_strings(path: Path, max_bytes: int = 2_000_000) -> dict:
     info = {"referenced_paths": [], "strings": [], "size": 0}
     try:
@@ -2118,6 +2311,7 @@ def evidence_quality(days: int) -> dict:
         "AppCompat/ShimCache hive available": safe_exists(Path("C:/Windows/System32/config/SYSTEM")),
         "MFT direct access available": safe_exists(Path("C:/$MFT")),
         "External forensic parser tools bundled": forensic_parser_tools_available(),
+        "External forensic parser exports available": forensic_exports_available({}),
         "Defender logs available": defender_exists,
         "Defender history folders available": safe_exists(Path("C:/ProgramData/Microsoft/Windows Defender/Scans/History/Service")),
         "PowerShell history available": safe_glob_any(Path(os.environ.get("APPDATA", "")), "Microsoft/Windows/PowerShell/PSReadLine/*history*.txt"),
@@ -3765,6 +3959,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
     amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
+    external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=verbose)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
     defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
@@ -3793,6 +3988,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + recycle_timeline
         + jump_list_timeline
         + amcache_timeline
+        + external_forensic_timeline
         + file_timeline
         + ps_timeline
         + defender_timeline
@@ -3804,7 +4000,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -4056,6 +4252,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     emit_progress(progress, "Checking forensic app artifacts", 31)
     jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
     amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
+    emit_progress(progress, "Checking forensic parser exports", 32)
+    external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
     emit_progress(progress, "Checking file artifacts", 34)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
     emit_progress(progress, "Checking PowerShell history", 50)
@@ -4128,6 +4326,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + recycle_timeline
         + jump_list_timeline
         + amcache_timeline
+        + external_forensic_timeline
         + file_timeline
         + ps_timeline
         + defender_timeline
@@ -4139,7 +4338,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)

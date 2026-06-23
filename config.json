@@ -38,6 +38,9 @@
   "storage_base_dir": "",
   "prefetch_dir": "C:/Windows/Prefetch",
   "recycle_bin_roots": [],
+  "forensic_export_dirs": [],
+  "forensic_export_max_files": 80,
+  "forensic_export_max_rows": 5000,
   "ioc_file": "securo_iocs.json",
   "known_bad_hashes": [],
   "executor_confirmation_keywords": [
