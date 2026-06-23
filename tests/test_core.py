@@ -824,6 +824,21 @@ class CoreTests(unittest.TestCase):
         self.assertIsInstance(result[0]["time"], str)
         self.assertEqual(result[1]["source"], "String")
 
+    def test_json_safe_serializes_nested_datetimes(self):
+        report = {
+            "scanTime": dt.datetime(2026, 6, 23, 1, 2, 3),
+            "timeline": [{"time": dt.datetime(2026, 6, 23, 1, 2, 4), "source": "Unit", "text": "ok"}],
+            "nested": {"values": {dt.datetime(2026, 6, 23, 1, 2, 5)}},
+            "path": Path("C:/Securo/example.exe"),
+        }
+        safe = checker.json_safe(report)
+        json.dumps(safe)
+        self.assertEqual(safe["scanTime"], "2026-06-23 01:02:03")
+        self.assertIsInstance(safe["timeline"][0]["time"], str)
+        self.assertIsInstance(safe["nested"]["values"][0], str)
+        self.assertIn("Securo", safe["path"])
+        self.assertTrue(safe["path"].endswith("example.exe"))
+
     def test_run_scan_with_timeout_returns_terminal_report(self):
         config = test_config()
         original = checker.build_scan_report_with_progress

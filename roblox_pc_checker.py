@@ -959,6 +959,21 @@ def first_time(*values) -> str:
     return min(parsed).isoformat(sep=" ", timespec="seconds")
 
 
+def json_safe(value):
+    if isinstance(value, dt.datetime):
+        parsed = parse_dt(value)
+        return parsed.isoformat(sep=" ", timespec="seconds") if parsed else str(value)
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(v) for v in value]
+    return value
+
+
 def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     norm = path if "://" in (path or "") or str(path or "").startswith(NETWORK_PATH_PREFIXES) else (normalize_path(path) if path else "")
     suppressed = securo_internal_path(norm, config)
@@ -3652,7 +3667,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         if highest_result not in ["Confirmed Exploit", "Suspicious"]
         else "Confirmed exploit or suspicious Roblox exploit/injection evidence was found in available artifacts.",
     }
-    return report
+    return json_safe(report)
 
 
 def emit_progress(progress, stage: str, percent: int | None = None, files_scanned: int | None = None):
@@ -3986,10 +4001,11 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         else "Confirmed exploit or suspicious Roblox exploit/injection evidence was found in available artifacts.",
     }
     emit_progress(progress, "Scan completed", 100)
-    return report
+    return json_safe(report)
 
 
 def save_local_reports(report: dict, config: dict, html_only=False, json_only=False) -> list[Path]:
+    report = json_safe(report)
     dirs = ensure_storage_dirs(config)
     report_base = dirs["reports"] / f"securo_check_{now_stamp()}"
     written = []
@@ -4489,6 +4505,7 @@ def verify_pin(api_base_url: str, pin: str) -> tuple[bool, dict | str]:
 
 def upload_report(api_base_url: str, session_id: str, upload_token: str, report: dict) -> tuple[bool, str]:
     url = api_base_url.rstrip("/") + "/api/upload-report"
+    report = json_safe(report)
     upload_report_data = compact_report_for_upload(report)
     payload = {
         "pin": upload_token,
