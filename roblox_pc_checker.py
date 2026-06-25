@@ -35,6 +35,7 @@ CONFIRMED_EXPLOIT_CATEGORIES = {
     "Skript Loader Trace",
     "Confirmed FastFlag Injector",
     "Confirmed Executor Artifact",
+    "Confirmed Prefetch Exploit",
     "Confirmed IOC",
 }
 HIGH_CONFIDENCE_CHEAT_CATEGORIES = {"S1", "DLL", "BSoD", "S2", "C3", "C4", "A"}
@@ -84,6 +85,7 @@ SPECIFIC_DETECTION_CATEGORIES = {
     "Suspicious File Modification",
     "Suspicious File Execution",
     "File Deletion",
+    "PREFETCH",
     "Prefetch Execution",
     "Deleted Prefetch File",
     "Prefetch Deleted",
@@ -1225,6 +1227,39 @@ def flagged_executor_binary_match(finding: dict, config: dict) -> bool:
     return already_flagged_by_detection(finding) and executor_filename_keyword_match(finding, config)
 
 
+def prefetch_confirmation_match(exe_name: str, referenced_paths: list[str], parsed_strings: list[str], config: dict) -> tuple[bool, str]:
+    text = " ".join([exe_name, *referenced_paths, *parsed_strings]).lower()
+    normalized_exe = normalize_executor_keyword(Path(exe_name or "").stem)
+    executor_names = {
+        normalize_executor_keyword(str(keyword))
+        for keyword in config.get("executor_confirmation_keywords", [])
+        if str(keyword).strip()
+    }
+    if normalized_exe and normalized_exe in executor_names:
+        return True, f"Prefetch executable name matches known exploit family: {exe_name}"
+    if re.search(r"(?<![a-z0-9])(clumsy|windivert)(?![a-z0-9])", text, re.I):
+        return True, "Prefetch contains Clumsy/WinDivert network-manipulation evidence."
+    fastflag_terms = ("fastflag", "fflag", "dfflag", "dfint", "flog", "clientappsettings")
+    if any(term in text for term in fastflag_terms) and ROBLOX_EXE.lower() not in (exe_name or "").lower():
+        return True, "Prefetch contains FastFlag or ClientAppSettings evidence for a non-Roblox executable."
+    return False, ""
+
+
+def prefetch_only_without_confirmed_indicator(finding: dict) -> bool:
+    types = set(finding.get("evidence_types", []))
+    if "prefetch_execution" not in types or "prefetch_confirmed_indicator" in types:
+        return False
+    direct_types = {
+        "sysmon_remote_thread",
+        "sysmon_process_access",
+        "suspicious_module_load",
+        "confirmed_fastflag_injector",
+        "confirmed_executor_artifact",
+        "ioc_hash",
+    }
+    return not bool(types & direct_types)
+
+
 def apply_executor_keyword_check(finding: dict, config: dict):
     if executor_keyword_match(finding, config):
         add_detection(finding, "Executor Keyword Match", "Executor-related keyword found on an already-flagged artifact", "Medium", config["score_rules"].get("suspicious_name", 10))
@@ -1434,6 +1469,10 @@ def sample_verified_exploit_artifact(finding: dict) -> bool:
 
 def confirmed_exploit_artifact(finding: dict, config: dict) -> bool:
     categories = set(finding.get("detection_categories", []))
+    if prefetch_only_without_confirmed_indicator(finding):
+        return False
+    if "prefetch_confirmed_indicator" in set(finding.get("evidence_types", [])):
+        return True
     if flagged_executor_binary_match(finding, config):
         return True
     if sample_verified_exploit_artifact(finding):
@@ -1458,6 +1497,8 @@ def finding_confidence_level(finding: dict) -> str:
         return confidence_to_legacy(finding.get("forensic_confidence", "Low"))
     if finding.get("classification") == "Confirmed Exploit":
         return "Confirmed"
+    if prefetch_only_without_confirmed_indicator(finding):
+        return "Possible"
     categories = set(finding.get("detection_categories", []))
     evidence_types = set(finding.get("evidence_types", []))
     evidence_count = len(categories) + len(evidence_types) + min(len(finding.get("supporting_evidence", [])), 3)
@@ -1640,6 +1681,8 @@ def categorize_finding(finding: dict, config: dict) -> str:
         return "Trusted Safe" if not categories else "Likely False Positive"
     if (dependency or finding.get("low_signal_path")) and not behavior and not exploit_specific:
         return "Likely False Positive" if categories else "Trusted Safe"
+    if prefetch_only_without_confirmed_indicator(finding):
+        return "Indicator Found"
     if "possible_context" in types and categories & {"Network Lag Tool / WinDivert Manipulation", "Suspicious File Deletion", "Suspicious DLL Deletion", "Prefetch Deleted"}:
         return "Suspicious"
     if "possible_context" in types:
@@ -2451,9 +2494,13 @@ def collect_external_forensic_exports(days: int, config: dict, sessions: list[di
                         finding["evidence_types"].append("external_forensic_export")
                         if is_prefetch:
                             exe = prefetch_executable_name(name) if name.lower().endswith(".pf") else name
-                            add_detection(finding, "Prefetch Execution", "External PECmd/Prefetch export indicates this executable ran.", "Info", 5)
+                            add_detection(finding, "PREFETCH", "External PECmd/Prefetch export indicates this executable ran.", "Info", 5)
                             finding["supporting_evidence"].append(f"PREFETCH FILE: {exe}")
                             finding["evidence_types"].append("prefetch_execution")
+                            confirmed, reason = prefetch_confirmation_match(exe, [path_text] if path_text else [], [row_blob], config)
+                            if confirmed:
+                                add_detection(finding, "Confirmed Prefetch Exploit", reason, "High Risk", 70)
+                                finding["evidence_types"].append("prefetch_confirmed_indicator")
                             timeline.append({"time": finding["first_seen"], "source": source, "text": f"PREFETCH FILE: {exe} from {csv_path.name}"})
                         if is_deleted:
                             add_detection(finding, "File Deletion", "External forensic export indicates this file was deleted.", "Info", 5)
@@ -2776,6 +2823,49 @@ def is_windows_admin() -> bool:
         return False
 
 
+def ensure_windows_admin() -> bool:
+    """Relaunch the GUI through Windows UAC before any scan UI is created."""
+    if os.name != "nt" or is_windows_admin():
+        return True
+    try:
+        import ctypes
+
+        if getattr(sys, "frozen", False):
+            executable = sys.executable
+            arguments = list(sys.argv[1:])
+        else:
+            executable = sys.executable
+            arguments = [str(Path(__file__).resolve()), *sys.argv[1:]]
+        parameters = subprocess.list2cmdline(arguments)
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            parameters,
+            str(app_dir()),
+            1,
+        )
+        if int(result) > 32:
+            return False
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Securo requires administrator access to inspect Windows Prefetch and protected forensic artifacts.",
+            "Securo",
+            0x10,
+        )
+    except Exception as exc:
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                f"Securo could not request administrator access.\n\n{exc}",
+                "Securo",
+                0x10,
+            )
+        except Exception:
+            pass
+    return False
+
+
 def prefetch_registry_enabled() -> bool | None:
     out = run_command(
         [
@@ -3038,7 +3128,16 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
         primary_path = matched_paths[0] if matched_paths else ""
         finding = make_finding(primary_path, exe_name, "prefetch", config)
         finding["first_seen"] = mtime.isoformat(sep=" ", timespec="seconds")
-        add_detection(finding, "Prefetch Execution", "Prefetch indicates this executable ran.", "Info", 5)
+        add_detection(finding, "PREFETCH", "Prefetch indicates this executable ran.", "Info", 5)
+        confirmed_prefetch, confirmed_reason = prefetch_confirmation_match(
+            exe_name,
+            referenced_paths,
+            parsed.get("strings", []),
+            config,
+        )
+        if confirmed_prefetch:
+            add_detection(finding, "Confirmed Prefetch Exploit", confirmed_reason, "High Risk", 70)
+            finding["evidence_types"].append("prefetch_confirmed_indicator")
         if suspicious_hit:
             add_score(finding, config["score_rules"]["prefetch_execution"], "Prefetch indicates suspicious executable ran")
             add_detection(finding, "Executed Suspicious File", "Prefetch indicates a suspicious executable or script was executed.", "High", 25)
@@ -5922,6 +6021,8 @@ def main():
     args = parse_args()
     if args.cli:
         return cli_main(args)
+    if not ensure_windows_admin():
+        return 0
     return gui_main(args)
 
 

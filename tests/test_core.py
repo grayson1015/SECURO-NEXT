@@ -248,10 +248,63 @@ class CoreTests(unittest.TestCase):
             config["prefetch_dir"] = tmp
             findings, timeline = checker.collect_prefetch_evidence(7, config, [])
         self.assertTrue(findings)
-        self.assertIn("Prefetch Execution", findings[0]["detection_categories"])
+        finalized = checker.finalize_findings(findings, config)
+        self.assertIn("PREFETCH", findings[0]["detection_categories"])
         self.assertIn("prefetch_execution", findings[0]["evidence_types"])
+        self.assertEqual(finalized[0]["classification"], "Indicator Found")
+        self.assertEqual(finalized[0]["confidence_level"], "Possible")
         self.assertTrue(any("notepad.exe" in event["text"].lower() for event in timeline))
         self.assertTrue(any(item.startswith("PREFETCH FILE:") for item in findings[0]["supporting_evidence"]))
+
+    def test_known_executor_prefetch_is_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "XENO.EXE-1234ABCD.pf"
+            pf.write_bytes(b"SCCA")
+            now = dt.datetime.now().timestamp()
+            os.utime(pf, (now, now))
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            findings, _ = checker.collect_prefetch_evidence(7, config, [])
+            finalized = checker.finalize_findings(findings, config)
+        self.assertIn("Confirmed Prefetch Exploit", finalized[0]["detection_categories"])
+        self.assertIn("prefetch_confirmed_indicator", finalized[0]["evidence_types"])
+        self.assertEqual(finalized[0]["classification"], "Confirmed Exploit")
+
+    def test_clumsy_prefetch_is_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "CLUMSY.EXE-1234ABCD.pf"
+            pf.write_bytes(b"SCCA")
+            now = dt.datetime.now().timestamp()
+            os.utime(pf, (now, now))
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            findings, _ = checker.collect_prefetch_evidence(7, config, [])
+            finalized = checker.finalize_findings(findings, config)
+        self.assertEqual(finalized[0]["classification"], "Confirmed Exploit")
+
+    def test_fastflag_prefetch_is_confirmed_for_non_roblox_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "TOOL.EXE-1234ABCD.pf"
+            pf.write_bytes(b"SCCA" + "C:\\Users\\Test\\Downloads\\ClientAppSettings.json".encode("utf-16-le"))
+            now = dt.datetime.now().timestamp()
+            os.utime(pf, (now, now))
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            findings, _ = checker.collect_prefetch_evidence(7, config, [])
+            finalized = checker.finalize_findings(findings, config)
+        self.assertEqual(finalized[0]["classification"], "Confirmed Exploit")
+
+    def test_roblox_prefetch_with_client_settings_is_not_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "ROBLOXPLAYERBETA.EXE-1234ABCD.pf"
+            pf.write_bytes(b"SCCA" + "C:\\Users\\Test\\AppData\\Local\\Roblox\\ClientSettings.json".encode("utf-16-le"))
+            now = dt.datetime.now().timestamp()
+            os.utime(pf, (now, now))
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            findings, _ = checker.collect_prefetch_evidence(7, config, [])
+            finalized = checker.finalize_findings(findings, config)
+        self.assertNotEqual(finalized[0]["classification"], "Confirmed Exploit")
 
     def test_prefetch_inventory_reports_readable_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -291,6 +344,14 @@ class CoreTests(unittest.TestCase):
                 checker.is_windows_admin = original_admin
         self.assertFalse(inventory["readable"])
         self.assertIn("administrator", inventory["error"].lower())
+
+    def test_admin_guard_allows_already_elevated_process(self):
+        original_admin = checker.is_windows_admin
+        try:
+            checker.is_windows_admin = lambda: True
+            self.assertTrue(checker.ensure_windows_admin())
+        finally:
+            checker.is_windows_admin = original_admin
 
     def test_xeno_detection_categories_are_confirmed(self):
         config = test_config()
