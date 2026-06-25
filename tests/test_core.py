@@ -50,6 +50,8 @@ def test_config():
         "forensic_export_max_rows": 5000,
         "external_forensic_tools_enabled": False,
         "external_forensic_tools_dir": "",
+        "prefetch_parser_enabled": False,
+        "prefetch_parser_timeout_seconds": 25,
         "external_forensic_tool_timeout_seconds": 55,
         "collect_safe_account_identifiers": False,
         "collect_system_reset_evidence": False,
@@ -250,6 +252,45 @@ class CoreTests(unittest.TestCase):
         self.assertIn("prefetch_execution", findings[0]["evidence_types"])
         self.assertTrue(any("notepad.exe" in event["text"].lower() for event in timeline))
         self.assertTrue(any(item.startswith("PREFETCH FILE:") for item in findings[0]["supporting_evidence"]))
+
+    def test_prefetch_inventory_reports_readable_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "EXAMPLE.EXE-1234ABCD.pf"
+            pf.write_bytes(b"SCCA")
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            original_enabled = checker.prefetch_registry_enabled
+            original_admin = checker.is_windows_admin
+            original_install = checker.windows_install_time
+            try:
+                checker.prefetch_registry_enabled = lambda: True
+                checker.is_windows_admin = lambda: True
+                checker.windows_install_time = lambda: dt.datetime.now() - dt.timedelta(days=2)
+                inventory = checker.prefetch_inventory(config)
+            finally:
+                checker.prefetch_registry_enabled = original_enabled
+                checker.is_windows_admin = original_admin
+                checker.windows_install_time = original_install
+        self.assertTrue(inventory["readable"])
+        self.assertEqual(inventory["count"], 1)
+        self.assertTrue(inventory["oldest"])
+        self.assertTrue(inventory["newest"])
+
+    def test_prefetch_inventory_explains_non_admin_empty_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = test_config()
+            config["prefetch_dir"] = tmp
+            original_enabled = checker.prefetch_registry_enabled
+            original_admin = checker.is_windows_admin
+            try:
+                checker.prefetch_registry_enabled = lambda: True
+                checker.is_windows_admin = lambda: False
+                inventory = checker.prefetch_inventory(config)
+            finally:
+                checker.prefetch_registry_enabled = original_enabled
+                checker.is_windows_admin = original_admin
+        self.assertFalse(inventory["readable"])
+        self.assertIn("administrator", inventory["error"].lower())
 
     def test_xeno_detection_categories_are_confirmed(self):
         config = test_config()
@@ -536,6 +577,32 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(Path(calls[0][0]).name, "PECmd.exe")
         self.assertIn("--csv", calls[0])
         self.assertTrue(config.get("_external_forensic_output_dir"))
+        self.assertTrue(any("PECmd" in note for note in notes))
+
+    def test_prefetch_parser_runs_without_enabling_every_forensic_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = root / "Tools"
+            prefetch = root / "Prefetch"
+            tools.mkdir()
+            prefetch.mkdir()
+            (tools / "PECmd.exe").write_text("fixture", encoding="utf-8")
+            config = test_config()
+            config["storage_base_dir"] = str(root / "Securo")
+            config["external_forensic_tools_enabled"] = False
+            config["prefetch_parser_enabled"] = True
+            config["external_forensic_tools_dir"] = str(tools)
+            config["prefetch_dir"] = str(prefetch)
+            calls = []
+            original = checker.run_command
+            try:
+                checker.run_command = lambda args, timeout=20: calls.append((args, timeout)) or ""
+                notes = checker.execute_external_forensic_tools(7, config)
+            finally:
+                checker.run_command = original
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(Path(calls[0][0][0]).name, "PECmd.exe")
+        self.assertIn("--csv", calls[0][0])
         self.assertTrue(any("PECmd" in note for note in notes))
 
     def test_fastflag_injector_pattern_becomes_confirmed(self):

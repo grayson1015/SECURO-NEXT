@@ -53,6 +53,7 @@ def main():
             str(staging_spec),
             "--onedir",
             "--windowed",
+            "--uac-admin",
             "--hidden-import",
             "tkinter",
             "--add-data",

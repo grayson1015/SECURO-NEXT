@@ -45,6 +45,8 @@
   "forensic_export_dirs": [],
   "forensic_export_max_files": 80,
   "forensic_export_max_rows": 5000,
+  "prefetch_parser_enabled": true,
+  "prefetch_parser_timeout_seconds": 25,
   "external_forensic_tools_enabled": false,
   "external_forensic_tools_dir": "",
   "external_forensic_tool_timeout_seconds": 55,

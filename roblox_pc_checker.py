@@ -346,6 +346,8 @@ def load_config() -> dict:
     config.setdefault("forensic_export_dirs", [])
     config.setdefault("forensic_export_max_files", 80)
     config.setdefault("forensic_export_max_rows", 5000)
+    config.setdefault("prefetch_parser_enabled", True)
+    config.setdefault("prefetch_parser_timeout_seconds", 25)
     config.setdefault("external_forensic_tools_enabled", False)
     config.setdefault("external_forensic_tools_dir", "")
     config.setdefault("external_forensic_tool_timeout_seconds", 55)
@@ -2231,7 +2233,9 @@ def run_forensic_tool(args: list[str], config: dict, timeout: int) -> str:
 
 def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
     # Runs only known read-only parser tools, with short timeouts, into Securo's local ToolOutput folder.
-    if not config.get("external_forensic_tools_enabled"):
+    run_prefetch_parser = bool(config.get("prefetch_parser_enabled", True))
+    run_all_parsers = bool(config.get("external_forensic_tools_enabled"))
+    if not run_prefetch_parser and not run_all_parsers:
         return []
     tools = available_forensic_tools(config)
     if not tools:
@@ -2239,6 +2243,7 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
     output_root = ensure_storage_dirs(config)["tool_output"] / now_stamp()
     output_root.mkdir(parents=True, exist_ok=True)
     timeout = max(10, int(config.get("external_forensic_tool_timeout_seconds") or 55))
+    prefetch_timeout = max(8, int(config.get("prefetch_parser_timeout_seconds") or 25))
     notes = []
 
     def note(message: str):
@@ -2247,8 +2252,13 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
 
     prefetch_dir = Path(os.path.expandvars(str(config.get("prefetch_dir") or "C:/Windows/Prefetch"))).expanduser()
     if "PECmd.exe" in tools and safe_exists(prefetch_dir):
-        out = run_forensic_tool([str(tools["PECmd.exe"]), "-d", str(prefetch_dir), "--csv", str(output_root)], config, timeout)
+        out = run_forensic_tool([str(tools["PECmd.exe"]), "-d", str(prefetch_dir), "--csv", str(output_root)], config, prefetch_timeout)
         note("PECmd Prefetch parser completed." if "COMMAND_ERROR" not in out else f"PECmd Prefetch parser issue: {out[:180]}")
+
+    if not run_all_parsers:
+        if notes:
+            config["_external_forensic_output_dir"] = str(output_root)
+        return notes
 
     mft_path = Path("C:/$MFT")
     if "MFTECmd.exe" in tools and safe_exists(mft_path):
@@ -2515,6 +2525,7 @@ def evidence_quality(days: int) -> dict:
     sysmon_exists = event_log_exists("Microsoft-Windows-Sysmon/Operational")
     security_exists = event_log_exists("Security")
     defender_exists = event_log_exists("Microsoft-Windows-Windows Defender/Operational")
+    prefetch = prefetch_inventory({})
     q = {
         "Sysmon installed": sysmon_exists,
         "Sysmon Event ID 1 available": False,
@@ -2523,7 +2534,12 @@ def evidence_quality(days: int) -> dict:
         "Sysmon Event ID 10 available": False,
         "Security 4688 available": False,
         "Security 4688 command line available": False,
-        "Prefetch available": safe_exists(Path("C:/Windows/Prefetch")),
+        "Prefetch available": bool(prefetch.get("readable")),
+        "Prefetch enabled": prefetch.get("enabled"),
+        "Prefetch administrator access": prefetch.get("administrator"),
+        "Prefetch file count": prefetch.get("count", 0),
+        "Prefetch oldest entry": prefetch.get("oldest", ""),
+        "Prefetch newest entry": prefetch.get("newest", ""),
         "Amcache available": safe_exists(Path("C:/Windows/AppCompat/Programs/Amcache.hve")),
         "Jump Lists available": any(safe_exists(path) for path in jump_list_roots({})),
         "SRUM database available": safe_exists(Path("C:/Windows/System32/sru/SRUDB.dat")),
@@ -2750,6 +2766,96 @@ def prefetch_executable_name(pf_name: str) -> str:
     return stem + ".exe"
 
 
+def is_windows_admin() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def prefetch_registry_enabled() -> bool | None:
+    out = run_command(
+        [
+            "reg",
+            "query",
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters",
+            "/v",
+            "EnablePrefetcher",
+        ],
+        timeout=3,
+    )
+    match = re.search(r"EnablePrefetcher\s+REG_DWORD\s+(0x[0-9a-f]+|\d+)", out, re.I)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1), 16 if match.group(1).lower().startswith("0x") else 10)
+    except ValueError:
+        return None
+    return value != 0
+
+
+def windows_install_time() -> dt.datetime | None:
+    out = run_command(
+        ["reg", "query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "InstallDate"],
+        timeout=3,
+    )
+    match = re.search(r"InstallDate\s+REG_DWORD\s+(0x[0-9a-f]+|\d+)", out, re.I)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1), 16 if match.group(1).lower().startswith("0x") else 10)
+        return dt.datetime.fromtimestamp(value)
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
+def prefetch_inventory(config: dict | None = None) -> dict:
+    folder = Path(os.path.expandvars(str((config or {}).get("prefetch_dir") or "C:/Windows/Prefetch"))).expanduser()
+    result = {
+        "path": str(folder),
+        "exists": safe_exists(folder),
+        "readable": False,
+        "enabled": prefetch_registry_enabled(),
+        "administrator": is_windows_admin(),
+        "count": 0,
+        "oldest": "",
+        "newest": "",
+        "installGapDays": None,
+        "error": "",
+    }
+    if not result["exists"]:
+        result["error"] = "Prefetch directory does not exist."
+        return result
+    try:
+        entries = list(folder.glob("*.pf"))
+        result["count"] = len(entries)
+        timestamps = []
+        for entry in entries:
+            try:
+                timestamps.append(dt.datetime.fromtimestamp(entry.stat().st_mtime))
+            except OSError:
+                continue
+        result["readable"] = bool(entries)
+        if timestamps:
+            oldest = min(timestamps)
+            newest = max(timestamps)
+            result["oldest"] = oldest.isoformat(sep=" ", timespec="seconds")
+            result["newest"] = newest.isoformat(sep=" ", timespec="seconds")
+            installed = windows_install_time()
+            if installed:
+                result["installGapDays"] = max(0, (oldest.date() - installed.date()).days)
+        elif not result["administrator"]:
+            result["error"] = "No Prefetch files were readable without administrator access."
+        else:
+            result["error"] = "Prefetch directory is empty."
+    except (OSError, PermissionError) as exc:
+        result["error"] = f"Prefetch access failed: {exc}"
+    return result
+
+
 def parse_prefetch_artifact(path: Path) -> dict:
     # This is intentionally heuristic: it reads Prefetch metadata and embedded strings without modifying anything.
     info = {"referenced_paths": [], "strings": [], "size": 0}
@@ -2881,7 +2987,9 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
     findings = {}
     timeline = []
     folder = Path(config.get("prefetch_dir") or "C:/Windows/Prefetch")
-    if not safe_exists(folder):
+    inventory = prefetch_inventory(config)
+    config["_prefetch_inventory"] = inventory
+    if not inventory.get("readable"):
         return [], []
     cut = cutoff(days)
     try:
@@ -3382,6 +3490,60 @@ def collect_warning_logs(days: int, config: dict, sessions: list[dict]) -> tuple
         add_detection(finding, "Virtualization Check", warning["explanation"], "Medium", 15)
         merge_findings(findings, finding)
         timeline.append({"time": when, "source": "Warning", "text": warning["explanation"]})
+
+    prefetch = config.get("_prefetch_inventory") or prefetch_inventory(config)
+    prefetch_warning = None
+    if prefetch.get("enabled") is False:
+        prefetch_warning = (
+            "Prefetch Disabled",
+            "Medium",
+            "Windows Prefetch is disabled. This reduces execution-history coverage but is not proof of cheating.",
+        )
+    elif not prefetch.get("readable"):
+        explanation = prefetch.get("error") or "Windows Prefetch files were not readable."
+        prefetch_warning = (
+            "Prefetch Access Unavailable",
+            "Medium",
+            f"{explanation} This is a coverage limitation, not proof of cheating.",
+        )
+    elif int(prefetch.get("count") or 0) < 5:
+        prefetch_warning = (
+            "Prefetch Unusually Sparse",
+            "Low",
+            f"Only {prefetch.get('count', 0)} Prefetch files were found. This may result from normal cleanup, Windows settings, or manual clearing.",
+        )
+    elif isinstance(prefetch.get("installGapDays"), int) and prefetch["installGapDays"] >= 14:
+        prefetch_warning = (
+            "Prefetch History Gap",
+            "Low",
+            f"The oldest retained Prefetch entry begins about {prefetch['installGapDays']} days after the recorded Windows installation date. Manual review may be useful.",
+        )
+    if prefetch_warning:
+        name, severity, explanation = prefetch_warning
+        when = iso_now()
+        warning = {
+            "detectionName": name,
+            "severity": severity,
+            "explanation": explanation,
+            "evidencePath": prefetch.get("path", "C:/Windows/Prefetch"),
+            "timestamp": when,
+            "manualReviewRequired": True,
+            "confidenceLevel": "medium" if severity == "Medium" else "low",
+            "type": "Warning",
+        }
+        warnings.append(warning)
+        finding = make_possible_context_finding(
+            warning["evidencePath"],
+            name,
+            "Prefetch Integrity",
+            explanation,
+            parse_dt(when),
+            config,
+        )
+        finding["evidence_types"].extend(["warning", "prefetch_integrity"])
+        add_detection(finding, name, explanation, severity, 10 if severity == "Medium" else 5)
+        merge_findings(findings, finding)
+        timeline.append({"time": when, "source": "Prefetch integrity", "text": explanation})
 
     activities_paths = [
         Path(os.environ.get("LOCALAPPDATA", "")) / "ConnectedDevicesPlatform",
@@ -4111,7 +4273,12 @@ def limitations_from_quality(quality: dict) -> list[str]:
     if not quality.get("Security 4688 command line available"):
         limits.append("Security 4688 command-line logging was not available, so process arguments may be missing.")
     if not quality.get("Prefetch available"):
-        limits.append("Prefetch was not available or accessible.")
+        if quality.get("Prefetch enabled") is False:
+            limits.append("Windows Prefetch appears to be disabled, so execution-history coverage is incomplete.")
+        elif not quality.get("Prefetch administrator access"):
+            limits.append("Prefetch files were not readable. Run the packaged Securo application with its requested administrator access.")
+        else:
+            limits.append("Prefetch was empty, unavailable, or inaccessible.")
     if not quality.get("Defender logs available") and not quality.get("Defender history folders available"):
         limits.append("Defender telemetry was not available or accessible.")
     if not quality.get("Roblox logs available"):
@@ -4503,11 +4670,11 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
     amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
     emit_progress(progress, "Running optional forensic parser tools", 32)
-    if has_scan_time_for(config, 90):
+    if has_scan_time_for(config, 30):
         external_tool_notes = execute_external_forensic_tools(days, config)
     else:
         external_tool_notes = []
-        note_stage_skipped(config, progress, "Optional forensic parser tools", stage_limitations, 90, 32)
+        note_stage_skipped(config, progress, "Optional forensic parser tools", stage_limitations, 30, 32)
     emit_progress(progress, "Checking forensic parser exports", 32)
     external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
     emit_progress(progress, "Checking file artifacts", 34)

@@ -32,6 +32,8 @@ AppCompatCacheParser.exe
 
 Set `external_forensic_tools_enabled` to `true` in `config.json` to let Securo run those helpers read-only with timeouts, write CSV output to `Documents\Securo\ToolOutput`, and import that evidence into the report.
 
+`PECmd.exe` is enabled independently through `prefetch_parser_enabled` and runs by default when bundled. The packaged application requests Windows administrator access because Prefetch, MFT, registry hive, and some event-log artifacts are otherwise commonly hidden or inaccessible. Declining the Windows prompt still leaves local source runs possible, but Prefetch coverage may be unavailable.
+
 ## Usage
 
 ```powershell
