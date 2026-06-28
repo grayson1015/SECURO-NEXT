@@ -1183,6 +1183,8 @@ File Name           : notes.txt
         self.assertIn("report-entry", rendered)
         self.assertIn('data-timestamp=', rendered)
         self.assertIn('applyReportTimeFilter', rendered)
+        self.assertIn('id="report-filter-count"', rendered)
+        self.assertIn('reference = new Date("2026-06-02T17:55:00")', rendered)
         self.assertIn("Detected FastFlags", rendered)
         self.assertIn("Show All Roblox Logs", rendered)
         self.assertIn("FFlagUnit", rendered)
