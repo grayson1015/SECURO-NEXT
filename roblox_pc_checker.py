@@ -3239,7 +3239,7 @@ def usn_event_type(reason: str) -> str:
 def parse_usn_journal_csv(text: str, volume: str, max_records: int, days: int) -> list[dict]:
     events = []
     cut = cutoff(days)
-    reader = csv.DictReader(line for line in text.splitlines() if line.strip())
+    reader = csv.DictReader(line for line in text.lstrip("\ufeff").splitlines() if line.strip())
     if not reader.fieldnames:
         return events
     for row in reader:
@@ -3272,6 +3272,63 @@ def parse_usn_journal_csv(text: str, volume: str, max_records: int, days: int) -
     return events
 
 
+def parse_usn_journal_text(text: str, volume: str, max_records: int, days: int) -> list[dict]:
+    events = []
+    cut = cutoff(days)
+    current = {}
+
+    def finish():
+        if len(events) >= max_records:
+            return
+        name = current.get("filename", "")
+        if not name:
+            return
+        when = parse_usn_timestamp(current.get("timestamp", ""))
+        if when and when < cut:
+            return
+        reason = current.get("reason", "")
+        display_path = name if re.match(r"^[A-Za-z]:[\\/]", name) else f"{volume}\\{name}"
+        events.append({
+            "timestamp": when.isoformat(sep=" ", timespec="seconds") if when else current.get("timestamp", ""),
+            "eventType": usn_event_type(reason),
+            "fileName": Path(name).name or name,
+            "path": display_path,
+            "reason": reason,
+            "usn": current.get("usn", ""),
+            "fileId": current.get("fileid", ""),
+            "parentFileId": current.get("parentfileid", ""),
+            "volume": volume,
+            "source": "NTFS USN Change Journal",
+        })
+
+    aliases = {
+        "filename": {"filename", "name"},
+        "timestamp": {"timestamp", "time"},
+        "reason": {"reason", "reasons", "changereason"},
+        "usn": {"usn", "updatesequencenumber"},
+        "fileid": {"fileid", "fileref", "filereference", "filereferencenumber", "frn"},
+        "parentfileid": {"parentfileid", "parentfileref", "parentfilereference", "parentfilereferencenumber", "parentfrn"},
+    }
+    for raw_line in text.lstrip("\ufeff").splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        label, value = line.split(":", 1)
+        normalized = re.sub(r"[^a-z0-9]+", "", label.lower())
+        target = next((key for key, names in aliases.items() if normalized in names), "")
+        if not target:
+            continue
+        if target in {"usn", "filename"} and current.get("filename") and (target == "usn" or normalized == "filename"):
+            finish()
+            current = {}
+            if len(events) >= max_records:
+                break
+        current[target] = value.strip()
+    if len(events) < max_records:
+        finish()
+    return events
+
+
 def collect_usn_journal_events(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     # The USN journal is a bounded, read-only source of recent NTFS create/delete/rename/modify activity.
     if not config.get("usn_journal_enabled", True) or os.name != "nt":
@@ -3294,8 +3351,17 @@ def collect_usn_journal_events(days: int, config: dict, sessions: list[dict]) ->
         state["readable"] = False
         return [], [], []
     events = parse_usn_journal_csv(output, volume, max_records, days)
+    if not events:
+        plain_output = run_command(
+            ["fsutil", "usn", "readJournal", volume, f"startUsn=0x{start_usn:x}"],
+            timeout=timeout,
+        )
+        if "COMMAND_ERROR" not in plain_output and not re.search(r"(access is denied|error \d+)", plain_output, re.I):
+            events = parse_usn_journal_text(plain_output, volume, max_records, days)
     state["readable"] = bool(events)
     state["recordsCollected"] = len(events)
+    if not events:
+        state["error"] = "USN journal was available, but no records could be parsed from the requested recent range."
     findings = {}
     timeline = []
     for event in events:
@@ -4539,6 +4605,8 @@ def limitations_from_quality(quality: dict) -> list[str]:
             limits.append("Prefetch was empty, unavailable, or inaccessible.")
     if not quality.get("USN Change Journal available"):
         limits.append("The NTFS USN Change Journal was unavailable or inaccessible, so recent file create/delete/rename/modify coverage may be incomplete.")
+    elif quality.get("USN Change Journal readable") is False:
+        limits.append("The NTFS USN Change Journal exists, but Securo could not parse records from the requested recent range.")
     if not quality.get("Defender logs available") and not quality.get("Defender history folders available"):
         limits.append("Defender telemetry was not available or accessible.")
     if not quality.get("Roblox logs available"):
@@ -4685,6 +4753,9 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
+    usn_status = config.get("_usn_journal_status", {})
+    quality["USN Change Journal readable"] = bool(usn_status.get("readable"))
+    quality["USN Journal records collected"] = int(usn_status.get("recordsCollected", 0) or 0)
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}
@@ -5025,6 +5096,9 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
+    usn_status = config.get("_usn_journal_status", {})
+    quality["USN Change Journal readable"] = bool(usn_status.get("readable"))
+    quality["USN Journal records collected"] = int(usn_status.get("recordsCollected", 0) or 0)
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}

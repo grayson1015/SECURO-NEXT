@@ -324,6 +324,28 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[0]["fileName"], "Solara.exe")
         self.assertEqual(events[1]["eventType"], "Modified")
 
+    def test_usn_text_parser_extracts_windows_key_value_records(self):
+        sample = """
+USN                 : 0x0000000000000100
+File Ref#           : 0x0000000000000010
+Parent File Ref#    : 0x0000000000000001
+Time Stamp          : 06/27/2026 14:22:00
+Reason              : FILE_DELETE | CLOSE
+File Name           : Solara.exe
+
+USN                 : 0x0000000000000101
+File Ref#           : 0x0000000000000011
+Parent File Ref#    : 0x0000000000000001
+Time Stamp          : 06/27/2026 14:23:00
+Reason              : DATA_OVERWRITE | CLOSE
+File Name           : notes.txt
+"""
+        events = checker.parse_usn_journal_text(sample, "C:", 100, 3650)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["eventType"], "Deleted")
+        self.assertEqual(events[0]["fileName"], "Solara.exe")
+        self.assertEqual(events[1]["eventType"], "Modified")
+
     def test_usn_collector_promotes_only_suspicious_events_to_findings(self):
         sample = (
             '"File name","Time stamp","Reason","USN","File ID","Parent file ID"\n'
