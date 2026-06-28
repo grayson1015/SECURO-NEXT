@@ -34,6 +34,8 @@ Set `external_forensic_tools_enabled` to `true` in `config.json` to let Securo r
 
 `PECmd.exe` is enabled independently through `prefetch_parser_enabled` and runs by default when bundled. The packaged application requests Windows administrator access because Prefetch, MFT, registry hive, and some event-log artifacts are otherwise commonly hidden or inaccessible. Declining the Windows prompt still leaves local source runs possible, but Prefetch coverage may be unavailable.
 
+Securo also reads a bounded recent slice of the NTFS USN Change Journal. It records file create, delete, rename, and modification metadata read-only; normal journal activity remains contextual evidence and is not automatically treated as cheating.
+
 ## Usage
 
 ```powershell

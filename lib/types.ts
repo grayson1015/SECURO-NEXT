@@ -92,6 +92,19 @@ export type SystemResetEvidence = {
   eventId?: number;
 };
 
+export type UsnJournalEvent = {
+  timestamp?: string;
+  eventType?: "Created" | "Deleted" | "Renamed" | "Modified" | "Changed" | string;
+  fileName?: string;
+  path?: string;
+  reason?: string;
+  usn?: string;
+  fileId?: string;
+  parentFileId?: string;
+  volume?: string;
+  source?: string;
+};
+
 export type SecuroFinding = {
   name?: string;
   path?: string;
@@ -121,6 +134,7 @@ export type SecuroReportJson = {
   sessions: SecuroSession[];
   robloxLogs?: RobloxLogArtifact[];
   detectedFastFlags?: RobloxFastFlag[];
+  usnJournalEvents?: UsnJournalEvent[];
   accountIdentifiers?: AccountIdentifierContext;
   systemResetEvidence?: SystemResetEvidence[];
   findings: SecuroFinding[];

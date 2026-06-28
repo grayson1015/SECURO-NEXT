@@ -467,6 +467,7 @@ function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
     ["Antivirus Logs", raw.antivirusLogs || raw.antivirus_logs],
     ["Engine Results", raw.engineResults || raw.engine_results],
     ["Detected FastFlags", raw.detectedFastFlags || raw.detected_fast_flags],
+    ["USN Journal Events", raw.usnJournalEvents || raw.usn_journal_events],
     ["Roblox Logs", raw.robloxLogs || raw.roblox_logs],
     ["Evidence Sources", Object.entries(data.evidenceSources || {}).map(([source, value]) => ({ source, value }))],
     ["Limitations", (data.limitations || []).map((text) => ({ text }))]

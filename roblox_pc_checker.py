@@ -87,6 +87,7 @@ SPECIFIC_DETECTION_CATEGORIES = {
     "File Deletion",
     "PREFETCH",
     "Prefetch Execution",
+    "USN Journal Event",
     "Deleted Prefetch File",
     "Prefetch Deleted",
     "Duplicate Prefetch Behavior",
@@ -350,6 +351,10 @@ def load_config() -> dict:
     config.setdefault("forensic_export_max_rows", 5000)
     config.setdefault("prefetch_parser_enabled", True)
     config.setdefault("prefetch_parser_timeout_seconds", 25)
+    config.setdefault("usn_journal_enabled", True)
+    config.setdefault("usn_journal_max_records", 5000)
+    config.setdefault("usn_journal_window_bytes", 4_000_000)
+    config.setdefault("usn_journal_timeout_seconds", 12)
     config.setdefault("external_forensic_tools_enabled", False)
     config.setdefault("external_forensic_tools_dir", "")
     config.setdefault("external_forensic_tool_timeout_seconds", 55)
@@ -396,6 +401,7 @@ def scan_transparency_metadata() -> dict:
             "Startup folders, Run registry keys, scheduled tasks, services, and WMI persistence metadata",
             "Downloads, Desktop, Documents, AppData, Temp, ProgramData, and Roblox-related folders",
             "Prefetch, deleted-file metadata, Jump Lists, Amcache string context, Windows Security/Sysmon event logs when available, Defender artifacts, browser download metadata, ShellBag context, and Recycle Bin metadata",
+            "A bounded recent slice of the NTFS USN Change Journal for file create, delete, rename, and modification metadata",
             "Optional forensic parser CSV exports from PECmd, MFTECmd, SBECmd, JLECmd, SrumECmd, AmcacheParser, and AppCompatCacheParser when placed in the configured Securo ToolOutput folders",
             "Roblox logs including user ID, username, display name when available, place ID/game ID, job ID, session time, duration, LoadClientSettings lines, and FastFlags",
             "Roblox account identifier context from retained Roblox logs and registry artifacts",
@@ -496,6 +502,9 @@ def scan_profiles() -> dict:
             "skip_recovery_metadata": True,
             "collect_safe_account_identifiers": True,
             "collect_system_reset_evidence": True,
+            "usn_journal_max_records": 1500,
+            "usn_journal_window_bytes": 1_500_000,
+            "usn_journal_timeout_seconds": 5,
             "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations.",
         },
         "standard": {
@@ -508,6 +517,9 @@ def scan_profiles() -> dict:
             "skip_recovery_metadata": False,
             "collect_safe_account_identifiers": True,
             "collect_system_reset_evidence": True,
+            "usn_journal_max_records": 5000,
+            "usn_journal_window_bytes": 4_000_000,
+            "usn_journal_timeout_seconds": 12,
             "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
         },
         "deep": {
@@ -520,6 +532,9 @@ def scan_profiles() -> dict:
             "skip_recovery_metadata": False,
             "collect_safe_account_identifiers": True,
             "collect_system_reset_evidence": True,
+            "usn_journal_max_records": 12000,
+            "usn_journal_window_bytes": 12_000_000,
+            "usn_journal_timeout_seconds": 24,
             "description": "Maximum coverage scan with an 8 minute hard stop and terminal report upload.",
         },
     }
@@ -2573,6 +2588,7 @@ def evidence_quality(days: int) -> dict:
     security_exists = event_log_exists("Security")
     defender_exists = event_log_exists("Microsoft-Windows-Windows Defender/Operational")
     prefetch = prefetch_inventory({})
+    usn_state = query_usn_journal_state("C:") if os.name == "nt" else {"available": False}
     q = {
         "Sysmon installed": sysmon_exists,
         "Sysmon Event ID 1 available": False,
@@ -2587,6 +2603,7 @@ def evidence_quality(days: int) -> dict:
         "Prefetch file count": prefetch.get("count", 0),
         "Prefetch oldest entry": prefetch.get("oldest", ""),
         "Prefetch newest entry": prefetch.get("newest", ""),
+        "USN Change Journal available": bool(usn_state.get("available")),
         "Amcache available": safe_exists(Path("C:/Windows/AppCompat/Programs/Amcache.hve")),
         "Jump Lists available": any(safe_exists(path) for path in jump_list_roots({})),
         "SRUM database available": safe_exists(Path("C:/Windows/System32/sru/SRUDB.dat")),
@@ -3169,6 +3186,148 @@ def collect_prefetch_evidence(days: int, config: dict, sessions: list[dict]) -> 
             add_detection(finding, "Duplicate Prefetch Behavior", f"Multiple Prefetch variants were present for the same suspicious executable name ({count}).", "Medium", 15)
             finding["evidence_types"].append("duplicate_prefetch")
     return list(findings.values()), timeline
+
+
+def query_usn_journal_state(volume: str = "C:") -> dict:
+    out = run_command(["fsutil", "usn", "queryJournal", volume], timeout=5)
+    state = {"available": False, "volume": volume, "firstUsn": 0, "nextUsn": 0, "error": ""}
+    if "COMMAND_ERROR" in out or re.search(r"(access is denied|error \d+)", out, re.I):
+        state["error"] = out.strip()[:300]
+        return state
+    first = re.search(r"First Usn\s*:\s*(0x[0-9a-f]+|\d+)", out, re.I)
+    next_value = re.search(r"Next Usn\s*:\s*(0x[0-9a-f]+|\d+)", out, re.I)
+    try:
+        if first:
+            state["firstUsn"] = int(first.group(1), 0)
+        if next_value:
+            state["nextUsn"] = int(next_value.group(1), 0)
+    except ValueError:
+        state["error"] = "USN journal boundaries could not be parsed."
+        return state
+    state["available"] = state["nextUsn"] > 0
+    if not state["available"]:
+        state["error"] = "USN journal was not available on this volume."
+    return state
+
+
+def parse_usn_timestamp(value: str) -> dt.datetime | None:
+    parsed = parse_dt(value)
+    if parsed:
+        return parsed
+    clean = str(value or "").strip().strip('"')
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S.%f"):
+        try:
+            return dt.datetime.strptime(clean, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def usn_event_type(reason: str) -> str:
+    low = str(reason or "").lower().replace("_", " ")
+    if "delete" in low:
+        return "Deleted"
+    if "rename" in low:
+        return "Renamed"
+    if "create" in low:
+        return "Created"
+    if any(term in low for term in ("overwrite", "extend", "truncation", "basic info", "security change", "compression change", "reparse point change")):
+        return "Modified"
+    return "Changed"
+
+
+def parse_usn_journal_csv(text: str, volume: str, max_records: int, days: int) -> list[dict]:
+    events = []
+    cut = cutoff(days)
+    reader = csv.DictReader(line for line in text.splitlines() if line.strip())
+    if not reader.fieldnames:
+        return events
+    for row in reader:
+        if len(events) >= max_records:
+            break
+        name = csv_value(row, "File name", "FileName", "Name", "SourceFilename", "FullPath", "Path")
+        if not name:
+            continue
+        timestamp_text = csv_value(row, "Time stamp", "Timestamp", "TimeStamp", "Time")
+        when = parse_usn_timestamp(timestamp_text)
+        if when and when < cut:
+            continue
+        reason = csv_value(row, "Reason", "Reasons", "ChangeReason")
+        file_id = csv_value(row, "File ID", "FileId", "FileReferenceNumber", "FRN")
+        parent_id = csv_value(row, "Parent file ID", "ParentFileId", "ParentFileReferenceNumber", "ParentFRN")
+        usn = csv_value(row, "USN", "UpdateSequenceNumber")
+        display_path = name if re.match(r"^[A-Za-z]:[\\/]", name) else f"{volume}\\{name}"
+        events.append({
+            "timestamp": when.isoformat(sep=" ", timespec="seconds") if when else timestamp_text,
+            "eventType": usn_event_type(reason),
+            "fileName": Path(name).name or name,
+            "path": display_path,
+            "reason": reason,
+            "usn": usn,
+            "fileId": file_id,
+            "parentFileId": parent_id,
+            "volume": volume,
+            "source": "NTFS USN Change Journal",
+        })
+    return events
+
+
+def collect_usn_journal_events(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    # The USN journal is a bounded, read-only source of recent NTFS create/delete/rename/modify activity.
+    if not config.get("usn_journal_enabled", True) or os.name != "nt":
+        return [], [], []
+    volume = str(config.get("usn_journal_volume") or "C:").rstrip("\\/")
+    state = query_usn_journal_state(volume)
+    config["_usn_journal_status"] = state
+    if not state.get("available"):
+        return [], [], []
+    window = max(64_000, int(config.get("usn_journal_window_bytes") or 4_000_000))
+    max_records = max(100, int(config.get("usn_journal_max_records") or 5000))
+    timeout = max(3, int(config.get("usn_journal_timeout_seconds") or 12))
+    start_usn = max(int(state.get("firstUsn") or 0), int(state.get("nextUsn") or 0) - window)
+    output = run_command(
+        ["fsutil", "usn", "readJournal", volume, f"startUsn=0x{start_usn:x}", "csv"],
+        timeout=timeout,
+    )
+    if "COMMAND_ERROR" in output or re.search(r"(access is denied|error \d+)", output, re.I):
+        state["error"] = output.strip()[:300]
+        state["readable"] = False
+        return [], [], []
+    events = parse_usn_journal_csv(output, volume, max_records, days)
+    state["readable"] = bool(events)
+    state["recordsCollected"] = len(events)
+    findings = {}
+    timeline = []
+    for event in events:
+        name = event.get("fileName", "")
+        path_text = event.get("path", "")
+        reason = event.get("reason", "")
+        suspicious = suspicious_name(name, config) or bool(ioc_text_matches(f"{name} {path_text}", config))
+        if not suspicious:
+            continue
+        finding = make_finding(path_text, name, "usn_journal", config)
+        finding["first_seen"] = event.get("timestamp") or iso_now()
+        finding["supporting_evidence"].append(
+            f"USN Journal: {event.get('eventType')} {path_text}; reason={reason}; usn={event.get('usn', '')}"
+        )
+        finding["evidence_types"].append("usn_journal")
+        add_detection(finding, "USN Journal Event", f"USN journal recorded suspicious file activity: {event.get('eventType')}.", "Medium", 15)
+        if event.get("eventType") == "Deleted":
+            add_detection(finding, "Suspicious File Deletion", "USN journal recorded deletion of a suspiciously named file.", "Medium", 20)
+            finding["evidence_types"].append("deletion_artifact")
+        elif event.get("eventType") == "Modified":
+            add_detection(finding, "Suspicious File Modification", "USN journal recorded modification of a suspiciously named file.", "Medium", 20)
+            finding["evidence_types"].append("modified_artifact")
+        if near_any_session(event.get("timestamp"), sessions):
+            add_score(finding, config["score_rules"].get("near_roblox_session", 25), "USN event occurred near Roblox activity")
+        apply_ioc_matches(finding, config, reason)
+        merge_findings(findings, finding)
+        timeline.append({
+            "time": finding["first_seen"],
+            "source": "USN Journal",
+            "text": f"USN {event.get('eventType', 'Changed').upper()}: {name}",
+        })
+    return list(findings.values()), timeline, events
 
 
 def collect_jump_list_context(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -4378,6 +4537,8 @@ def limitations_from_quality(quality: dict) -> list[str]:
             limits.append("Prefetch files were not readable. Run the packaged Securo application with its requested administrator access.")
         else:
             limits.append("Prefetch was empty, unavailable, or inaccessible.")
+    if not quality.get("USN Change Journal available"):
+        limits.append("The NTFS USN Change Journal was unavailable or inaccessible, so recent file create/delete/rename/modify coverage may be incomplete.")
     if not quality.get("Defender logs available") and not quality.get("Defender history folders available"):
         limits.append("Defender telemetry was not available or accessible.")
     if not quality.get("Roblox logs available"):
@@ -4467,6 +4628,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     running_findings, running_timeline = collect_running_processes(config, sessions_raw)
     network_findings, network_timeline = collect_network_ioc_evidence(config)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
+    usn_findings, usn_timeline, usn_events = collect_usn_journal_events(days, config, sessions_raw)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
     amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
@@ -4497,6 +4659,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + running_timeline
         + network_timeline
         + prefetch_timeline
+        + usn_timeline
         + recycle_timeline
         + jump_list_timeline
         + amcache_timeline
@@ -4511,7 +4674,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, usn_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -4546,6 +4709,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "sessions": [camel_session(s) for s in sessions_raw],
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
+        "usnJournalEvents": usn_events,
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
         "correlationFindings": correlation_findings_for_report(findings),
@@ -4763,6 +4927,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     network_findings, network_timeline = collect_network_ioc_evidence(config)
     emit_progress(progress, "Checking Prefetch artifacts", 22)
     prefetch_findings, prefetch_timeline = collect_prefetch_evidence(days, config, sessions_raw)
+    emit_progress(progress, "Checking USN Change Journal", 25)
+    usn_findings, usn_timeline, usn_events = collect_usn_journal_events(days, config, sessions_raw)
     emit_progress(progress, "Checking deleted file artifacts", 28)
     recycle_findings, recycle_timeline = collect_recycle_bin_context(days, config, sessions_raw)
     emit_progress(progress, "Checking forensic app artifacts", 31)
@@ -4833,6 +4999,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + running_timeline
         + network_timeline
         + prefetch_timeline
+        + usn_timeline
         + recycle_timeline
         + jump_list_timeline
         + amcache_timeline
@@ -4847,7 +5014,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, usn_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -4883,6 +5050,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "sessions": [camel_session(s) for s in sessions_raw],
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
+        "usnJournalEvents": usn_events,
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
         "correlationFindings": correlation_findings_for_report(findings),
@@ -5099,6 +5267,14 @@ def render_txt(report: dict) -> str:
         for event in item.get("events", []):
             lines.append(f"  {event.get('timestamp')} [{event.get('type')}] {event.get('message')}")
         lines += ["Raw Roblox Log:", item.get("rawLog", ""), ""]
+    lines += ["", "USN Journal Events", "------------------"]
+    if not report.get("usnJournalEvents"):
+        lines.append("No USN Change Journal events were available.")
+    for item in report.get("usnJournalEvents", []):
+        lines.append(
+            f"{item.get('timestamp')} {item.get('eventType')} {item.get('fileName')} "
+            f"Reason={item.get('reason')} USN={item.get('usn')} Parent={item.get('parentFileId')}"
+        )
     lines += ["Findings", "--------"]
     if not report["findings"]:
         lines += ["No confirmed Roblox injection evidence was found in available logs.", "Logging coverage may not be sufficient to rule it out.", ""]
@@ -5229,6 +5405,14 @@ def render_html(report: dict) -> str:
         "Source": item.get("source", ""),
         "Confidence": item.get("confidence", ""),
     } for item in report.get("keyArtifacts", [])]
+    usn_rows = [{
+        "Timestamp": item.get("timestamp", ""),
+        "Event": item.get("eventType", ""),
+        "File": item.get("fileName", ""),
+        "Reason": item.get("reason", ""),
+        "USN": item.get("usn", ""),
+        "Parent ID": item.get("parentFileId", ""),
+    } for item in report.get("usnJournalEvents", [])]
     account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
     account_rows = []
     for row in account_context.get("roblox", []):
@@ -5334,6 +5518,7 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed Exploit','Suspicious'] else 'Not confirmed')}</div></div></div></section>
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'], 'First Seen')}</section>
 <section><h2>Key Artifacts</h2><p class="muted">Prefetch and deleted-file artifacts are listed here as key scan evidence. These are review artifacts, not automatic proof by themselves.</p>{html_table(key_artifact_rows, ['Type','Artifact','Path','Timestamp','Source','Confidence'], 'Timestamp')}</section>
+<section><h2>USN Journal Events</h2><p class="muted">Recent bounded NTFS create, delete, rename, and modify records. Normal file activity is not proof of cheating.</p>{html_table(usn_rows, ['Timestamp','Event','File','Reason','USN','Parent ID'], 'Timestamp')}</section>
 <section><h2>Forensic Correlation Findings</h2><p class="muted">These findings are built from multiple artifacts lining up in time, not from a single filename, hash, or keyword.</p>{correlation_html}</section>
 <section><h2>Interaction / Detect Logs</h2><div class="filters">{''.join(f"<span class='pill'>{x}</span>" for x in DETECT_LOG_TYPES)}</div>{html_table(detect_rows, ['Type','Detection','Severity','Confidence','Manual Review','Evidence','Timestamp','Explanation'], 'Timestamp')}</section>
 <section><h2>Warning Logs</h2><p class="muted">Warnings indicate modifications or behaviors that may reduce confidence or require review. They are not automatically cheating evidence.</p>{html_table(warning_rows, ['Detection','Severity','Confidence','Manual Review','Source','Timestamp','Explanation'], 'Timestamp')}</section>
@@ -5550,9 +5735,9 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     # Vercel rejects large function payloads before the API route can store them.
     # Keep the website report useful, but reserve the complete report for local files.
     size_profiles = [
-        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "rawRoblox": False},
-        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "rawRoblox": False},
-        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "rawRoblox": False},
+        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "usnEvents": 1200, "rawRoblox": False},
+        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "usnEvents": 600, "rawRoblox": False},
+        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "usnEvents": 250, "rawRoblox": False},
     ]
     for profile in size_profiles:
         compacted["timeline"] = list(report.get("timeline", []))[-profile["timeline"]:]
@@ -5568,6 +5753,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
         compacted["systemResetEvidence"] = list(report.get("systemResetEvidence", []))[:80]
         compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), profile["robloxLogs"], include_raw=profile["rawRoblox"])
         compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:profile["fastFlags"]]
+        compacted["usnJournalEvents"] = list(report.get("usnJournalEvents", []))[:profile["usnEvents"]]
         if isinstance(compacted.get("rawArtifacts"), list):
             compacted["rawArtifacts"] = list(report.get("rawArtifacts", []))[:profile["rawArtifacts"]]
         try:
@@ -5589,6 +5775,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     compacted["systemResetEvidence"] = list(report.get("systemResetEvidence", []))[:40]
     compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), 10, include_raw=False)
     compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:120]
+    compacted["usnJournalEvents"] = list(report.get("usnJournalEvents", []))[:100]
     if isinstance(compacted.get("rawArtifacts"), list):
         compacted["rawArtifacts"] = []
     return compacted

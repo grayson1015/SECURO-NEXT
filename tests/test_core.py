@@ -52,6 +52,10 @@ def test_config():
         "external_forensic_tools_dir": "",
         "prefetch_parser_enabled": False,
         "prefetch_parser_timeout_seconds": 25,
+        "usn_journal_enabled": False,
+        "usn_journal_max_records": 5000,
+        "usn_journal_window_bytes": 4000000,
+        "usn_journal_timeout_seconds": 12,
         "external_forensic_tool_timeout_seconds": 55,
         "collect_safe_account_identifiers": False,
         "collect_system_reset_evidence": False,
@@ -76,6 +80,7 @@ class CoreTests(unittest.TestCase):
             "collect_running_processes",
             "collect_network_ioc_evidence",
             "collect_prefetch_evidence",
+            "collect_usn_journal_events",
             "collect_jump_list_context",
             "collect_amcache_context",
             "collect_file_artifacts",
@@ -97,6 +102,7 @@ class CoreTests(unittest.TestCase):
             checker.collect_running_processes = lambda config, sessions: ([], [])
             checker.collect_network_ioc_evidence = lambda config: ([], [])
             checker.collect_prefetch_evidence = lambda days, config, sessions: ([], [])
+            checker.collect_usn_journal_events = lambda days, config, sessions: ([], [], [])
             checker.collect_jump_list_context = lambda days, config, sessions: ([], [])
             checker.collect_amcache_context = lambda days, config, sessions: ([], [])
             checker.collect_file_artifacts = lambda days, config, sessions, verbose=False: ([], [])
@@ -305,6 +311,47 @@ class CoreTests(unittest.TestCase):
             findings, _ = checker.collect_prefetch_evidence(7, config, [])
             finalized = checker.finalize_findings(findings, config)
         self.assertNotEqual(finalized[0]["classification"], "Confirmed Exploit")
+
+    def test_usn_csv_parser_extracts_delete_and_modify_events(self):
+        sample = (
+            '"File name","Time stamp","Reason","USN","File ID","Parent file ID"\n'
+            '"Solara.exe","06/27/2026 14:22:00","FILE_DELETE | CLOSE","0x100","0x10","0x01"\n'
+            '"notes.txt","06/27/2026 14:23:00","DATA_OVERWRITE | CLOSE","0x101","0x11","0x01"\n'
+        )
+        events = checker.parse_usn_journal_csv(sample, "C:", 100, 3650)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["eventType"], "Deleted")
+        self.assertEqual(events[0]["fileName"], "Solara.exe")
+        self.assertEqual(events[1]["eventType"], "Modified")
+
+    def test_usn_collector_promotes_only_suspicious_events_to_findings(self):
+        sample = (
+            '"File name","Time stamp","Reason","USN","File ID","Parent file ID"\n'
+            f'"Solara.exe","{dt.datetime.now().strftime("%m/%d/%Y %H:%M:%S")}","FILE_DELETE | CLOSE","0x100","0x10","0x01"\n'
+            f'"notes.txt","{dt.datetime.now().strftime("%m/%d/%Y %H:%M:%S")}","DATA_OVERWRITE | CLOSE","0x101","0x11","0x01"\n'
+        )
+        config = test_config()
+        config["usn_journal_enabled"] = True
+        original_query = checker.query_usn_journal_state
+        original_run = checker.run_command
+        try:
+            checker.query_usn_journal_state = lambda volume="C:": {
+                "available": True,
+                "volume": volume,
+                "firstUsn": 0x10,
+                "nextUsn": 0x1000,
+                "error": "",
+            }
+            checker.run_command = lambda args, timeout=20: sample
+            findings, timeline, events = checker.collect_usn_journal_events(7, config, [])
+        finally:
+            checker.query_usn_journal_state = original_query
+            checker.run_command = original_run
+        self.assertEqual(len(events), 2)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["name"], "Solara.exe")
+        self.assertIn("Suspicious File Deletion", findings[0]["detection_categories"])
+        self.assertTrue(any("Solara.exe" in event["text"] for event in timeline))
 
     def test_prefetch_inventory_reports_readable_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1096,6 +1143,14 @@ class CoreTests(unittest.TestCase):
                 "source": "Windows CurrentVersion InstallDate",
                 "details": "Windows installation timestamp.",
             }],
+            "usnJournalEvents": [{
+                "timestamp": "2026-06-02 17:56:00",
+                "eventType": "Deleted",
+                "fileName": "Example.exe",
+                "reason": "FILE_DELETE | CLOSE",
+                "usn": "0x100",
+                "parentFileId": "0x01",
+            }],
             "limitations": [],
             "finalStatement": "test",
         }
@@ -1114,6 +1169,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Roblox Account History", rendered)
         self.assertIn("Reset / Reinstall History", rendered)
         self.assertIn("Possible Windows Reset/Reinstall", rendered)
+        self.assertIn("USN Journal Events", rendered)
+        self.assertIn("FILE_DELETE", rendered)
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json
@@ -1222,6 +1279,7 @@ class CoreTests(unittest.TestCase):
             "collect_running_processes",
             "collect_network_ioc_evidence",
             "collect_prefetch_evidence",
+            "collect_usn_journal_events",
             "collect_recycle_bin_context",
             "collect_jump_list_context",
             "collect_amcache_context",
@@ -1237,6 +1295,7 @@ class CoreTests(unittest.TestCase):
             checker.collect_running_processes = lambda cfg, sessions: ([], [])
             checker.collect_network_ioc_evidence = lambda cfg: ([], [])
             checker.collect_prefetch_evidence = lambda days, cfg, sessions: (calls.append("prefetch") or ([], []))
+            checker.collect_usn_journal_events = lambda days, cfg, sessions: (calls.append("usn") or ([], [], []))
             checker.collect_recycle_bin_context = lambda days, cfg, sessions: (calls.append("deleted") or ([], [{"time": "2026-06-02 17:55:00", "source": "Recycle Bin", "text": "DELETED FILE: C:/Temp/a.exe"}]))
             checker.collect_jump_list_context = lambda days, cfg, sessions: (calls.append("jump") or ([], []))
             checker.collect_amcache_context = lambda days, cfg, sessions: (calls.append("amcache") or ([], []))
@@ -1412,6 +1471,10 @@ class CoreTests(unittest.TestCase):
                 "rawLog": "FFlagUnit=true\n" + ("x" * 2_000_000),
             }],
             "detectedFastFlags": [{"name": "FFlagUnit", "value": "true", "timestamp": "2026-06-09T00:00:00", "sourceLog": "Client.log"}],
+            "usnJournalEvents": [
+                {"timestamp": "2026-06-09T00:00:00", "eventType": "Modified", "fileName": f"file-{index}.tmp", "reason": "DATA_OVERWRITE", "usn": str(index)}
+                for index in range(5000)
+            ],
             "limitations": [],
             "topScore": 90,
         }
@@ -1422,6 +1485,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(compacted["sessions"][0]["robloxLogsOmittedForUpload"])
         self.assertNotIn("robloxLogs", compacted["sessions"][0])
         self.assertEqual(compacted["detectedFastFlags"][0]["name"], "FFlagUnit")
+        self.assertLessEqual(len(compacted["usnJournalEvents"]), 100)
         self.assertTrue(compacted["robloxLogs"][0]["rawLogOmittedForUpload"])
         self.assertEqual(compacted["robloxLogs"][0]["rawLog"], "")
         self.assertIn("full report remains saved locally", " ".join(compacted["limitations"]))
