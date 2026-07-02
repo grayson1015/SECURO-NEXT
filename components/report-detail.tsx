@@ -32,7 +32,6 @@ export function ReportDetail({ report }: { report: ReportRow }) {
     Possible: filteredFindings.filter((finding) => findingConfidence(finding) === "Possible")
   }), [filteredFindings]);
   const filteredDetections = useMemo(() => filterTimedItems(detectionFindings, timeRange, (item) => item.firstSeen, reportReferenceTime), [detectionFindings, timeRange, reportReferenceTime]);
-  const filteredSessions = useMemo(() => filterTimedItems(data.sessions, timeRange, (item) => item.launchTime || item.exitTime, reportReferenceTime), [data.sessions, timeRange, reportReferenceTime]);
   const filteredRobloxLogs = useMemo(() => filterTimedItems(data.robloxLogs || [], timeRange, (item) => item.startTime || item.modifiedTime, reportReferenceTime), [data.robloxLogs, timeRange, reportReferenceTime]);
   const filteredFastFlags = useMemo(() => filterTimedItems(data.detectedFastFlags || [], timeRange, (item) => item.timestamp, reportReferenceTime), [data.detectedFastFlags, timeRange, reportReferenceTime]);
   const filteredShellBags = useMemo(
@@ -286,12 +285,11 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           </p>
           <div className="grid gap-3 md:grid-cols-2">
             {accountRows.map((account, index) => (
-              <div key={`${account.platform}-${account.userId}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="font-semibold">{account.platform || "Account"}</div>
-                  <div className="text-xs text-primary">{account.userId || "ID unavailable"}</div>
-                </div>
-                <div className="mt-2 text-zinc-300">Username: {account.username || "Unknown"}</div>
+              <div key={`${account.platform}-${account.userId}-${index}`} className="rounded-md border border-border bg-black/20 p-4 text-sm">
+                <div className="font-semibold text-zinc-300">{account.platform || "Account"}</div>
+                <div className="mt-3 text-xs font-semibold uppercase text-zinc-500">Roblox User ID</div>
+                <div className="mt-1 break-all text-2xl font-bold text-primary">{account.userId || "ID unavailable"}</div>
+                <div className="mt-3 text-zinc-300">Username: {account.username || "Unknown"}</div>
                 {account.displayName ? <div className="text-zinc-400">Display Name: {account.displayName}</div> : null}
                 <div className="text-zinc-400">First evidence: {formatDate(account.firstSeen)}</div>
                 <div className="text-zinc-400">Last evidence: {formatDate(account.lastSeen)}</div>
@@ -307,30 +305,6 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               </div>
             ))}
             {!accountRows.length ? <p className="text-sm text-zinc-500">No account identifiers were available.</p> : null}
-          </div>
-        </Card>
-
-        <Card className="mt-5">
-          <h2 className="mb-4 text-lg font-semibold">Session Information</h2>
-          <div className="grid gap-3 md:grid-cols-2">
-            {filteredSessions.map((session, index) => (
-              <div key={index} className={`rounded-md border p-3 text-sm ${session.status === "Suspicious" || session.status === "Confirmed" ? "border-red-500/50 bg-red-500/10 text-red-100" : "border-border bg-black/20"}`}>
-                <div className="font-semibold">{session.username || "Unknown user"}</div>
-                <div className="text-zinc-400">Display Name: {session.displayName || ""}</div>
-                <div className="text-zinc-400">User ID: {session.userId || ""}</div>
-                <div className="text-zinc-400">Place: {session.placeId || session.gameId || "Unknown"}</div>
-                <div className="text-zinc-400">Job ID: {session.jobId || ""}</div>
-                <div className="text-zinc-400">Duration: {session.duration || "unknown"}</div>
-                <div className="text-zinc-400">Status: {session.status || "Clean"}</div>
-                {(session.linkedDetections || []).map((detection, i) => (
-                  <div key={i} className="mt-2 rounded bg-black/20 p-2">
-                    <div>Detection: {detection.name}</div>
-                    <div>Responsible file: {detection.path}</div>
-                  </div>
-                ))}
-              </div>
-            ))}
-            {!filteredSessions.length ? <p className="text-sm text-zinc-500">No sessions in this time range.</p> : null}
           </div>
         </Card>
 
@@ -575,8 +549,10 @@ function buildExportHtml(report: ReportRow) {
   `)).join("");
   const accountContext = data.accountIdentifiers || {};
   const accounts = (accountContext.roblox || []).map((account) => `
-    <div class="report-entry">
-      <p><b>${escape(account.platform || "Account")}</b> · ${escape(account.userId || "ID unavailable")}</p>
+    <div class="report-entry account-card">
+      <p><b>${escape(account.platform || "Account")}</b></p>
+      <small>ROBLOX USER ID</small>
+      <div class="account-id">${escape(account.userId || "ID unavailable")}</div>
       <p>Username: ${escape(account.username || "Unknown")} ${account.displayName ? `· Display Name: ${escape(account.displayName)}` : ""}</p>
       <p>First evidence: ${escape(account.firstSeen || "")} · Last evidence: ${escape(account.lastSeen || "")}</p>
       <p>Sources: ${escape((account.sources || []).join("; "))}</p>
@@ -603,6 +579,8 @@ function buildExportHtml(report: ReportRow) {
       .controls{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
       select{background:#050807;color:#eefaf1;border:1px solid #264234;border-radius:6px;padding:8px 10px}
       .report-entry{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 0}
+      .account-card{border:1px solid #264234;border-radius:8px;padding:14px;margin:10px 0}
+      .account-card small{color:#8b93a7}.account-id{color:#00d26a;font-size:26px;font-weight:700;overflow-wrap:anywhere;margin:4px 0 12px}
       .timeline-reset-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}
       .timeline-reset-grid>aside{display:grid;gap:12px}
       .timeline-entry{display:grid;grid-template-columns:160px minmax(0,1fr) 180px;gap:16px;align-items:start;overflow:hidden}
@@ -617,7 +595,6 @@ function buildExportHtml(report: ReportRow) {
     <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p><p id="report-filter-count"></p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
     <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section></aside></div>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
-    <section><h2>Sessions</h2>${data.sessions.map((session) => entry(session.launchTime || session.exitTime, `<p><b>${escape(session.username || "Unknown user")}</b></p><p>User ID: ${escape(session.userId || "")}</p><p>Place: ${escape(session.placeId || session.gameId || "")}</p><p>Duration: ${escape(session.duration || "unknown")}</p><p>Status: ${escape(session.status || "Clean")}</p>`)).join("") || "<p>No sessions.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>
     <section><h2>Findings</h2>${visibleFindings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`, "div", isConfirmedFinding(finding))).join("") || "<p>No findings.</p>"}</section>

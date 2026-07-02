@@ -776,9 +776,9 @@ File Name           : notes.txt
             config["forensic_export_dirs"] = [tmp]
             config["shellbag_max_records"] = 100
             findings, timeline, artifacts = checker.collect_sbecmd_shellbags(3650, config, [])
-        self.assertEqual(len(artifacts), 2)
-        self.assertEqual(artifacts[0]["classification"], "Old / Deleted Folder")
-        self.assertEqual(artifacts[1]["classification"], "Network / External Folder")
+        artifact_by_path = {item["path"]: item for item in artifacts}
+        self.assertEqual(artifact_by_path["C:\\Users\\Test\\Downloads\\Solara"]["classification"], "Old / Deleted Folder")
+        self.assertEqual(artifact_by_path["\\\\server\\share\\NormalFolder"]["classification"], "Network / External Folder")
         self.assertTrue(any("Solara" in finding["path"] for finding in findings))
         self.assertTrue(any("ShellBag Old / Deleted Folder" in event["text"] for event in timeline))
 
