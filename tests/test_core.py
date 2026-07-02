@@ -1247,14 +1247,11 @@ File Name           : notes.txt
             "finalStatement": "test",
         }
         rendered = checker.render_html(report)
-        self.assertIn('id="report-time-filter"', rendered)
-        self.assertIn('<option value="7" selected>1 week</option>', rendered)
-        self.assertIn('<option value="all">All logs</option>', rendered)
+        self.assertNotIn('id="report-time-filter"', rendered)
         self.assertIn("report-entry", rendered)
         self.assertIn('data-timestamp=', rendered)
-        self.assertIn('applyReportTimeFilter', rendered)
-        self.assertIn('id="report-filter-count"', rendered)
-        self.assertIn('reference = new Date("2026-06-02T17:55:00")', rendered)
+        self.assertNotIn('applyReportTimeFilter', rendered)
+        self.assertNotIn('id="report-filter-count"', rendered)
         self.assertIn("Detected FastFlags", rendered)
         self.assertIn("Show All Roblox Logs", rendered)
         self.assertIn("FFlagUnit", rendered)

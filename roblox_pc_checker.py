@@ -5854,10 +5854,9 @@ def render_html(report: dict) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
 <style>
-body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.account-card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;margin:10px 0;background:#fbfcfd}}.account-card small{{display:block;color:#667085;margin-top:12px}}.account-id{{color:#16a34a;font-size:28px;font-weight:700;overflow-wrap:anywhere;margin:3px 0 12px}}.timeline-reset-grid{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}}.timeline-reset-grid section{{margin:0}}.timeline-reset-grid>aside{{display:grid;gap:12px}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.reset-entry{{border-left:3px solid #16a34a;padding:4px 0 8px 10px;margin:10px 0}}.reset-entry time,.reset-entry small{{display:block;color:#667085;font-size:12px;margin-top:3px;overflow-wrap:anywhere}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}.report-controls{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}.report-controls label{{font-weight:700}}.report-controls select{{border:1px solid #cfd6df;border-radius:6px;background:white;padding:8px 10px;font:inherit}}.hidden-by-time{{display:none!important}}@media(max-width:800px){{.timeline-reset-grid{{grid-template-columns:1fr}}}}
+body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.account-card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;margin:10px 0;background:#fbfcfd}}.account-card small{{display:block;color:#667085;margin-top:12px}}.account-id{{color:#16a34a;font-size:28px;font-weight:700;overflow-wrap:anywhere;margin:3px 0 12px}}.timeline-reset-grid{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}}.timeline-reset-grid section{{margin:0}}.timeline-reset-grid>aside{{display:grid;gap:12px}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.reset-entry{{border-left:3px solid #16a34a;padding:4px 0 8px 10px;margin:10px 0}}.reset-entry time,.reset-entry small{{display:block;color:#667085;font-size:12px;margin-top:3px;overflow-wrap:anywhere}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}@media(max-width:800px){{.timeline-reset-grid{{grid-template-columns:1fr}}}}
 </style></head><body><header><h1>{APP_NAME} Report</h1><p>No confirmed result means only that available logs did not prove it. Logging coverage may be incomplete.</p></header><main>
 <section><h2>Summary</h2><div class="summary"><div class="card"><div>Scan Date</div><div class="value">{html.escape(report['scanTime'])}</div></div><div class="card"><div>Highest Result</div><div class="value">{report['highestResult']}</div></div><div class="card"><div>Top Score</div><div class="value">{report.get('topScore', 0)}</div></div><div class="card"><div>Roblox Sessions</div><div class="value">{len(report['sessions'])}</div></div></div></section>
-<section><div class="report-controls"><div><h2>Report Time Range</h2><p class="muted">Filter visible saved report entries without rescanning.</p><p id="report-filter-count" class="muted"></p></div><label for="report-time-filter">Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></div></section>
 <section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed Exploit','Suspicious'] else 'Not confirmed')}</div></div></div></section>
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'], 'First Seen')}</section>
 <section><h2>Key Artifacts</h2><p class="muted">Prefetch and deleted-file artifacts are listed here as key scan evidence. These are review artifacts, not automatic proof by themselves.</p>{html_table(key_artifact_rows, ['Type','Artifact','Path','Timestamp','Source','Confidence'], 'Timestamp')}</section>
@@ -5876,57 +5875,6 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Findings</h2>{findings_html}</section>
 <section><h2>Evidence Limitations</h2><ul>{quality}</ul></section>
 <section><h2>Raw Artifacts</h2><pre>{raw}</pre></section>
-<script>
-(function(){{
-  function parseEntryDate(entry) {{
-    var value = entry.getAttribute("data-timestamp");
-    if (!value) return null;
-    var parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return null;
-    return parsed;
-  }}
-  function applyReportTimeFilter() {{
-    var select = document.getElementById("report-time-filter");
-    if (!select) return;
-    var selected = select.value;
-    var cutoff = null;
-    var reference = new Date({json.dumps(report.get("scanTime", ""))});
-    if (Number.isNaN(reference.getTime())) reference = new Date();
-    if (selected !== "all") {{
-      cutoff = new Date(reference.getTime() - Number(selected) * 24 * 60 * 60 * 1000);
-    }}
-    var shown = 0;
-    document.querySelectorAll(".report-entry").forEach(function(entry) {{
-      if (entry.getAttribute("data-keep-visible") === "true") {{
-        entry.classList.remove("hidden-by-time");
-        shown += 1;
-        return;
-      }}
-      if (selected === "all") {{
-        entry.classList.remove("hidden-by-time");
-        shown += 1;
-        return;
-      }}
-      var stamp = parseEntryDate(entry);
-      if (!stamp) {{
-        entry.classList.remove("hidden-by-time");
-        shown += 1;
-        return;
-      }}
-      var visible = stamp >= cutoff;
-      entry.classList.toggle("hidden-by-time", !visible);
-      if (visible) shown += 1;
-    }});
-    var count = document.getElementById("report-filter-count");
-    if (count) count.textContent = shown + " report entries visible through the scan date.";
-  }}
-  document.addEventListener("DOMContentLoaded", function() {{
-    var select = document.getElementById("report-time-filter");
-    if (select) select.addEventListener("change", applyReportTimeFilter);
-    applyReportTimeFilter();
-  }});
-}})();
-</script>
 </main></body></html>"""
 
 

@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import Link from "next/link";
-import { ArrowLeft, Clock, Download } from "lucide-react";
+import { ArrowLeft, Download } from "lucide-react";
 import type { ReportRow, SecuroFinding } from "@/lib/types";
 import { countFindings } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
@@ -11,33 +11,26 @@ import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
 
 export function ReportDetail({ report }: { report: ReportRow }) {
-  const [currentReport, setCurrentReport] = useState(report);
-  const [fullReportLoaded, setFullReportLoaded] = useState(false);
-  const [loadingFullReport, setLoadingFullReport] = useState(false);
+  const currentReport = report;
   const data = currentReport.report_json;
   const primary = data.sessions[0] || {};
-  const [timeRange, setTimeRange] = useState("7");
-  const reportReferenceTime = parseTimestamp(data.scanTime)?.getTime() || Date.now();
   const visibleFindings = useMemo(() => data.findings.filter((finding) => !isSecuroSuppressedFinding(finding)), [data.findings]);
   const detectionFindings = useMemo(
     () => visibleFindings.filter((finding) => (finding.detections || []).length || (finding.detectionCategories || []).length),
     [visibleFindings]
   );
   const extraEvidence = useMemo(() => reportEvidenceGroups(data), [data]);
-  const filteredTimeline = useMemo(() => filterTimedItems(data.timeline, timeRange, (item) => item.time, reportReferenceTime), [data.timeline, timeRange, reportReferenceTime]);
-  const filteredFindings = useMemo(() => filterFindingsForPanel(visibleFindings, timeRange, reportReferenceTime), [visibleFindings, timeRange, reportReferenceTime]);
+  const filteredTimeline = data.timeline;
+  const filteredFindings = visibleFindings;
   const groupedFindings = useMemo(() => ({
     Confirmed: filteredFindings.filter((finding) => findingConfidence(finding) === "Confirmed"),
     Likely: filteredFindings.filter((finding) => findingConfidence(finding) === "Likely"),
     Possible: filteredFindings.filter((finding) => findingConfidence(finding) === "Possible")
   }), [filteredFindings]);
-  const filteredDetections = useMemo(() => filterTimedItems(detectionFindings, timeRange, (item) => item.firstSeen, reportReferenceTime), [detectionFindings, timeRange, reportReferenceTime]);
-  const filteredRobloxLogs = useMemo(() => filterTimedItems(data.robloxLogs || [], timeRange, (item) => item.startTime || item.modifiedTime, reportReferenceTime), [data.robloxLogs, timeRange, reportReferenceTime]);
-  const filteredFastFlags = useMemo(() => filterTimedItems(data.detectedFastFlags || [], timeRange, (item) => item.timestamp, reportReferenceTime), [data.detectedFastFlags, timeRange, reportReferenceTime]);
-  const filteredShellBags = useMemo(
-    () => filterTimedItems(data.shellBagArtifacts || [], timeRange, (item) => item.timestamp || item.lastInteracted || item.firstInteracted, reportReferenceTime),
-    [data.shellBagArtifacts, timeRange, reportReferenceTime]
-  );
+  const filteredDetections = detectionFindings;
+  const filteredRobloxLogs = data.robloxLogs || [];
+  const filteredFastFlags = data.detectedFastFlags || [];
+  const filteredShellBags = data.shellBagArtifacts || [];
   const accountContext = data.accountIdentifiers || {};
   const accountRows = accountContext.roblox || [];
   const installHistory = data.windowsInstallHistory || [];
@@ -57,33 +50,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
     }),
     [data.systemResetEvidence]
   );
-  const filteredEvidence = useMemo(
-    () => extraEvidence.map((group) => ({
-      ...group,
-      items: filterTimedItems(group.items, timeRange, (item) => evidenceTimestamp(item), reportReferenceTime)
-    })),
-    [extraEvidence, timeRange, reportReferenceTime]
-  );
-
-  useEffect(() => {
-    setCurrentReport(report);
-    setFullReportLoaded(false);
-    setLoadingFullReport(false);
-  }, [report]);
-
-  async function changeTimeRange(value: string) {
-    setTimeRange(value);
-    if ((value === "30" || value === "all") && !fullReportLoaded && !loadingFullReport) {
-      setLoadingFullReport(true);
-      const days = value === "all" ? 3650 : 30;
-      const result = await fetch(`/api/report/${report.id}?days=${days}`).then((res) => res.json()).catch(() => null);
-      if (result?.ok && result.report) {
-        setCurrentReport(result.report as ReportRow);
-        setFullReportLoaded(true);
-      }
-      setLoadingFullReport(false);
-    }
-  }
+  const filteredEvidence = extraEvidence;
 
   function exportHtml() {
     const html = buildExportHtml(currentReport);
@@ -130,34 +97,6 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           <Card><CardTitle>Possible</CardTitle><CardValue>{countFindings(data, "Possible")}</CardValue></Card>
         </section>
 
-        <Card className="mt-5 border-primary/30">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 className="flex items-center gap-2 text-lg font-semibold"><Clock size={18} className="text-primary" />Report time range</h2>
-              <p className="mt-1 text-sm text-zinc-400">Filter this report's sessions, timeline, files, process activity, and evidence sections.</p>
-            </div>
-            <select
-              id="report-time-filter"
-              className="h-10 rounded-md border border-border bg-black/30 px-3 text-sm text-white outline-none"
-              value={timeRange}
-              onChange={(event) => changeTimeRange(event.target.value)}
-            >
-              <option value="30">1 month</option>
-              <option value="14">2 weeks</option>
-              <option value="7">1 week</option>
-              <option value="3">3 days</option>
-              <option value="all">All logs</option>
-            </select>
-          </div>
-          {loadingFullReport ? <p className="mt-3 text-sm text-primary">Loading full report history...</p> : null}
-          <p className="mt-3 text-xs text-zinc-500">
-            Showing {filteredTimeline.length} timeline entries and {filteredFindings.length} findings through {formatDate(data.scanTime)}.
-          </p>
-          {!fullReportLoaded && (timeRange === "30" || timeRange === "all") ? (
-            <p className="mt-3 text-sm text-zinc-500">Full raw history loads only for 1 month or All logs to keep normal report viewing fast.</p>
-          ) : null}
-        </Card>
-
         <section className="mt-5 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
           <Card>
             <h2 className="mb-4 text-lg font-semibold">Timeline</h2>
@@ -172,7 +111,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                   <div className="text-zinc-500 md:whitespace-nowrap">{event.source || "Evidence"}</div>
                 </div>
               ))}
-              {!filteredTimeline.length ? <p className="text-sm text-zinc-500">No timeline entries in this time range.</p> : null}
+              {!filteredTimeline.length ? <p className="text-sm text-zinc-500">No timeline entries were included in this report.</p> : null}
             </div>
           </Card>
 
@@ -237,7 +176,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 </div>
               </details>
             ))}
-            {!filteredShellBags.length ? <p className="text-sm text-zinc-500">No SBECmd ShellBag artifacts were available for this time range.</p> : null}
+            {!filteredShellBags.length ? <p className="text-sm text-zinc-500">No SBECmd ShellBag artifacts were included in this report.</p> : null}
           </div>
         </Card>
 
@@ -321,7 +260,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 {flag.line ? <div className="mt-2 min-w-0 break-words text-yellow-100/80 [overflow-wrap:anywhere]">{flag.line}</div> : null}
               </div>
             ))}
-            {!filteredFastFlags.length ? <p className="text-sm text-zinc-500">No FastFlags detected in this time range.</p> : null}
+            {!filteredFastFlags.length ? <p className="text-sm text-zinc-500">No FastFlags were detected in this report.</p> : null}
           </div>
         </Card>
 
@@ -367,7 +306,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 <pre className="mt-2 max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/40 p-3 text-xs text-zinc-300">{log.rawLog || ""}</pre>
               </details>
             ))}
-            {!filteredRobloxLogs.length ? <p className="text-sm text-zinc-500">No Roblox logs in this time range.</p> : null}
+            {!filteredRobloxLogs.length ? <p className="text-sm text-zinc-500">No Roblox logs were included in this report.</p> : null}
           </div>
         </Card>
 
@@ -384,7 +323,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                       <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words bg-transparent p-0 text-xs text-zinc-300">{JSON.stringify(item, null, 2)}</pre>
                     </div>
                   ))}
-                  {!group.items.length ? <p className="text-sm text-zinc-500">No entries in this time range.</p> : null}
+                  {!group.items.length ? <p className="text-sm text-zinc-500">No entries were included.</p> : null}
                 </div>
               </details>
             ))}
@@ -414,26 +353,6 @@ type EvidenceGroup = {
   title: string;
   items: Record<string, unknown>[];
 };
-
-function filterTimedItems<T>(items: T[], range: string, getTimestamp: (item: T) => unknown, referenceTime = Date.now()) {
-  if (range === "all") return items;
-
-  const days = Number(range);
-  const cutoff = referenceTime - days * 24 * 60 * 60 * 1000;
-
-  return items.filter((item) => {
-    const timestamp = parseTimestamp(getTimestamp(item));
-    if (!timestamp) return true;
-    return timestamp.getTime() >= cutoff;
-  });
-}
-
-function filterFindingsForPanel(findings: SecuroFinding[], range: string, referenceTime = Date.now()) {
-  if (range === "all") return findings;
-  const filtered = filterTimedItems(findings, range, (item) => item.firstSeen, referenceTime);
-  const included = new Set(filtered);
-  return findings.filter((finding) => included.has(finding) || isConfirmedFinding(finding));
-}
 
 function parseTimestamp(value: unknown) {
   if (!value) return null;
@@ -576,8 +495,6 @@ function buildExportHtml(report: ReportRow) {
       section{border:1px solid #264234;border-radius:8px;padding:16px;margin:12px 0}
       pre{white-space:pre-wrap;word-break:break-word;background:#050807;padding:12px;border-radius:8px;max-height:420px;overflow:auto}
       table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #264234;padding:8px;text-align:left;vertical-align:top}
-      .controls{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-      select{background:#050807;color:#eefaf1;border:1px solid #264234;border-radius:6px;padding:8px 10px}
       .report-entry{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 0}
       .account-card{border:1px solid #264234;border-radius:8px;padding:14px;margin:10px 0}
       .account-card small{color:#8b93a7}.account-id{color:#00d26a;font-size:26px;font-weight:700;overflow-wrap:anywhere;margin:4px 0 12px}
@@ -586,13 +503,11 @@ function buildExportHtml(report: ReportRow) {
       .timeline-entry{display:grid;grid-template-columns:160px minmax(0,1fr) 180px;gap:16px;align-items:start;overflow:hidden}
       .timeline-message{min-width:0;overflow-wrap:anywhere;word-break:break-word;white-space:normal}
       .timeline-source{white-space:nowrap;color:#8b93a7}
-      .hidden-by-time{display:none!important}
       @media(max-width:720px){.timeline-entry,.timeline-reset-grid{grid-template-columns:1fr}.timeline-source{white-space:normal}}
     </style>
     </head><body>
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
-    <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p><p id="report-filter-count"></p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
     <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section></aside></div>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
@@ -600,11 +515,6 @@ function buildExportHtml(report: ReportRow) {
     <section><h2>Findings</h2>${visibleFindings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`, "div", isConfirmedFinding(finding))).join("") || "<p>No findings.</p>"}</section>
     ${evidence}
     <section><h2>Raw report</h2><pre>${escape(JSON.stringify(data, null, 2))}</pre></section>
-    <script>
-      function parseEntryTime(entry){var value=entry.getAttribute("data-timestamp");if(!value)return null;var time=Date.parse(value);return Number.isNaN(time)?null:time}
-      function applyReportTimeFilter(){var select=document.getElementById("report-time-filter");var selected=select?select.value:"7";var reference=Date.parse(${JSON.stringify(data.scanTime)})||Date.now();var cutoff=selected==="all"?0:reference-(Number(selected)*24*60*60*1000);var shown=0;document.querySelectorAll(".report-entry").forEach(function(entry){var keepVisible=entry.getAttribute("data-keep-visible")==="true";var time=parseEntryTime(entry);var show=keepVisible||selected==="all"||!time||time>=cutoff;entry.classList.toggle("hidden-by-time",!show);if(show)shown++});var count=document.getElementById("report-filter-count");if(count)count.textContent=shown+" timestamped report entries visible."}
-      document.getElementById("report-time-filter").addEventListener("change",applyReportTimeFilter);applyReportTimeFilter();
-    </script>
     </body></html>`;
 }
 
