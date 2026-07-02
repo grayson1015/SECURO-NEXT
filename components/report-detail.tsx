@@ -26,9 +26,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   );
   const extraEvidence = useMemo(() => reportEvidenceGroups(data), [data]);
   const filteredTimeline = useMemo(() => filterTimedItems(data.timeline, timeRange, (item) => item.time, reportReferenceTime), [data.timeline, timeRange, reportReferenceTime]);
-  // Findings are the permanent scan verdict. The time selector filters supporting
-  // evidence and timeline rows, but must never make counted findings disappear.
-  const filteredFindings = visibleFindings;
+  const filteredFindings = useMemo(() => filterFindingsForPanel(visibleFindings, timeRange, reportReferenceTime), [visibleFindings, timeRange, reportReferenceTime]);
   const groupedFindings = useMemo(() => ({
     Confirmed: filteredFindings.filter((finding) => findingConfidence(finding) === "Confirmed"),
     Likely: filteredFindings.filter((finding) => findingConfidence(finding) === "Likely"),
@@ -159,7 +157,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           {loadingFullReport ? <p className="mt-3 text-sm text-primary">Loading full report history...</p> : null}
           {rangeLoadError ? <p className="mt-3 text-sm text-red-300">{rangeLoadError}</p> : null}
           <p className="mt-3 text-xs text-zinc-500">
-            Showing {filteredTimeline.length} timeline entries for this range and all {filteredFindings.length} scan findings.
+            Showing {filteredTimeline.length} timeline entries and {filteredFindings.length} findings through {formatDate(data.scanTime)}.
           </p>
           {Number(data.scanDays || 0) > 0 && timeRange !== "all" && Number(timeRange) > Number(data.scanDays) ? (
             <p className="mt-3 text-sm text-yellow-200">This scan collected approximately {String(data.scanDays)} days of evidence, so older entries may not exist in this report.</p>
@@ -436,6 +434,10 @@ function filterTimedItems<T>(items: T[], range: string, getTimestamp: (item: T) 
   });
 }
 
+function filterFindingsForPanel(findings: SecuroFinding[], range: string, referenceTime = Date.now()) {
+  return filterTimedItems(findings, range, (item) => item.firstSeen, referenceTime);
+}
+
 function parseTimestamp(value: unknown) {
   if (!value) return null;
   const date = new Date(String(value));
@@ -598,7 +600,7 @@ function buildExportHtml(report: ReportRow) {
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>
-    <section><h2>Findings</h2>${visibleFindings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`, "div", true)).join("") || "<p>No findings.</p>"}</section>
+    <section><h2>Findings</h2>${visibleFindings.map((finding) => entry(finding.firstSeen, `<p><b>${escape(finding.name || "Finding")}</b> ${escape(finding.classification || finding.category || "")} ${Number(finding.score || 0)}</p><p>${escape(finding.path || "")}</p>`, "div", isConfirmedFinding(finding))).join("") || "<p>No findings.</p>"}</section>
     ${evidence}
     <section><h2>Raw report</h2><pre>${escape(JSON.stringify(data, null, 2))}</pre></section>
     <script>

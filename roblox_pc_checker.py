@@ -5805,9 +5805,7 @@ def render_html(report: dict) -> str:
                 f"<div class='warn'><h4>{html.escape(d.get('category', 'Detection'))}</h4><p><b>File:</b> {html.escape(f['name'])}</p><p><b>Path:</b> {html.escape(f['path'])}</p><p><b>Detection:</b> {html.escape(d.get('category', ''))}</p><p><b>Reason:</b> {html.escape(d.get('reason', ''))}</p><p><b>Risk:</b> {html.escape(d.get('risk', ''))}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><p><b>First seen:</b> {html.escape(f['firstSeen'])}</p></div>"
                 for d in f.get("detections", [])
             )
-            # Finding cards are the scan verdict and remain visible while the
-            # report time control filters timeline and supporting artifacts.
-            keep_visible = " data-keep-visible='true'"
+            keep_visible = " data-keep-visible='true'" if group == "Confirmed" else ""
             findings_html += f"<details class='report-entry finding-card confidence-{html.escape(group.lower())}' open{html_data_timestamp(f.get('firstSeen'))}{keep_visible}><summary>{html.escape(f['name'])} - {html.escape(group)} - {f['score']} points</summary>{warnings}<p><b>Path:</b> {html.escape(f['path'])}</p><p><b>SHA256:</b> {html.escape(f['sha256'])}</p><p><b>Signer:</b> {html.escape(str(f['signer']))}</p><h4>Score</h4><ul>{breakdown}</ul><h4>Evidence</h4><ul>{evidence}</ul><p>{html.escape(f['attributionExplanation'])}</p></details>"
     roblox_log_html = ""
     for item in report.get("robloxLogs", []):
