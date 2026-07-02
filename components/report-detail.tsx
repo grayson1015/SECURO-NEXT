@@ -35,6 +35,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredSessions = useMemo(() => filterTimedItems(data.sessions, timeRange, (item) => item.launchTime || item.exitTime, reportReferenceTime), [data.sessions, timeRange, reportReferenceTime]);
   const filteredRobloxLogs = useMemo(() => filterTimedItems(data.robloxLogs || [], timeRange, (item) => item.startTime || item.modifiedTime, reportReferenceTime), [data.robloxLogs, timeRange, reportReferenceTime]);
   const filteredFastFlags = useMemo(() => filterTimedItems(data.detectedFastFlags || [], timeRange, (item) => item.timestamp, reportReferenceTime), [data.detectedFastFlags, timeRange, reportReferenceTime]);
+  const filteredShellBags = useMemo(
+    () => filterTimedItems(data.shellBagArtifacts || [], timeRange, (item) => item.timestamp || item.lastInteracted || item.firstInteracted, reportReferenceTime),
+    [data.shellBagArtifacts, timeRange, reportReferenceTime]
+  );
   const accountContext = data.accountIdentifiers || {};
   const accountRows = accountContext.roblox || [];
   const installHistory = data.windowsInstallHistory || [];
@@ -211,6 +215,32 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             </Card>
           </div>
         </section>
+
+        <Card className="mt-5">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">ShellBag Analyzer</h2>
+              <p className="mt-1 text-sm text-zinc-400">Read-only folder history recovered by SBECmd. These traces are context, not proof of execution.</p>
+            </div>
+            <span className="text-sm text-primary">{filteredShellBags.length} artifacts</span>
+          </div>
+          <div className="space-y-2">
+            {filteredShellBags.map((item, index) => (
+              <details key={`${item.path}-${item.timestamp}-${index}`} className="rounded-md border border-border bg-black/20 p-3">
+                <summary className="cursor-pointer text-sm font-medium text-zinc-200">
+                  {item.classification || "ShellBag Folder Trace"}: {item.path || "Path unavailable"}
+                </summary>
+                <div className="mt-3 grid gap-2 text-xs text-zinc-400 md:grid-cols-2">
+                  <div>Time: {item.timestamp ? formatDate(item.timestamp) : "Unavailable"}</div>
+                  <div>Shell type: {item.shellType || "Unknown"}</div>
+                  <div>Source hive: {item.sourceHive || "Unknown"}</div>
+                  <div>Slot / MRU: {item.slot || "-"} / {item.mruPosition || "-"}</div>
+                </div>
+              </details>
+            ))}
+            {!filteredShellBags.length ? <p className="text-sm text-zinc-500">No SBECmd ShellBag artifacts were available for this time range.</p> : null}
+          </div>
+        </Card>
 
         <Card className="mt-5">
           <h2 className="mb-4 text-lg font-semibold">Findings</h2>
@@ -498,6 +528,7 @@ function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
     ["Engine Results", raw.engineResults || raw.engine_results],
     ["Detected FastFlags", raw.detectedFastFlags || raw.detected_fast_flags],
     ["USN Journal Events", raw.usnJournalEvents || raw.usn_journal_events],
+    ["ShellBag Artifacts", raw.shellBagArtifacts || raw.shellbag_artifacts],
     ["Roblox Logs", raw.robloxLogs || raw.roblox_logs],
     ["Evidence Sources", Object.entries(data.evidenceSources || {}).map(([source, value]) => ({ source, value }))],
     ["Limitations", (data.limitations || []).map((text) => ({ text }))]

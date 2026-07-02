@@ -52,6 +52,9 @@ def test_config():
         "external_forensic_tools_dir": "",
         "prefetch_parser_enabled": False,
         "prefetch_parser_timeout_seconds": 25,
+        "shellbag_parser_enabled": False,
+        "shellbag_parser_timeout_seconds": 30,
+        "shellbag_max_records": 5000,
         "usn_journal_enabled": False,
         "usn_journal_max_records": 5000,
         "usn_journal_window_bytes": 4000000,
@@ -735,6 +738,50 @@ File Name           : notes.txt
         self.assertIn("--csv", calls[0][0])
         self.assertTrue(any("PECmd" in note for note in notes))
 
+    def test_sbecmd_runs_live_read_only_without_enabling_every_forensic_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = root / "Tools"
+            tools.mkdir()
+            (tools / "SBECmd.exe").write_text("fixture", encoding="utf-8")
+            config = test_config()
+            config["storage_base_dir"] = str(root / "Securo")
+            config["external_forensic_tools_enabled"] = False
+            config["shellbag_parser_enabled"] = True
+            config["external_forensic_tools_dir"] = str(tools)
+            calls = []
+            original = checker.run_command
+            try:
+                checker.run_command = lambda args, timeout=20: calls.append((args, timeout)) or ""
+                notes = checker.execute_external_forensic_tools(7, config)
+            finally:
+                checker.run_command = original
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(Path(calls[0][0][0]).name, "SBECmd.exe")
+        self.assertIn("-l", calls[0][0])
+        self.assertIn("--csv", calls[0][0])
+        self.assertIn("--csvf", calls[0][0])
+        self.assertTrue(any("SBECmd live ShellBag parser completed" in note for note in notes))
+
+    def test_sbecmd_csv_is_preserved_and_suspicious_paths_become_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export = Path(tmp) / "SBECmd_ShellBags.csv"
+            export.write_text(
+                "AbsolutePath,ShellType,LastInteracted,FirstInteracted,SourceFile,Slot,MruPosition\n"
+                "C:\\Users\\Test\\Downloads\\Solara,Directory,2026-06-02 17:55:00,2026-06-02 17:50:00,UsrClass.dat,4,1\n"
+                "\\\\server\\share\\NormalFolder,Network,2026-06-02 18:00:00,2026-06-02 17:58:00,UsrClass.dat,5,2\n",
+                encoding="utf-8",
+            )
+            config = test_config()
+            config["forensic_export_dirs"] = [tmp]
+            config["shellbag_max_records"] = 100
+            findings, timeline, artifacts = checker.collect_sbecmd_shellbags(3650, config, [])
+        self.assertEqual(len(artifacts), 2)
+        self.assertEqual(artifacts[0]["classification"], "Old / Deleted Folder")
+        self.assertEqual(artifacts[1]["classification"], "Network / External Folder")
+        self.assertTrue(any("Solara" in finding["path"] for finding in findings))
+        self.assertTrue(any("ShellBag Old / Deleted Folder" in event["text"] for event in timeline))
+
     def test_fastflag_injector_pattern_becomes_confirmed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "fastflag_injector_gui_enhanced.exe"
@@ -1187,6 +1234,15 @@ File Name           : notes.txt
                 "usn": "0x100",
                 "parentFileId": "0x01",
             }],
+            "shellBagArtifacts": [{
+                "timestamp": "2026-06-02 17:54:00",
+                "classification": "Old / Deleted Folder",
+                "path": "C:\\Users\\Test\\Downloads\\Solara",
+                "shellType": "Directory",
+                "sourceHive": "UsrClass.dat",
+                "slot": "4",
+                "mruPosition": "1",
+            }],
             "limitations": [],
             "finalStatement": "test",
         }
@@ -1211,6 +1267,8 @@ File Name           : notes.txt
         self.assertIn("Possible Windows Reset/Reinstall", rendered)
         self.assertIn("USN Journal Events", rendered)
         self.assertIn("FILE_DELETE", rendered)
+        self.assertIn("ShellBag Analyzer", rendered)
+        self.assertIn("Old / Deleted Folder", rendered)
 
     def test_invalid_pin_stops_before_scan(self):
         original = checker.post_json

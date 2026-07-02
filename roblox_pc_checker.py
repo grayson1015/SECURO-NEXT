@@ -351,6 +351,9 @@ def load_config() -> dict:
     config.setdefault("forensic_export_max_rows", 5000)
     config.setdefault("prefetch_parser_enabled", True)
     config.setdefault("prefetch_parser_timeout_seconds", 25)
+    config.setdefault("shellbag_parser_enabled", True)
+    config.setdefault("shellbag_parser_timeout_seconds", 30)
+    config.setdefault("shellbag_max_records", 5000)
     config.setdefault("usn_journal_enabled", True)
     config.setdefault("usn_journal_max_records", 5000)
     config.setdefault("usn_journal_window_bytes", 4_000_000)
@@ -505,6 +508,7 @@ def scan_profiles() -> dict:
             "usn_journal_max_records": 1500,
             "usn_journal_window_bytes": 1_500_000,
             "usn_journal_timeout_seconds": 5,
+            "shellbag_max_records": 1000,
             "description": "Faster triage scan. Some slower artifact sources are skipped and listed as limitations.",
         },
         "standard": {
@@ -520,6 +524,7 @@ def scan_profiles() -> dict:
             "usn_journal_max_records": 5000,
             "usn_journal_window_bytes": 4_000_000,
             "usn_journal_timeout_seconds": 12,
+            "shellbag_max_records": 5000,
             "description": "Balanced scan with broad Roblox, execution, file, AV, browser, and artifact coverage.",
         },
         "deep": {
@@ -535,6 +540,7 @@ def scan_profiles() -> dict:
             "usn_journal_max_records": 12000,
             "usn_journal_window_bytes": 12_000_000,
             "usn_journal_timeout_seconds": 24,
+            "shellbag_max_records": 12000,
             "description": "Maximum coverage scan with an 8 minute hard stop and terminal report upload.",
         },
     }
@@ -2367,8 +2373,9 @@ def run_forensic_tool(args: list[str], config: dict, timeout: int) -> str:
 def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
     # Runs only known read-only parser tools, with short timeouts, into Securo's local ToolOutput folder.
     run_prefetch_parser = bool(config.get("prefetch_parser_enabled", True))
+    run_shellbag_parser = bool(config.get("shellbag_parser_enabled", True))
     run_all_parsers = bool(config.get("external_forensic_tools_enabled"))
-    if not run_prefetch_parser and not run_all_parsers:
+    if not run_prefetch_parser and not run_shellbag_parser and not run_all_parsers:
         return []
     tools = available_forensic_tools(config)
     if not tools:
@@ -2377,6 +2384,7 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
     output_root.mkdir(parents=True, exist_ok=True)
     timeout = max(10, int(config.get("external_forensic_tool_timeout_seconds") or 55))
     prefetch_timeout = max(8, int(config.get("prefetch_parser_timeout_seconds") or 25))
+    shellbag_timeout = max(8, int(config.get("shellbag_parser_timeout_seconds") or 30))
     notes = []
 
     def note(message: str):
@@ -2384,9 +2392,20 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
         write_app_log(config, message)
 
     prefetch_dir = Path(os.path.expandvars(str(config.get("prefetch_dir") or "C:/Windows/Prefetch"))).expanduser()
-    if "PECmd.exe" in tools and safe_exists(prefetch_dir):
+    if (run_prefetch_parser or run_all_parsers) and "PECmd.exe" in tools and safe_exists(prefetch_dir):
         out = run_forensic_tool([str(tools["PECmd.exe"]), "-d", str(prefetch_dir), "--csv", str(output_root)], config, prefetch_timeout)
         note("PECmd Prefetch parser completed." if "COMMAND_ERROR" not in out else f"PECmd Prefetch parser issue: {out[:180]}")
+
+    if run_shellbag_parser and "SBECmd.exe" in tools:
+        out = run_forensic_tool(
+            [str(tools["SBECmd.exe"]), "-l", "--csv", str(output_root), "--csvf", "SBECmd_ShellBags.csv"],
+            config,
+            shellbag_timeout,
+        )
+        if "requires administrator" in out.lower():
+            note("SBECmd ShellBag parser requires administrator access.")
+        else:
+            note("SBECmd live ShellBag parser completed." if "COMMAND_ERROR" not in out else f"SBECmd ShellBag parser issue: {out[:180]}")
 
     if not run_all_parsers:
         if notes:
@@ -2403,12 +2422,6 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
             continue
         out = run_forensic_tool([str(tools["JLECmd.exe"]), "-d", str(root), "--csv", str(output_root)], config, timeout)
         note("JLECmd Jump List parser completed." if "COMMAND_ERROR" not in out else f"JLECmd Jump List parser issue: {out[:180]}")
-
-    appdata = Path(os.environ.get("APPDATA", ""))
-    ntuser = Path(os.environ.get("USERPROFILE", "")) / "NTUSER.DAT"
-    if "SBECmd.exe" in tools and safe_exists(ntuser):
-        out = run_forensic_tool([str(tools["SBECmd.exe"]), "-d", str(appdata), "--csv", str(output_root)], config, timeout)
-        note("SBECmd ShellBag parser completed." if "COMMAND_ERROR" not in out else f"SBECmd ShellBag parser issue: {out[:180]}")
 
     srum = Path("C:/Windows/System32/sru/SRUDB.dat")
     if "SrumECmd.exe" in tools and safe_exists(srum):
@@ -2495,7 +2508,8 @@ def forensic_row_time(row: dict) -> dt.datetime | None:
     for key in (
         "Timestamp", "Time", "Created", "Created0x10", "Modified", "LastModified", "LastModified0x30",
         "LastRun", "LastRun0", "LastRunTime", "LastWriteTime", "KeyLastWriteTimestamp",
-        "SourceCreated", "SourceModified", "DeletedTime", "DeletionTime",
+        "SourceCreated", "SourceModified", "DeletedTime", "DeletionTime", "FirstInteracted",
+        "LastInteracted", "CreatedOn", "ModifiedOn", "AccessedOn",
     ):
         parsed = parse_dt(csv_value(row, key))
         if parsed:
@@ -2507,7 +2521,8 @@ def forensic_row_path(row: dict) -> str:
     for key in (
         "FullPath", "Path", "FilePath", "TargetPath", "LocalPath", "ExecutablePath",
         "ProgramPath", "ApplicationPath", "Name", "Filename", "FileName", "ExecutableName",
-        "SourceFile", "SourceFilename", "Application", "AppId",
+        "SourceFile", "SourceFilename", "Application", "AppId", "AbsolutePath", "FolderPath",
+        "FolderName", "Value",
     ):
         value = csv_value(row, key)
         if value:
@@ -2551,6 +2566,8 @@ def collect_external_forensic_exports(days: int, config: dict, sessions: list[di
                     reader = csv.DictReader(f)
                     headers = list(reader.fieldnames or [])
                     family = forensic_export_family(csv_path, headers)
+                    if family == "SBECmd":
+                        continue
                     for row in reader:
                         if scanned_rows >= max_rows:
                             break
@@ -2624,6 +2641,116 @@ def collect_external_forensic_exports(days: int, config: dict, sessions: list[di
             except (OSError, csv.Error):
                 continue
     return list(findings.values()), timeline
+
+
+def shellbag_artifact_classification(path_text: str, shell_type: str) -> str:
+    text = f"{path_text} {shell_type}".lower()
+    if path_text.startswith("\\\\") or any(term in text for term in ("network", "removable", "external", "usb")):
+        return "Network / External Folder"
+    if re.match(r"^[A-Za-z]:[\\/]", path_text):
+        try:
+            return "Existing Folder" if Path(path_text).exists() else "Old / Deleted Folder"
+        except OSError:
+            return "Old / Deleted Folder"
+    return "System / Shell Namespace"
+
+
+def collect_sbecmd_shellbags(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    # SBECmd reads live ShellBag registry data and exports reconstructed paths without modifying the registry.
+    findings = {}
+    timeline = []
+    artifacts = []
+    seen = set()
+    cut = cutoff(days)
+    max_records = max(100, int(config.get("shellbag_max_records") or 5000))
+    csv_files = []
+    for root in forensic_export_dirs(config):
+        if not safe_exists(root):
+            continue
+        try:
+            csv_files.extend(
+                path for path in root.rglob("*.csv")
+                if "sbecmd" in path.name.lower() or "shellbag" in path.name.lower()
+            )
+        except OSError:
+            continue
+    try:
+        csv_files = sorted(set(csv_files), key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
+    for csv_path in csv_files[:20]:
+        if len(artifacts) >= max_records:
+            break
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    if len(artifacts) >= max_records:
+                        break
+                    when = forensic_row_time(row)
+                    if when and when < cut:
+                        continue
+                    path_text = (
+                        csv_value(row, "AbsolutePath", "FolderPath", "Path", "FullPath")
+                        or csv_value(row, "FolderName", "Value", "Name")
+                    )
+                    if not path_text:
+                        continue
+                    shell_type = csv_value(row, "ShellType", "Type", "BagType")
+                    source_hive = csv_value(row, "SourceFile", "SourceFilename", "HivePath")
+                    first_interacted = csv_value(row, "FirstInteracted", "CreatedOn", "Created")
+                    last_interacted = csv_value(row, "LastInteracted", "ModifiedOn", "LastWriteTime")
+                    slot = csv_value(row, "Slot", "NodeSlot")
+                    mru = csv_value(row, "MruPosition", "MRUPosition", "MRU")
+                    classification = shellbag_artifact_classification(path_text, shell_type)
+                    stamp = when.isoformat(sep=" ", timespec="seconds") if when else (last_interacted or first_interacted)
+                    identity = (path_text.lower(), stamp, source_hive.lower())
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    artifact = {
+                        "path": path_text,
+                        "classification": classification,
+                        "shellType": shell_type,
+                        "timestamp": stamp,
+                        "firstInteracted": first_interacted,
+                        "lastInteracted": last_interacted,
+                        "slot": slot,
+                        "mruPosition": mru,
+                        "sourceHive": source_hive,
+                        "sourceExport": str(csv_path),
+                        "manualReviewRequired": classification != "Existing Folder",
+                    }
+                    artifacts.append(artifact)
+                    suspicious = suspicious_text(path_text, config) or bool(ioc_text_matches(path_text, config))
+                    if not suspicious:
+                        continue
+                    reason = f"SBECmd ShellBag path requires review: {path_text} ({classification})"
+                    finding = make_possible_context_finding(
+                        path_text,
+                        Path(path_text).name or "ShellBag path",
+                        "ShellBag Analyzer",
+                        reason,
+                        when or parse_dt(stamp),
+                        config,
+                    )
+                    finding["evidence_types"].append("shellbag_context")
+                    finding["supporting_evidence"].append(f"SBECmd source hive: {source_hive or 'live registry'}")
+                    add_detection(finding, "ShellBag Analyzer Context", reason, "Medium", 15)
+                    if classification == "Old / Deleted Folder":
+                        add_detection(finding, "Old / Deleted Folder Trace", "ShellBag retained a suspicious folder path that is no longer present.", "Medium", 15)
+                    elif classification == "Network / External Folder":
+                        add_detection(finding, "Network / External Folder Trace", "ShellBag retained a suspicious network or external-device folder path.", "Medium", 15)
+                    if near_any_session(stamp, sessions):
+                        add_score(finding, config["score_rules"].get("near_roblox_session", 25), "ShellBag interaction timestamp is near Roblox activity")
+                    merge_findings(findings, finding)
+                    timeline.append({
+                        "time": finding["first_seen"],
+                        "source": "SBECmd ShellBag",
+                        "text": f"ShellBag {classification}: {path_text}",
+                    })
+        except (OSError, csv.Error):
+            continue
+    return list(findings.values()), timeline, artifacts
 
 
 def extract_artifact_strings(path: Path, max_bytes: int = 2_000_000) -> dict:
@@ -4776,6 +4903,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     jump_list_findings, jump_list_timeline = collect_jump_list_context(days, config, sessions_raw)
     amcache_findings, amcache_timeline = collect_amcache_context(days, config, sessions_raw)
     external_tool_notes = execute_external_forensic_tools(days, config)
+    sbecmd_findings, sbecmd_timeline, shellbag_artifacts = collect_sbecmd_shellbags(days, config, sessions_raw)
     external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=verbose)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
@@ -4809,6 +4937,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + recycle_timeline
         + jump_list_timeline
         + amcache_timeline
+        + sbecmd_timeline
         + external_forensic_timeline
         + file_timeline
         + ps_timeline
@@ -4820,7 +4949,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, usn_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, usn_findings, recycle_findings, jump_list_findings, amcache_findings, sbecmd_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -4861,6 +4990,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
         "usnJournalEvents": usn_events,
+        "shellBagArtifacts": shellbag_artifacts,
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
         "correlationFindings": correlation_findings_for_report(findings),
@@ -5096,6 +5226,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         external_tool_notes = []
         note_stage_skipped(config, progress, "Optional forensic parser tools", stage_limitations, 30, 32)
     emit_progress(progress, "Checking forensic parser exports", 32)
+    sbecmd_findings, sbecmd_timeline, shellbag_artifacts = collect_sbecmd_shellbags(days, config, sessions_raw)
     external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
     emit_progress(progress, "Checking file artifacts", 34)
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
@@ -5158,6 +5289,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + recycle_timeline
         + jump_list_timeline
         + amcache_timeline
+        + sbecmd_timeline
         + external_forensic_timeline
         + file_timeline
         + ps_timeline
@@ -5169,7 +5301,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + warning_timeline
     )
     findings = combine_findings(
-        [process_findings, running_findings, network_findings, prefetch_findings, usn_findings, recycle_findings, jump_list_findings, amcache_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
+        [process_findings, running_findings, network_findings, prefetch_findings, usn_findings, recycle_findings, jump_list_findings, amcache_findings, sbecmd_findings, external_forensic_findings, file_findings, ps_findings, defender_findings, persistence_findings, browser_findings, shellbag_findings, recovery_findings, warning_findings],
         config,
     )
     correlation_findings = build_forensic_correlation_findings(findings, raw_timeline, sessions_raw, config)
@@ -5211,6 +5343,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
         "usnJournalEvents": usn_events,
+        "shellBagArtifacts": shellbag_artifacts,
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
         "correlationFindings": correlation_findings_for_report(findings),
@@ -5437,6 +5570,15 @@ def render_txt(report: dict) -> str:
             f"{item.get('timestamp')} {item.get('eventType')} {item.get('fileName')} "
             f"Reason={item.get('reason')} USN={item.get('usn')} Parent={item.get('parentFileId')}"
         )
+    lines += ["", "ShellBag Analyzer", "-----------------"]
+    if not report.get("shellBagArtifacts"):
+        lines.append("No SBECmd ShellBag artifacts were available.")
+    for item in report.get("shellBagArtifacts", []):
+        lines.append(
+            f"{item.get('timestamp')} [{item.get('classification')}] {item.get('path')} "
+            f"ShellType={item.get('shellType')} Hive={item.get('sourceHive')} "
+            f"Slot={item.get('slot')} MRU={item.get('mruPosition')}"
+        )
     lines += ["Findings", "--------"]
     if not report["findings"]:
         lines += ["No confirmed Roblox injection evidence was found in available logs.", "Logging coverage may not be sufficient to rule it out.", ""]
@@ -5575,6 +5717,15 @@ def render_html(report: dict) -> str:
         "USN": item.get("usn", ""),
         "Parent ID": item.get("parentFileId", ""),
     } for item in report.get("usnJournalEvents", [])]
+    shellbag_rows = [{
+        "Timestamp": item.get("timestamp", ""),
+        "Classification": item.get("classification", ""),
+        "Path": item.get("path", ""),
+        "Shell Type": item.get("shellType", ""),
+        "Source Hive": item.get("sourceHive", ""),
+        "Slot": item.get("slot", ""),
+        "MRU": item.get("mruPosition", ""),
+    } for item in report.get("shellBagArtifacts", [])]
     account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
     account_rows = []
     for row in account_context.get("roblox", []):
@@ -5702,6 +5853,7 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'], 'First Seen')}</section>
 <section><h2>Key Artifacts</h2><p class="muted">Prefetch and deleted-file artifacts are listed here as key scan evidence. These are review artifacts, not automatic proof by themselves.</p>{html_table(key_artifact_rows, ['Type','Artifact','Path','Timestamp','Source','Confidence'], 'Timestamp')}</section>
 <section><h2>USN Journal Events</h2><p class="muted">Recent bounded NTFS create, delete, rename, and modify records. Normal file activity is not proof of cheating.</p>{html_table(usn_rows, ['Timestamp','Event','File','Reason','USN','Parent ID'], 'Timestamp')}</section>
+<section><h2>ShellBag Analyzer</h2><p class="muted">Read-only folder history exported by SBECmd. ShellBag presence shows folder interaction context and is not proof that a program executed.</p>{html_table(shellbag_rows, ['Timestamp','Classification','Path','Shell Type','Source Hive','Slot','MRU'], 'Timestamp')}</section>
 <section><h2>Forensic Correlation Findings</h2><p class="muted">These findings are built from multiple artifacts lining up in time, not from a single filename, hash, or keyword.</p>{correlation_html}</section>
 <section><h2>Interaction / Detect Logs</h2><div class="filters">{''.join(f"<span class='pill'>{x}</span>" for x in DETECT_LOG_TYPES)}</div>{html_table(detect_rows, ['Type','Detection','Severity','Confidence','Manual Review','Evidence','Timestamp','Explanation'], 'Timestamp')}</section>
 <section><h2>Warning Logs</h2><p class="muted">Warnings indicate modifications or behaviors that may reduce confidence or require review. They are not automatically cheating evidence.</p>{html_table(warning_rows, ['Detection','Severity','Confidence','Manual Review','Source','Timestamp','Explanation'], 'Timestamp')}</section>
@@ -5927,9 +6079,9 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     # Vercel rejects large function payloads before the API route can store them.
     # Keep the website report useful, but reserve the complete report for local files.
     size_profiles = [
-        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "usnEvents": 1200, "rawRoblox": False},
-        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "usnEvents": 600, "rawRoblox": False},
-        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "usnEvents": 250, "rawRoblox": False},
+        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "usnEvents": 1200, "shellbags": 800, "rawRoblox": False},
+        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "usnEvents": 600, "shellbags": 400, "rawRoblox": False},
+        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "usnEvents": 250, "shellbags": 180, "rawRoblox": False},
     ]
     for profile in size_profiles:
         compacted["timeline"] = list(report.get("timeline", []))[-profile["timeline"]:]
@@ -5946,6 +6098,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
         compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), profile["robloxLogs"], include_raw=profile["rawRoblox"])
         compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:profile["fastFlags"]]
         compacted["usnJournalEvents"] = list(report.get("usnJournalEvents", []))[:profile["usnEvents"]]
+        compacted["shellBagArtifacts"] = list(report.get("shellBagArtifacts", []))[:profile["shellbags"]]
         if isinstance(compacted.get("rawArtifacts"), list):
             compacted["rawArtifacts"] = list(report.get("rawArtifacts", []))[:profile["rawArtifacts"]]
         try:
@@ -5968,6 +6121,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), 10, include_raw=False)
     compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:120]
     compacted["usnJournalEvents"] = list(report.get("usnJournalEvents", []))[:100]
+    compacted["shellBagArtifacts"] = list(report.get("shellBagArtifacts", []))[:80]
     if isinstance(compacted.get("rawArtifacts"), list):
         compacted["rawArtifacts"] = []
     return compacted

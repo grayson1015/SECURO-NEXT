@@ -152,6 +152,19 @@ export type SecuroReportJson = {
   robloxLogs?: RobloxLogArtifact[];
   detectedFastFlags?: RobloxFastFlag[];
   usnJournalEvents?: UsnJournalEvent[];
+  shellBagArtifacts?: {
+    path?: string;
+    classification?: string;
+    shellType?: string;
+    timestamp?: string;
+    firstInteracted?: string;
+    lastInteracted?: string;
+    slot?: string;
+    mruPosition?: string;
+    sourceHive?: string;
+    sourceExport?: string;
+    manualReviewRequired?: boolean;
+  }[];
   accountIdentifiers?: AccountIdentifierContext;
   systemResetEvidence?: SystemResetEvidence[];
   windowsInstallHistory?: WindowsInstallRecord[];
