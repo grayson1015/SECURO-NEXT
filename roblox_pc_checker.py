@@ -2188,6 +2188,81 @@ def collect_system_reset_evidence(days: int, config: dict) -> tuple[list[dict], 
     return evidence, timeline
 
 
+def parse_windows_install_record(key: str, text: str) -> dict | None:
+    def reg_value(name: str) -> str:
+        match = re.search(rf"^\s*{re.escape(name)}\s+REG_\w+\s+(.+?)\s*$", text, re.I | re.M)
+        return match.group(1).strip() if match else ""
+
+    product = reg_value("ProductName")
+    release = reg_value("DisplayVersion") or reg_value("ReleaseId")
+    build = reg_value("CurrentBuild") or reg_value("CurrentBuildNumber")
+    install_raw = reg_value("InstallDate")
+    installed = ""
+    if install_raw:
+        try:
+            value = int(install_raw, 16 if install_raw.lower().startswith("0x") else 10)
+            installed = dt.datetime.fromtimestamp(value).isoformat(sep=" ", timespec="seconds")
+        except (ValueError, OSError, OverflowError):
+            installed = install_raw
+    if not any((product, release, build, installed)):
+        return None
+    return {
+        "productName": product or "Unknown Windows edition",
+        "releaseId": release,
+        "currentBuild": build,
+        "installDate": installed,
+        "source": key,
+    }
+
+
+def collect_windows_install_history() -> list[dict]:
+    keys = [r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"]
+    setup_keys = run_command(["reg", "query", r"HKLM\SYSTEM\Setup"], timeout=5)
+    for line in setup_keys.splitlines():
+        key = line.strip()
+        if re.search(r"\\Source OS\s*\(", key, re.I):
+            keys.append(key)
+    rows = []
+    seen = set()
+    for key in keys[:40]:
+        text = run_command(["reg", "query", key], timeout=4)
+        row = parse_windows_install_record(key, text)
+        if not row:
+            continue
+        identity = (row["productName"].lower(), row["releaseId"].lower(), row["currentBuild"].lower(), row["installDate"])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows.append(row)
+    return sorted(rows, key=lambda item: parse_dt(item.get("installDate")) or dt.datetime.min, reverse=True)
+
+
+def collect_sysmain_service_info(days: int) -> dict:
+    query = run_command(["sc.exe", "query", "SysMain"], timeout=5)
+    config = run_command(["sc.exe", "qc", "SysMain"], timeout=5)
+    state_match = re.search(r"STATE\s*:\s*\d+\s+([A-Z_]+)", query, re.I)
+    start_match = re.search(r"START_TYPE\s*:\s*\d+\s+([A-Z_]+)", config, re.I)
+    state = state_match.group(1).replace("_", " ").title() if state_match else "Unavailable"
+    startup = start_match.group(1).replace("_", " ").title() if start_match else "Unavailable"
+    last_changed = ""
+    change_detail = ""
+    for event in query_events("System", [7036, 7040], max(days, 3650), max_events=120, timeout=8):
+        event_text = " ".join(str(value) for value in event.get("data", {}).values())
+        if "sysmain" not in (event_text + " " + event.get("raw", "")).lower():
+            continue
+        last_changed = str(event.get("time") or "")
+        change_detail = event_text[:300]
+        break
+    return {
+        "serviceName": "SysMain",
+        "currentState": state,
+        "startupType": startup,
+        "lastChanged": last_changed,
+        "changeDetail": change_detail,
+        "manualReviewRequired": startup.lower() == "disabled",
+    }
+
+
 def query_events(log_name: str, event_ids: list[int], days: int, max_events=300, timeout=45) -> list[dict]:
     ms = days * 24 * 60 * 60 * 1000
     ids = " or ".join([f"EventID={i}" for i in event_ids])
@@ -4719,8 +4794,11 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
     if config.get("collect_system_reset_evidence"):
         reset_evidence, reset_timeline = collect_system_reset_evidence(days, config)
+        windows_install_history = collect_windows_install_history()
+        sysmain_service = collect_sysmain_service_info(days)
     else:
         reset_evidence, reset_timeline = [], []
+        windows_install_history, sysmain_service = [], {}
     raw_timeline = (
         roblox_timeline
         + process_timeline
@@ -4765,6 +4843,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     system["scan_time"] = scan_time
     limitations = limitations_from_quality(quality)
     limitations.extend(external_tool_notes)
+    if str(sysmain_service.get("startupType", "")).lower() == "disabled":
+        limitations.append("The SysMain service is disabled. Prefetch generation and execution-history coverage may be reduced; this is not proof of cheating.")
     if config.get("skip_browser_artifacts"):
         limitations.append("Browser artifacts were skipped by the selected scan profile.")
     if config.get("skip_recovery_metadata"):
@@ -4790,6 +4870,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "engineResults": engine_results,
         "accountIdentifiers": account_identifiers,
         "systemResetEvidence": reset_evidence,
+        "windowsInstallHistory": windows_install_history,
+        "sysMainService": sysmain_service,
         "limitations": limitations,
         "scanDays": days,
         "scanProfile": config.get("scan_profile", "standard"),
@@ -4991,6 +5073,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     account_identifiers = collect_safe_account_identifiers(sessions_raw, config)
     emit_progress(progress, "Checking reset and reinstall history", 10)
     reset_evidence, reset_timeline = collect_system_reset_evidence(days, config) if config.get("collect_system_reset_evidence", True) else ([], [])
+    windows_install_history = collect_windows_install_history() if config.get("collect_system_reset_evidence", True) else []
+    sysmain_service = collect_sysmain_service_info(days) if config.get("collect_system_reset_evidence", True) else {}
     emit_progress(progress, "Checking event logs", 12)
     process_findings, process_timeline = collect_process_evidence(days, config, sessions_raw)
     emit_progress(progress, "Checking running processes", 16)
@@ -5109,6 +5193,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     limitations = limitations_from_quality(quality)
     limitations.extend(stage_limitations)
     limitations.extend(external_tool_notes)
+    if str(sysmain_service.get("startupType", "")).lower() == "disabled":
+        limitations.append("The SysMain service is disabled. Prefetch generation and execution-history coverage may be reduced; this is not proof of cheating.")
     if config.get("skip_browser_artifacts"):
         limitations.append("Browser artifacts were skipped by the selected scan profile.")
     if config.get("skip_recovery_metadata"):
@@ -5134,6 +5220,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "engineResults": engine_results,
         "accountIdentifiers": account_identifiers,
         "systemResetEvidence": reset_evidence,
+        "windowsInstallHistory": windows_install_history,
+        "sysMainService": sysmain_service,
         "limitations": limitations,
         "scanDays": days,
         "scanProfile": config.get("scan_profile", "standard"),
@@ -5505,6 +5593,13 @@ def render_html(report: dict) -> str:
         "Source": item.get("source", ""),
         "Details": item.get("details", ""),
     } for item in report.get("systemResetEvidence", [])]
+    install_rows = [{
+        "Product": item.get("productName", ""),
+        "Release": item.get("releaseId", ""),
+        "Build": item.get("currentBuild", ""),
+        "Install Date": item.get("installDate", ""),
+    } for item in report.get("windowsInstallHistory", [])]
+    sysmain = report.get("sysMainService", {}) if isinstance(report.get("sysMainService"), dict) else {}
     correlation_html = ""
     if not report.get("correlationFindings"):
         correlation_html = "<p class='muted'>No cross-artifact correlation findings were generated.</p>"
@@ -5581,11 +5676,25 @@ def render_html(report: dict) -> str:
         f"</div>"
         for item in reset_rows[:12]
     )
+    install_list_html = "".join(
+        f"<div class='reset-entry report-entry'{html_data_timestamp(item.get('Install Date'))}>"
+        f"<b>{html.escape(str(item.get('Product') or 'Windows'))}</b>"
+        f"<small>Release: {html.escape(str(item.get('Release') or 'Unknown'))} | Build: {html.escape(str(item.get('Build') or 'Unknown'))}</small>"
+        f"<time>{html.escape(str(item.get('Install Date') or 'Install time unavailable'))}</time>"
+        f"</div>"
+        for item in install_rows[:8]
+    )
+    service_panel_html = (
+        f"<div class='card'><b>{html.escape(str(sysmain.get('serviceName') or 'SysMain'))}</b>"
+        f"<p>Current State: {html.escape(str(sysmain.get('currentState') or 'Unavailable'))}</p>"
+        f"<p>Startup Type: {html.escape(str(sysmain.get('startupType') or 'Unavailable'))}</p>"
+        f"<p>Last Changed: {html.escape(str(sysmain.get('lastChanged') or 'Could not determine'))}</p></div>"
+    )
     raw = html.escape(json.dumps(report, indent=2))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
 <style>
-body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline-reset-grid{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}}.timeline-reset-grid section{{margin:0}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.reset-entry{{border-left:3px solid #16a34a;padding:4px 0 8px 10px;margin:10px 0}}.reset-entry time,.reset-entry small{{display:block;color:#667085;font-size:12px;margin-top:3px;overflow-wrap:anywhere}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}.report-controls{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}.report-controls label{{font-weight:700}}.report-controls select{{border:1px solid #cfd6df;border-radius:6px;background:white;padding:8px 10px;font:inherit}}.hidden-by-time{{display:none!important}}@media(max-width:800px){{.timeline-reset-grid{{grid-template-columns:1fr}}}}
+body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.timeline-reset-grid{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}}.timeline-reset-grid section{{margin:0}}.timeline-reset-grid>aside{{display:grid;gap:12px}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.reset-entry{{border-left:3px solid #16a34a;padding:4px 0 8px 10px;margin:10px 0}}.reset-entry time,.reset-entry small{{display:block;color:#667085;font-size:12px;margin-top:3px;overflow-wrap:anywhere}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.sessions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}.session{{border:1px solid #d8dee6;border-radius:8px;padding:12px;background:#fbfcfd}}.session.suspicious,.session.confirmed{{border-color:#dc2626;background:#fee2e2;color:#7f1d1d}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}.report-controls{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}.report-controls label{{font-weight:700}}.report-controls select{{border:1px solid #cfd6df;border-radius:6px;background:white;padding:8px 10px;font:inherit}}.hidden-by-time{{display:none!important}}@media(max-width:800px){{.timeline-reset-grid{{grid-template-columns:1fr}}}}
 </style></head><body><header><h1>{APP_NAME} Report</h1><p>No confirmed result means only that available logs did not prove it. Logging coverage may be incomplete.</p></header><main>
 <section><h2>Summary</h2><div class="summary"><div class="card"><div>Scan Date</div><div class="value">{html.escape(report['scanTime'])}</div></div><div class="card"><div>Highest Result</div><div class="value">{report['highestResult']}</div></div><div class="card"><div>Top Score</div><div class="value">{report.get('topScore', 0)}</div></div><div class="card"><div>Roblox Sessions</div><div class="value">{len(report['sessions'])}</div></div></div></section>
 <section><div class="report-controls"><div><h2>Report Time Range</h2><p class="muted">Filter visible saved report entries without rescanning.</p><p id="report-filter-count" class="muted"></p></div><label for="report-time-filter">Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></div></section>
@@ -5603,7 +5712,7 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Session Information</h2><div class="sessions">{session_cards}</div>{html_table(sessions, ['Username','Display Name','User ID','Place ID','Job ID','Duration','Status'], 'Timestamp')}</section>
 <section><h2>Detected FastFlags</h2><p class="muted">FastFlags are grouped with the Roblox log where they were found.</p>{html_table(fastflag_rows, ['FastFlag','Value','Source Log','Timestamp','Place ID','Job ID'], 'Timestamp')}</section>
 <section><h2>Show All Roblox Logs</h2><p class="muted">Expand each log to inspect every captured Roblox event and the raw log text.</p>{roblox_log_html or "<p class='muted'>No raw Roblox logs were captured.</p>"}</section>
-<div class="timeline-reset-grid"><section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section><section><h2>Reset / Reinstall History</h2><p class="muted">Windows evidence may indicate a reset or reinstall, but may not prove a factory reset.</p>{reset_list_html or "<p class='muted'>No reset or reinstall evidence was available.</p>"}</section></div>
+<div class="timeline-reset-grid"><section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section><aside><section><h2>Factory Reset Information</h2><p class="muted">Install records may represent a reset, reinstall, or major Windows upgrade.</p>{install_list_html or reset_list_html or "<p class='muted'>No Windows installation records were available.</p>"}</section><section><h2>Services</h2>{service_panel_html}</section></aside></div>
 <section><h2>Findings</h2>{findings_html}</section>
 <section><h2>Evidence Limitations</h2><ul>{quality}</ul></section>
 <section><h2>Raw Artifacts</h2><pre>{raw}</pre></section>

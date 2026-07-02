@@ -1165,6 +1165,20 @@ File Name           : notes.txt
                 "source": "Windows CurrentVersion InstallDate",
                 "details": "Windows installation timestamp.",
             }],
+            "windowsInstallHistory": [{
+                "productName": "Windows 10 Home",
+                "releaseId": "2009",
+                "currentBuild": "19045",
+                "installDate": "2021-04-14 13:28:43",
+                "source": "HKLM/SYSTEM/Setup/Source OS",
+            }],
+            "sysMainService": {
+                "serviceName": "SysMain",
+                "currentState": "Stopped",
+                "startupType": "Disabled",
+                "lastChanged": "",
+                "manualReviewRequired": True,
+            },
             "usnJournalEvents": [{
                 "timestamp": "2026-06-02 17:56:00",
                 "eventType": "Deleted",
@@ -1191,7 +1205,9 @@ File Name           : notes.txt
         self.assertIn("Key Artifacts", rendered)
         self.assertIn("PREFETCH FILE: Example.exe", rendered)
         self.assertIn("Roblox Account History", rendered)
-        self.assertIn("Reset / Reinstall History", rendered)
+        self.assertIn("Factory Reset Information", rendered)
+        self.assertIn("Windows 10 Home", rendered)
+        self.assertIn("Startup Type: Disabled", rendered)
         self.assertIn("Possible Windows Reset/Reinstall", rendered)
         self.assertIn("USN Journal Events", rendered)
         self.assertIn("FILE_DELETE", rendered)
@@ -1439,6 +1455,44 @@ File Name           : notes.txt
         self.assertTrue(evidence[0]["timestamp"])
         self.assertIn("may represent", evidence[0]["details"].lower())
         self.assertTrue(timeline)
+
+    def test_windows_install_record_parser(self):
+        record = checker.parse_windows_install_record(
+            r"HKLM\SYSTEM\Setup\Source OS (Updated on 4/14/2021)",
+            """
+ProductName    REG_SZ    Windows 10 Home
+ReleaseId      REG_SZ    2009
+CurrentBuild   REG_SZ    19045
+InstallDate    REG_DWORD    0x60764fa0
+""",
+        )
+        self.assertEqual(record["productName"], "Windows 10 Home")
+        self.assertEqual(record["releaseId"], "2009")
+        self.assertEqual(record["currentBuild"], "19045")
+        self.assertTrue(record["installDate"])
+
+    def test_sysmain_service_info_reports_disabled_state(self):
+        original_run = checker.run_command
+        original_events = checker.query_events
+        try:
+            checker.run_command = lambda args, timeout=20: (
+                "STATE              : 1  STOPPED"
+                if "query" in args
+                else "START_TYPE         : 4   DISABLED"
+            )
+            checker.query_events = lambda *args, **kwargs: [{
+                "time": "2026-06-01 12:00:00",
+                "data": {"param1": "SysMain", "param2": "disabled"},
+                "raw": "SysMain disabled",
+            }]
+            info = checker.collect_sysmain_service_info(7)
+        finally:
+            checker.run_command = original_run
+            checker.query_events = original_events
+        self.assertEqual(info["currentState"], "Stopped")
+        self.assertEqual(info["startupType"], "Disabled")
+        self.assertEqual(info["lastChanged"], "2026-06-01 12:00:00")
+        self.assertTrue(info["manualReviewRequired"])
 
     def test_progress_scan_collects_account_history_before_slow_artifacts(self):
         source = inspect.getsource(checker.build_scan_report_with_progress)

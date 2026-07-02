@@ -37,6 +37,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredFastFlags = useMemo(() => filterTimedItems(data.detectedFastFlags || [], timeRange, (item) => item.timestamp, reportReferenceTime), [data.detectedFastFlags, timeRange, reportReferenceTime]);
   const accountContext = data.accountIdentifiers || {};
   const accountRows = accountContext.roblox || [];
+  const installHistory = data.windowsInstallHistory || [];
+  const sysMain = data.sysMainService || {};
   const resetHistory = useMemo(
     () => [...(data.systemResetEvidence || [])].sort((a, b) => {
       const priority = (item: { type?: string }) => {
@@ -171,20 +173,43 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             </div>
           </Card>
 
-          <Card>
-            <h2 className="text-lg font-semibold">Reset / Reinstall History</h2>
-            <p className="mt-1 text-xs text-zinc-500">Windows evidence can indicate a reset or reinstall, but may not prove a factory reset.</p>
-            <div className="mt-4 space-y-3">
-              {resetHistory.slice(0, 12).map((item, index) => (
-                <div key={`${item.timestamp}-${item.source}-${index}`} className="border-l-2 border-primary/50 pl-3 text-sm">
-                  <div className="font-medium text-zinc-200">{item.type || "Reset/install evidence"}</div>
-                  <div className="mt-0.5 text-xs text-primary">{item.timestamp ? formatDate(item.timestamp) : "Time unavailable"}</div>
-                  <div className="mt-1 break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">{item.source || "Windows evidence"}</div>
+          <div className="space-y-4">
+            <Card>
+              <h2 className="text-lg font-semibold">Factory Reset Information</h2>
+              <p className="mt-1 text-xs text-zinc-500">Install records may represent a reset, reinstall, or major Windows upgrade.</p>
+              <div className="mt-4 space-y-3">
+                {installHistory.slice(0, 8).map((item, index) => (
+                  <div key={`${item.installDate}-${item.currentBuild}-${index}`} className="border-l-2 border-primary/50 pl-3 text-xs">
+                    <div className="font-medium text-zinc-200">{item.productName || "Windows"}</div>
+                    <div className="mt-1 text-zinc-400">Release: {item.releaseId || "Unknown"} · Build: {item.currentBuild || "Unknown"}</div>
+                    <div className="mt-1 text-primary">{item.installDate ? formatDate(item.installDate) : "Install time unavailable"}</div>
+                  </div>
+                ))}
+                {!installHistory.length ? <p className="text-sm text-zinc-500">No Windows installation records were available.</p> : null}
+                {resetHistory.slice(0, 4).map((item, index) => (
+                  <div key={`${item.timestamp}-${item.source}-${index}`} className="border-l-2 border-zinc-700 pl-3 text-xs text-zinc-500">
+                    <div>{item.type || "Reset/install evidence"}</div>
+                    <div>{item.timestamp ? formatDate(item.timestamp) : item.source}</div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <Card>
+              <h2 className="text-lg font-semibold">Services</h2>
+              <div className="mt-3 rounded-md border border-border bg-black/20 p-3 text-sm">
+                <div className="font-semibold text-primary">{sysMain.serviceName || "SysMain"}</div>
+                <div className="mt-2 text-zinc-300">Current State: {sysMain.currentState || "Unavailable"}</div>
+                <div className="text-zinc-300">Startup Type: {sysMain.startupType || "Unavailable"}</div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  Last Changed: {sysMain.lastChanged ? formatDate(sysMain.lastChanged) : "Could not determine"}
                 </div>
-              ))}
-              {!resetHistory.length ? <p className="text-sm text-zinc-500">No reset or reinstall evidence was available.</p> : null}
-            </div>
-          </Card>
+              </div>
+              {sysMain.manualReviewRequired ? (
+                <p className="mt-3 text-xs text-yellow-300">SysMain is disabled. This reduces Prefetch coverage and requires manual review.</p>
+              ) : null}
+            </Card>
+          </div>
         </section>
 
         <Card className="mt-5">
@@ -531,6 +556,12 @@ function buildExportHtml(report: ReportRow) {
     <p>${escape(item.timestamp || "Time unavailable")}</p>
     <p>${escape(item.source || "Windows evidence")}</p>
   `)).join("");
+  const installHistory = (data.windowsInstallHistory || []).slice(0, 8).map((item) => entry(item.installDate, `
+    <p><b>${escape(item.productName || "Windows")}</b></p>
+    <p>Release: ${escape(item.releaseId || "Unknown")} · Build: ${escape(item.currentBuild || "Unknown")}</p>
+    <p>${escape(item.installDate || "Install time unavailable")}</p>
+  `)).join("");
+  const sysMain = data.sysMainService || {};
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
     <style>
@@ -542,6 +573,7 @@ function buildExportHtml(report: ReportRow) {
       select{background:#050807;color:#eefaf1;border:1px solid #264234;border-radius:6px;padding:8px 10px}
       .report-entry{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 0}
       .timeline-reset-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}
+      .timeline-reset-grid>aside{display:grid;gap:12px}
       .timeline-entry{display:grid;grid-template-columns:160px minmax(0,1fr) 180px;gap:16px;align-items:start;overflow:hidden}
       .timeline-message{min-width:0;overflow-wrap:anywhere;word-break:break-word;white-space:normal}
       .timeline-source{white-space:nowrap;color:#8b93a7}
@@ -552,7 +584,7 @@ function buildExportHtml(report: ReportRow) {
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
     <section class="controls"><div><h2>Report Time Range</h2><p>Filter this report's evidence without rescanning.</p><p id="report-filter-count"></p></div><label>Show <select id="report-time-filter"><option value="30">1 month</option><option value="14">2 weeks</option><option value="7" selected>1 week</option><option value="3">3 days</option><option value="all">All logs</option></select></label></section>
-    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><section><h2>Reset / Reinstall History</h2><p>Windows evidence may indicate a reset or reinstall, but may not prove a factory reset.</p>${resetHistory || "<p>No reset or reinstall evidence available.</p>"}</section></div>
+    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section></aside></div>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Sessions</h2>${data.sessions.map((session) => entry(session.launchTime || session.exitTime, `<p><b>${escape(session.username || "Unknown user")}</b></p><p>User ID: ${escape(session.userId || "")}</p><p>Place: ${escape(session.placeId || session.gameId || "")}</p><p>Duration: ${escape(session.duration || "unknown")}</p><p>Status: ${escape(session.status || "Clean")}</p>`)).join("") || "<p>No sessions.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>

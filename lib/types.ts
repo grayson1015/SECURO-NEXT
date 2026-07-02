@@ -92,6 +92,23 @@ export type SystemResetEvidence = {
   eventId?: number;
 };
 
+export type WindowsInstallRecord = {
+  productName?: string;
+  releaseId?: string;
+  currentBuild?: string;
+  installDate?: string;
+  source?: string;
+};
+
+export type SysMainServiceInfo = {
+  serviceName?: string;
+  currentState?: string;
+  startupType?: string;
+  lastChanged?: string;
+  changeDetail?: string;
+  manualReviewRequired?: boolean;
+};
+
 export type UsnJournalEvent = {
   timestamp?: string;
   eventType?: "Created" | "Deleted" | "Renamed" | "Modified" | "Changed" | string;
@@ -137,6 +154,8 @@ export type SecuroReportJson = {
   usnJournalEvents?: UsnJournalEvent[];
   accountIdentifiers?: AccountIdentifierContext;
   systemResetEvidence?: SystemResetEvidence[];
+  windowsInstallHistory?: WindowsInstallRecord[];
+  sysMainService?: SysMainServiceInfo;
   findings: SecuroFinding[];
   limitations: string[];
   [key: string]: unknown;
