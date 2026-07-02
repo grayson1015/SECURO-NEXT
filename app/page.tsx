@@ -37,21 +37,19 @@ export default function LandingPage() {
           </div>
         </div>
 
-        <div className="rounded-lg border border-primary/25 bg-zinc-950/80 p-5 shadow-2xl shadow-primary/10">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <p className="text-sm text-zinc-400">Latest risk summary</p>
-              <h2 className="text-2xl font-bold">Private moderator view</h2>
-            </div>
-            <span className="rounded-md bg-primary/15 px-3 py-1 text-sm font-semibold text-primary">Live</span>
-          </div>
-          <div className="grid gap-3">
-            {["Evidence score", "Roblox sessions", "Injection findings", "Coverage limits"].map((label, index) => (
-              <div key={label} className="flex items-center justify-between rounded-md border border-border bg-black/25 p-4">
-                <span className="text-zinc-300">{label}</span>
-                <span className="font-semibold text-white">{["78", "3", "Confirmed", "Shown"][index]}</span>
-              </div>
-            ))}
+        <div className="rounded-lg border border-primary/25 bg-zinc-950/80 p-6 shadow-2xl shadow-primary/10">
+          <p className="text-sm font-semibold text-primary">TRANSPARENT BY DESIGN</p>
+          <h2 className="mt-2 text-2xl font-bold">WHAT IS SECURO?</h2>
+          <div className="mt-5 space-y-4 text-sm leading-6 text-zinc-300">
+            <p>
+              Securo performs a read-only local audit of this Windows PC. It may inspect system metadata plus Roblox-specific logs, Roblox folder file timestamps, Roblox-related deleted-file metadata, Roblox-related shell history matches, Roblox process metadata, Roblox startup entries, and Roblox-related Windows Event Logs when available.
+            </p>
+            <p>
+              It will NOT collect passwords, cookies, authentication tokens, browser sessions, private messages, or clipboard data. It will NOT upload data, delete files, quarantine files, bypass security tools, inject into processes, or modify Roblox.
+            </p>
+            <p className="border-l-2 border-primary pl-4 text-zinc-400">
+              Findings are indicators only. Legitimate developer tools, overlays, antivirus software, virtual machines, corrupt installs, and normal Windows behavior can produce false positives.
+            </p>
           </div>
         </div>
       </section>
