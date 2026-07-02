@@ -28,7 +28,7 @@ export default function LandingPage() {
             Securo lets approved staff create a short-lived PIN, have the desktop checker scan locally with consent, and receive a structured Roblox evidence report in a private dashboard.
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
-            <a className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-5 text-sm font-semibold text-black hover:brightness-110" href="https://discord.gg/JNW36eYC" target="_blank" rel="noreferrer">
+            <a className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-5 text-sm font-semibold text-black hover:brightness-110" href="https://discord.gg/jQKua2xvC" target="_blank" rel="noreferrer">
               Join Discord
             </a>
             <Link className="inline-flex h-11 items-center justify-center rounded-md border border-border bg-zinc-900 px-5 text-sm font-semibold text-white hover:bg-zinc-800" href="/dashboard">
