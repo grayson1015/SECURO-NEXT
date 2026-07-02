@@ -10,9 +10,7 @@ export function compactReportRow(report: ReportRow, days = 7, includeRawLogs = f
 }
 
 export function compactReportJson(report: SecuroReportJson, days = 7, includeRawLogs = false): SecuroReportJson {
-  const scanTime = new Date(report.scanTime || "").getTime();
-  const referenceTime = Number.isFinite(scanTime) ? scanTime : Date.now();
-  const cutoff = Number.isFinite(days) ? referenceTime - Math.max(1, days) * DAY_MS : 0;
+  const cutoff = Number.isFinite(days) ? Date.now() - Math.max(1, days) * DAY_MS : 0;
   const inRange = (value?: string) => {
     if (!cutoff) return true;
     const time = new Date(value || "").getTime();

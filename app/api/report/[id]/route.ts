@@ -20,7 +20,6 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   if (!report) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
   const days = Number(req.nextUrl.searchParams.get("days") || 7);
-  const selectedDays = Number.isFinite(days) ? Math.max(1, days) : 7;
-  const compacted = compactReportRow(report as ReportRow, selectedDays, selectedDays >= 30);
+  const compacted = compactReportRow(report as ReportRow, Number.isFinite(days) ? days : 7, false);
   return NextResponse.json({ ok: true, report: compacted });
 }

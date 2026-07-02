@@ -12,9 +12,8 @@ import { Card, CardTitle, CardValue } from "@/components/ui/card";
 
 export function ReportDetail({ report }: { report: ReportRow }) {
   const [currentReport, setCurrentReport] = useState(report);
-  const [loadedDays, setLoadedDays] = useState(7);
+  const [fullReportLoaded, setFullReportLoaded] = useState(false);
   const [loadingFullReport, setLoadingFullReport] = useState(false);
-  const [rangeLoadError, setRangeLoadError] = useState("");
   const data = currentReport.report_json;
   const primary = data.sessions[0] || {};
   const [timeRange, setTimeRange] = useState("7");
@@ -68,23 +67,19 @@ export function ReportDetail({ report }: { report: ReportRow }) {
 
   useEffect(() => {
     setCurrentReport(report);
-    setLoadedDays(7);
+    setFullReportLoaded(false);
     setLoadingFullReport(false);
-    setRangeLoadError("");
   }, [report]);
 
   async function changeTimeRange(value: string) {
     setTimeRange(value);
-    const requestedDays = value === "all" ? 3650 : Number(value);
-    if (requestedDays > loadedDays && !loadingFullReport) {
+    if ((value === "30" || value === "all") && !fullReportLoaded && !loadingFullReport) {
       setLoadingFullReport(true);
-      setRangeLoadError("");
-      const result = await fetch(`/api/report/${report.id}?days=${requestedDays}`).then((res) => res.json()).catch(() => null);
+      const days = value === "all" ? 3650 : 30;
+      const result = await fetch(`/api/report/${report.id}?days=${days}`).then((res) => res.json()).catch(() => null);
       if (result?.ok && result.report) {
         setCurrentReport(result.report as ReportRow);
-        setLoadedDays(requestedDays);
-      } else {
-        setRangeLoadError(result?.error || "Could not load the selected report range.");
+        setFullReportLoaded(true);
       }
       setLoadingFullReport(false);
     }
@@ -155,12 +150,11 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             </select>
           </div>
           {loadingFullReport ? <p className="mt-3 text-sm text-primary">Loading full report history...</p> : null}
-          {rangeLoadError ? <p className="mt-3 text-sm text-red-300">{rangeLoadError}</p> : null}
           <p className="mt-3 text-xs text-zinc-500">
             Showing {filteredTimeline.length} timeline entries and {filteredFindings.length} findings through {formatDate(data.scanTime)}.
           </p>
-          {Number(data.scanDays || 0) > 0 && timeRange !== "all" && Number(timeRange) > Number(data.scanDays) ? (
-            <p className="mt-3 text-sm text-yellow-200">This scan collected approximately {String(data.scanDays)} days of evidence, so older entries may not exist in this report.</p>
+          {!fullReportLoaded && (timeRange === "30" || timeRange === "all") ? (
+            <p className="mt-3 text-sm text-zinc-500">Full raw history loads only for 1 month or All logs to keep normal report viewing fast.</p>
           ) : null}
         </Card>
 
@@ -429,13 +423,16 @@ function filterTimedItems<T>(items: T[], range: string, getTimestamp: (item: T) 
 
   return items.filter((item) => {
     const timestamp = parseTimestamp(getTimestamp(item));
-    if (!timestamp) return false;
+    if (!timestamp) return true;
     return timestamp.getTime() >= cutoff;
   });
 }
 
 function filterFindingsForPanel(findings: SecuroFinding[], range: string, referenceTime = Date.now()) {
-  return filterTimedItems(findings, range, (item) => item.firstSeen, referenceTime);
+  if (range === "all") return findings;
+  const filtered = filterTimedItems(findings, range, (item) => item.firstSeen, referenceTime);
+  const included = new Set(filtered);
+  return findings.filter((finding) => included.has(finding) || isConfirmedFinding(finding));
 }
 
 function parseTimestamp(value: unknown) {
