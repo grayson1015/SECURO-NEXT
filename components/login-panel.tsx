@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
+import { AnimatedBackground, Reveal } from "@/components/motion-shell";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -73,9 +74,11 @@ export function LoginPanel() {
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6">
-      <Card className="w-full max-w-md">
+      <AnimatedBackground />
+      <Reveal className="w-full max-w-md">
+      <Card className="premium-panel w-full">
         <div className="mb-6 flex items-center gap-3">
-          <div className="rounded-md bg-primary/15 p-2 text-primary">
+          <div className="rounded-md border border-primary/20 bg-primary/15 p-2 text-primary shadow-lg shadow-primary/10">
             <ShieldCheck size={26} />
           </div>
 
@@ -122,6 +125,7 @@ export function LoginPanel() {
           ) : null}
         </div>
       </Card>
+      </Reveal>
     </main>
   );
 }

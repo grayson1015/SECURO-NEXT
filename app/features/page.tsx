@@ -1,5 +1,6 @@
 import { Activity, BadgeCheck, Cpu, FileSearch, Fingerprint, ShieldAlert } from "lucide-react";
 import { Card, CardTitle } from "@/components/ui/card";
+import { PageTransition, Reveal, Stagger, StaggerItem } from "@/components/motion-shell";
 import { SiteNav } from "@/components/site-nav";
 
 const features = [
@@ -13,27 +14,31 @@ const features = [
 
 export default function FeaturesPage() {
   return (
-    <main className="min-h-screen">
+    <PageTransition>
       <SiteNav />
       <section className="mx-auto max-w-7xl px-6 py-14">
-        <p className="text-sm font-semibold text-primary">Features</p>
-        <h1 className="mt-3 max-w-3xl text-5xl font-bold">Roblox-focused evidence, organized for moderator review</h1>
-        <p className="mt-5 max-w-3xl leading-7 text-zinc-300">
-          Securo keeps checks consent-based and read-only while presenting logs, sessions, findings, limitations, and upload status in one private dashboard.
-        </p>
-        <div className="mt-10 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <Reveal>
+          <p className="text-sm font-semibold text-primary">Features</p>
+          <h1 className="mt-3 max-w-3xl text-5xl font-bold">Roblox-focused evidence, organized for moderator review</h1>
+          <p className="mt-5 max-w-3xl leading-7 text-zinc-300">
+            Securo keeps checks consent-based and read-only while presenting logs, sessions, findings, limitations, and upload status in one private dashboard.
+          </p>
+        </Reveal>
+        <Stagger className="mt-10 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {features.map((feature) => {
             const Icon = feature.icon;
             return (
-              <Card key={feature.title} className="min-h-52">
+              <StaggerItem key={feature.title}>
+              <Card className="min-h-52">
                 <Icon className="text-primary" />
                 <CardTitle className="mt-5 text-base text-white">{feature.title}</CardTitle>
                 <p className="mt-3 text-sm leading-6 text-zinc-400">{feature.text}</p>
               </Card>
+              </StaggerItem>
             );
           })}
-        </div>
+        </Stagger>
       </section>
-    </main>
+    </PageTransition>
   );
 }

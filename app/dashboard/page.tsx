@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Dashboard } from "@/components/dashboard";
 import { LoginPanel } from "@/components/login-panel";
+import { AnimatedBackground } from "@/components/motion-shell";
 
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
@@ -35,7 +36,7 @@ export default function DashboardPage() {
     };
   }, []);
 
-  if (loading) return <main className="flex min-h-screen items-center justify-center text-zinc-400">Loading Securo...</main>;
+  if (loading) return <main className="flex min-h-screen items-center justify-center text-zinc-400"><AnimatedBackground /><span className="subtle-pulse">Loading Securo...</span></main>;
   if (!activated) {
     return <LoginPanel />;
   }

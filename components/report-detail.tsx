@@ -9,6 +9,7 @@ import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
+import { AnimatedBackground, Reveal, Stagger, StaggerItem } from "@/components/motion-shell";
 
 export function ReportDetail({ report }: { report: ReportRow }) {
   const currentReport = report;
@@ -65,21 +66,23 @@ export function ReportDetail({ report }: { report: ReportRow }) {
 
   return (
     <main className="min-h-screen px-6 py-6">
+      <AnimatedBackground />
       <div className="mx-auto max-w-6xl">
-        <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
+        <Reveal className="mb-5 flex flex-wrap items-center justify-between gap-4">
           <Link className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-primary" href="/dashboard">
             <ArrowLeft size={16} /> Dashboard
           </Link>
           <Button onClick={exportHtml}><Download size={16} />Export HTML</Button>
-        </div>
+        </Reveal>
 
-        <section className="grid gap-4 md:grid-cols-4">
-          <Card><CardTitle>Scan timestamp</CardTitle><CardValue className="text-lg">{formatDate(data.scanTime)}</CardValue></Card>
-          <Card><CardTitle>Hostname</CardTitle><CardValue>{currentReport.hostname}</CardValue></Card>
-          <Card><CardTitle>Risk level</CardTitle><div className="mt-3"><Badge label={currentReport.risk_level} /></div></Card>
-          <Card><CardTitle>Evidence score</CardTitle><CardValue>{currentReport.evidence_score}</CardValue></Card>
-        </section>
+        <Stagger className="grid gap-4 md:grid-cols-4">
+          <StaggerItem><Card><CardTitle>Scan timestamp</CardTitle><CardValue className="text-lg">{formatDate(data.scanTime)}</CardValue></Card></StaggerItem>
+          <StaggerItem><Card><CardTitle>Hostname</CardTitle><CardValue>{currentReport.hostname}</CardValue></Card></StaggerItem>
+          <StaggerItem><Card><CardTitle>Risk level</CardTitle><div className="mt-3"><Badge label={currentReport.risk_level} /></div></Card></StaggerItem>
+          <StaggerItem><Card><CardTitle>Evidence score</CardTitle><CardValue>{currentReport.evidence_score}</CardValue></Card></StaggerItem>
+        </Stagger>
 
+        <Reveal delay={0.08}>
         <Card className="mt-5 border-primary/40 bg-primary/10">
           <h2 className="mb-3 text-lg font-semibold">Summary</h2>
           <div className="grid gap-3 md:grid-cols-5">
@@ -90,12 +93,13 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             <Summary label="Injection Evidence" value={data.highestResult || "Not confirmed"} />
           </div>
         </Card>
+        </Reveal>
 
-        <section className="mt-5 grid gap-4 md:grid-cols-3">
-          <Card><CardTitle>Confirmed</CardTitle><CardValue>{countFindings(data, "Confirmed")}</CardValue></Card>
-          <Card><CardTitle>Likely</CardTitle><CardValue>{countFindings(data, "Likely")}</CardValue></Card>
-          <Card><CardTitle>Possible</CardTitle><CardValue>{countFindings(data, "Possible")}</CardValue></Card>
-        </section>
+        <Stagger className="mt-5 grid gap-4 md:grid-cols-3">
+          <StaggerItem><Card><CardTitle>Confirmed</CardTitle><CardValue>{countFindings(data, "Confirmed")}</CardValue></Card></StaggerItem>
+          <StaggerItem><Card><CardTitle>Likely</CardTitle><CardValue>{countFindings(data, "Likely")}</CardValue></Card></StaggerItem>
+          <StaggerItem><Card><CardTitle>Possible</CardTitle><CardValue>{countFindings(data, "Possible")}</CardValue></Card></StaggerItem>
+        </Stagger>
 
         <section className="mt-5 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
           <Card>

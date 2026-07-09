@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { AnimatedBackground, Reveal, Stagger, StaggerItem } from "@/components/motion-shell";
 
 type TimeRange = "30d" | "14d" | "7d" | "3d";
 const timeRanges: { label: string; value: TimeRange; days: number }[] = [
@@ -108,10 +109,11 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
 
   return (
     <main className="min-h-screen px-6 py-6">
+      <AnimatedBackground />
       <div className="mx-auto max-w-7xl">
-        <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
+        <Reveal className="mb-6 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="rounded-md bg-primary/15 p-2 text-primary"><ShieldCheck /></div>
+            <div className="rounded-md border border-primary/20 bg-primary/15 p-2 text-primary shadow-lg shadow-primary/10"><ShieldCheck /></div>
             <div>
               <h1 className="text-2xl font-bold">Securo Dashboard</h1>
               <p className="text-sm text-zinc-400">Roblox PC checks, PIN sessions, and evidence review</p>
@@ -121,7 +123,7 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
             <Button onClick={() => setProfilePickerOpen(true)} disabled={busy}><Plus size={16} />Create New PIN</Button>
             <Button onClick={signOut} className="bg-zinc-800 text-white"><LogOut size={16} />Sign out</Button>
           </div>
-        </header>
+        </Reveal>
 
         {loadError ? (
           <Card className="mb-5 border-yellow-500/30 bg-yellow-500/10 text-yellow-100">
@@ -170,14 +172,14 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
           </Card>
         ) : null}
 
-        <section className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-          <Stat icon={<Timer />} title="Scan Time" value={latest ? formatDate(latest.scan_time) : "No reports"} />
-          <Stat icon={<Monitor />} title="Hostname" value={latest?.hostname || "Waiting"} />
-          <Stat icon={<Activity />} title="Sessions" value={String(sessions)} />
-          <Stat icon={<ShieldAlert />} title="Confirmed Findings" value={String(confirmed)} />
-          <Stat icon={<ShieldAlert />} title="Likely Findings" value={String(likely)} />
-          <Stat icon={<ShieldAlert />} title="Possible Findings" value={String(possible)} />
-        </section>
+        <Stagger className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
+          <StaggerItem><Stat icon={<Timer />} title="Scan Time" value={latest ? formatDate(latest.scan_time) : "No reports"} /></StaggerItem>
+          <StaggerItem><Stat icon={<Monitor />} title="Hostname" value={latest?.hostname || "Waiting"} /></StaggerItem>
+          <StaggerItem><Stat icon={<Activity />} title="Sessions" value={String(sessions)} /></StaggerItem>
+          <StaggerItem><Stat icon={<ShieldAlert />} title="Confirmed Findings" value={String(confirmed)} /></StaggerItem>
+          <StaggerItem><Stat icon={<ShieldAlert />} title="Likely Findings" value={String(likely)} /></StaggerItem>
+          <StaggerItem><Stat icon={<ShieldAlert />} title="Possible Findings" value={String(possible)} /></StaggerItem>
+        </Stagger>
         <section className="mt-4 grid gap-4 md:grid-cols-4">
           <Stat icon={<ShieldAlert />} title="Packed Files" value={String(packed)} />
           <Stat icon={<ShieldAlert />} title=".NET Detections" value={String(dotnet)} />
