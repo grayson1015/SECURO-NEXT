@@ -13,6 +13,12 @@ export function AnimatedBackground() {
   return (
     <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
       <motion.div
+        className="absolute inset-0 bg-[url('/backgrounds/securo-premium-texture.jpg')] bg-cover bg-center opacity-[.18] blur-[1px] saturate-[1.15]"
+        animate={{ scale: [1.03, 1.06, 1.03], opacity: [0.14, 0.2, 0.14] }}
+        transition={{ duration: 24, repeat: Infinity, ease: "easeInOut" }}
+      />
+      <div className="absolute inset-0 bg-[#05070a]/80" />
+      <motion.div
         className="absolute left-[-12rem] top-[-10rem] h-[32rem] w-[32rem] rounded-full bg-primary/20 blur-[120px]"
         animate={{ x: [0, 48, 12, 0], y: [0, 18, 56, 0], opacity: [0.38, 0.62, 0.42, 0.38] }}
         transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
