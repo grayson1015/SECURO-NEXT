@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent
 PYTHON = Path(sys.executable)
 PACKAGER_ROOT = ROOT / ".securo_build_tools"
 APP_NAME = "Securo"
+ICON_PATH = ROOT / "assets" / "securo.ico"
 
 
 def run(args):
@@ -54,6 +55,8 @@ def main():
             "--onedir",
             "--windowed",
             "--uac-admin",
+            "--icon",
+            str(ICON_PATH),
             "--hidden-import",
             "tkinter",
             "--add-data",
@@ -72,6 +75,8 @@ def main():
             f"{ROOT / 'config.json'};.",
             "--add-data",
             f"{ROOT / 'securo_iocs.json'};.",
+            "--add-data",
+            f"{ICON_PATH};assets",
             str(ROOT / "roblox_pc_checker.py"),
         ],
         cwd=ROOT,

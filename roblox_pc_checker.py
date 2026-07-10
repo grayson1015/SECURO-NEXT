@@ -3689,7 +3689,24 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
     max_files = int(config.get("max_files_scanned") or 25000)
     time_budget = int(config.get("file_artifact_time_budget_seconds") or 240)
     started = time.monotonic()
+    stage_deadline = started + max(1, time_budget)
     seen_files = 0
+
+    def record_limit(reason: str):
+        config["_file_artifact_status"] = {
+            "truncated": True,
+            "reason": reason,
+            "filesScanned": seen_files,
+        }
+        if progress:
+            progress(f"Checking file artifacts {reason} after {seen_files} files", files_scanned=seen_files)
+
+    def time_limit_reached() -> bool:
+        if time.monotonic() < stage_deadline:
+            return False
+        record_limit("hit time cap")
+        return True
+
     skipped_dirs = {
         "node_modules", ".git", "windowsapps", "packages", "__pycache__", ".next", "cache2",
         "inetsim", "installer", "winsxs", "softwaredistribution", "temporary internet files",
@@ -3706,9 +3723,7 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
     )
     for root in scan_roots():
         for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-            if time.monotonic() - started > time_budget:
-                if progress:
-                    progress(f"Checking file artifacts hit time cap after {seen_files} files", files_scanned=seen_files)
+            if time_limit_reached():
                 return list(findings.values()), timeline
             low_dir = str(dirpath).lower()
             if any(marker in low_dir for marker in noisy_dir_markers):
@@ -3718,14 +3733,17 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
             dirnames[:] = [d for d in dirnames if not securo_internal_path(str(Path(dirpath) / d), config)]
             if securo_internal_path(dirpath, config):
                 continue
-            if seen_files > max_files:
-                break
+            if seen_files >= max_files:
+                record_limit("hit file cap")
+                return list(findings.values()), timeline
             for filename in filenames:
+                # A single large or slow directory must not overrun the entire
+                # scan. Every detection performed before this point is retained.
+                if time_limit_reached():
+                    return list(findings.values()), timeline
                 seen_files += 1
                 if progress and seen_files % 500 == 0:
                     progress(f"Checking file artifacts... files scanned={seen_files}", files_scanned=seen_files)
-                if seen_files > max_files:
-                    break
                 path = Path(dirpath) / filename
                 try:
                     st = path.stat()
@@ -4972,6 +4990,12 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     system["scan_time"] = scan_time
     limitations = limitations_from_quality(quality)
     limitations.extend(external_tool_notes)
+    file_status = config.get("_file_artifact_status", {})
+    if file_status.get("truncated"):
+        limitations.append(
+            f"File artifact coverage was bounded: {file_status.get('reason')} after "
+            f"{file_status.get('filesScanned', 0)} files. Other forensic stages continued normally."
+        )
     if str(sysmain_service.get("startupType", "")).lower() == "disabled":
         limitations.append("The SysMain service is disabled. Prefetch generation and execution-history coverage may be reduced; this is not proof of cheating.")
     if config.get("skip_browser_artifacts"):
@@ -5325,6 +5349,12 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     limitations = limitations_from_quality(quality)
     limitations.extend(stage_limitations)
     limitations.extend(external_tool_notes)
+    file_status = config.get("_file_artifact_status", {})
+    if file_status.get("truncated"):
+        limitations.append(
+            f"File artifact coverage was bounded: {file_status.get('reason')} after "
+            f"{file_status.get('filesScanned', 0)} files. Other forensic stages continued normally."
+        )
     if str(sysmain_service.get("startupType", "")).lower() == "disabled":
         limitations.append("The SysMain service is disabled. Prefetch generation and execution-history coverage may be reduced; this is not proof of cheating.")
     if config.get("skip_browser_artifacts"):
@@ -6153,6 +6183,12 @@ class SecuroApp:
         root.geometry("600x400")
         root.resizable(False, False)
         root.configure(bg="#0A0A0A")
+        try:
+            icon_path = resource_path("assets/securo.ico")
+            if icon_path.exists():
+                root.iconbitmap(str(icon_path))
+        except Exception:
+            pass
         try:
             root.overrideredirect(True)
         except Exception:
