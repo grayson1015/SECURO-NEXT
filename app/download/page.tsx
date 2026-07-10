@@ -1,5 +1,6 @@
-import { Download, ShieldCheck } from "lucide-react";
+import { Download } from "lucide-react";
 import { PageTransition, Reveal } from "@/components/motion-shell";
+import { SecuroLogo } from "@/components/securo-logo";
 import { SiteNav } from "@/components/site-nav";
 import { Card } from "@/components/ui/card";
 
@@ -19,7 +20,7 @@ export default function DownloadPage() {
         <Card className="premium-panel mt-8">
           <div className="flex flex-wrap items-center justify-between gap-5">
             <div className="flex items-center gap-4">
-              <div className="rounded-md border border-primary/20 bg-primary/15 p-3 text-primary shadow-lg shadow-primary/10"><ShieldCheck /></div>
+              <SecuroLogo size={48} />
               <div>
                 <h2 className="text-xl font-bold">Securo.zip</h2>
                 <p className="mt-1 text-sm text-zinc-400">Portable Windows folder with Securo.exe and forensic helper tools. No Python install required.</p>

@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { BriefcaseBusiness, Eye, ShieldCheck, Trash2, UserPlus } from "lucide-react";
+import { BriefcaseBusiness, Eye, Trash2, UserPlus } from "lucide-react";
 import { LoginPanel } from "@/components/login-panel";
+import { SecuroLogo } from "@/components/securo-logo";
 import { SiteNav } from "@/components/site-nav";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
@@ -132,7 +133,7 @@ export default function AdminPage() {
         <SiteNav />
         <section className="mx-auto flex max-w-3xl flex-col items-center px-6 py-20 text-center">
           <Card>
-            <ShieldCheck className="mx-auto text-primary" />
+            <SecuroLogo size={52} className="mx-auto" />
             <h1 className="mt-4 text-2xl font-bold">Only Securo owners can access this page.</h1>
             <p className="mt-3 text-sm text-zinc-400">{message || "Ask the first owner to approve your account."}</p>
             <Link className="mt-6 inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-semibold text-black" href="/dashboard">

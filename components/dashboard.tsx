@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Activity, LogOut, Monitor, Plus, Search, ShieldAlert, ShieldCheck, Timer } from "lucide-react";
+import { Activity, LogOut, Monitor, Plus, Search, ShieldAlert, Timer } from "lucide-react";
 import type { PinRow, ReportRow, ScanProfile } from "@/lib/types";
 import { countDetectionCategory, countFindings, filterReports, primarySession } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardTitle, CardValue } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { AnimatedBackground, Reveal, Stagger, StaggerItem } from "@/components/motion-shell";
+import { SecuroLogo } from "@/components/securo-logo";
 
 type TimeRange = "30d" | "14d" | "7d" | "3d";
 const timeRanges: { label: string; value: TimeRange; days: number }[] = [
@@ -113,7 +114,7 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
       <div className="relative z-10 mx-auto max-w-7xl">
         <Reveal className="mb-6 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="rounded-md border border-primary/20 bg-primary/15 p-2 text-primary shadow-lg shadow-primary/10"><ShieldCheck /></div>
+            <SecuroLogo size={42} />
             <div>
               <h1 className="text-2xl font-bold">Securo Dashboard</h1>
               <p className="text-sm text-zinc-400">Roblox PC checks, PIN sessions, and evidence review</p>
