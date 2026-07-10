@@ -23,7 +23,7 @@ export default function LandingPage() {
             PIN-based Roblox PC checks
           </div>
           <h1 className="max-w-4xl text-5xl font-bold leading-tight text-white md:text-7xl">
-            Roblox screenshare & detection
+            Playing Clean? Prove it.
           </h1>
           <p className="mt-6 max-w-2xl text-lg leading-8 text-zinc-300">
             Securo lets approved staff create a short-lived PIN, have the desktop checker scan locally with consent, and receive a structured Roblox evidence report in a private dashboard.
