@@ -109,8 +109,8 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
 
   return (
     <main className="min-h-screen px-6 py-6">
-      <AnimatedBackground />
-      <div className="mx-auto max-w-7xl">
+      <AnimatedBackground variant="dashboard" />
+      <div className="relative z-10 mx-auto max-w-7xl">
         <Reveal className="mb-6 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="rounded-md border border-primary/20 bg-primary/15 p-2 text-primary shadow-lg shadow-primary/10"><ShieldCheck /></div>

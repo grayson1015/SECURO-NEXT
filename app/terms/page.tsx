@@ -4,7 +4,7 @@ import { SiteNav } from "@/components/site-nav";
 
 export default function TermsPage() {
   return (
-    <PageTransition>
+    <PageTransition backgroundVariant="legal">
       <SiteNav />
       <Reveal className="mx-auto flex max-w-3xl flex-col justify-center px-6 py-20">
         <Link className="mb-8 text-primary" href="/">Securo</Link>

@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 
 export default function DownloadPage() {
   return (
-    <PageTransition>
+    <PageTransition backgroundVariant="download">
       <SiteNav />
       <section className="mx-auto max-w-5xl px-6 py-14">
         <Reveal>

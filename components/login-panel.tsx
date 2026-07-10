@@ -74,8 +74,8 @@ export function LoginPanel() {
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6">
-      <AnimatedBackground />
-      <Reveal className="w-full max-w-md">
+      <AnimatedBackground variant="auth" />
+      <Reveal className="relative z-10 w-full max-w-md">
       <Card className="premium-panel w-full">
         <div className="mb-6 flex items-center gap-3">
           <div className="rounded-md border border-primary/20 bg-primary/15 p-2 text-primary shadow-lg shadow-primary/10">

@@ -66,8 +66,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
 
   return (
     <main className="min-h-screen px-6 py-6">
-      <AnimatedBackground />
-      <div className="mx-auto max-w-6xl">
+      <AnimatedBackground variant="report" />
+      <div className="relative z-10 mx-auto max-w-6xl">
         <Reveal className="mb-5 flex flex-wrap items-center justify-between gap-4">
           <Link className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-primary" href="/dashboard">
             <ArrowLeft size={16} /> Dashboard

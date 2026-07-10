@@ -14,7 +14,7 @@ const features = [
 
 export default function FeaturesPage() {
   return (
-    <PageTransition>
+    <PageTransition backgroundVariant="features">
       <SiteNav />
       <section className="mx-auto max-w-7xl px-6 py-14">
         <Reveal>

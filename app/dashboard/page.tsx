@@ -36,7 +36,7 @@ export default function DashboardPage() {
     };
   }, []);
 
-  if (loading) return <main className="flex min-h-screen items-center justify-center text-zinc-400"><AnimatedBackground /><span className="subtle-pulse">Loading Securo...</span></main>;
+  if (loading) return <main className="relative isolate flex min-h-screen items-center justify-center overflow-hidden text-zinc-400"><AnimatedBackground variant="dashboard" /><span className="relative z-10 subtle-pulse">Loading Securo...</span></main>;
   if (!activated) {
     return <LoginPanel />;
   }
