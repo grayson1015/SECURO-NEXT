@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import Link from "next/link";
 import { ArrowLeft, Download } from "lucide-react";
-import type { ReportRow, SecuroFinding } from "@/lib/types";
+import type { AccountIdentifier, ReportRow, RobloxLogArtifact, SecuroFinding, SecuroSession } from "@/lib/types";
 import { countFindings } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +34,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredShellBags = data.shellBagArtifacts || [];
   const accountContext = data.accountIdentifiers || {};
   const accountRows = accountContext.roblox || [];
+  const accountGroups = useMemo(
+    () => groupRobloxAccounts(accountRows, data.sessions || [], filteredRobloxLogs),
+    [accountRows, data.sessions, filteredRobloxLogs]
+  );
   const installHistory = data.windowsInstallHistory || [];
   const sysMain = data.sysMainService || {};
   const resetHistory = useMemo(
@@ -226,29 +230,24 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           <p className="mb-4 text-sm text-zinc-400">
             {accountContext.privacyNote || "Only non-secret account identifiers are collected. Tokens, cookies, messages, and credentials are excluded."}
           </p>
-          <div className="grid gap-3 md:grid-cols-2">
-            {accountRows.map((account, index) => (
-              <div key={`${account.platform}-${account.userId}-${index}`} className="rounded-md border border-border bg-black/20 p-4 text-sm">
-                <div className="font-semibold text-zinc-300">{account.platform || "Account"}</div>
-                <div className="mt-3 text-xs font-semibold uppercase text-zinc-500">Roblox User ID</div>
-                <div className="mt-1 break-all text-2xl font-bold text-primary">{account.userId || "ID unavailable"}</div>
-                <div className="mt-3 text-zinc-300">Username: {account.username || "Unknown"}</div>
-                {account.displayName ? <div className="text-zinc-400">Display Name: {account.displayName}</div> : null}
-                <div className="text-zinc-400">First evidence: {formatDate(account.firstSeen)}</div>
-                <div className="text-zinc-400">Last evidence: {formatDate(account.lastSeen)}</div>
-                {(account.places || []).length ? <div className="mt-2 break-words text-zinc-500">Place IDs: {(account.places || []).join(", ")}</div> : null}
-                <details className="mt-2">
-                  <summary className="cursor-pointer text-xs text-zinc-400">Evidence sources ({(account.sources || []).length})</summary>
-                  <div className="mt-2 space-y-1">
-                    {(account.sources || []).map((source, sourceIndex) => (
-                      <div key={sourceIndex} className="break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">{source}</div>
-                    ))}
-                  </div>
-                </details>
-              </div>
-            ))}
-            {!accountRows.length ? <p className="text-sm text-zinc-500">No account identifiers were available.</p> : null}
-          </div>
+          <AccountGroup
+            title="Played Accounts"
+            description="Accounts tied to Roblox session, join, place, or teleport evidence in the available logs."
+            accounts={accountGroups.played}
+            tone="played"
+          />
+          <AccountGroup
+            title="Historical Account IDs Found"
+            description="IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play."
+            accounts={accountGroups.historical}
+            tone="historical"
+          />
+          <AccountGroup
+            title="Weak/Old Account Artifacts"
+            description="Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play."
+            accounts={accountGroups.weak}
+            tone="weak"
+          />
         </Card>
 
         <Card className="mt-5">
@@ -353,10 +352,111 @@ function Summary({ label, value }: { label: string; value: string }) {
   );
 }
 
+function AccountGroup({
+  title,
+  description,
+  accounts,
+  tone
+}: {
+  title: string;
+  description: string;
+  accounts: AccountIdentifier[];
+  tone: "played" | "historical" | "weak";
+}) {
+  const toneClass = {
+    played: "border-primary/50 bg-primary/10",
+    historical: "border-zinc-700 bg-black/20",
+    weak: "border-zinc-800 bg-black/10"
+  }[tone];
+
+  return (
+    <section className="mt-5">
+      <div className="mb-3">
+        <h3 className="text-base font-semibold text-zinc-100">{title}</h3>
+        <p className="mt-1 text-sm text-zinc-500">{description}</p>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        {accounts.map((account, index) => (
+          <div key={`${title}-${account.platform}-${account.userId}-${index}`} className={`rounded-md border p-4 text-sm ${toneClass}`}>
+            <div className="font-semibold text-zinc-300">{account.platform || "Roblox"}</div>
+            <div className="mt-3 text-xs font-semibold uppercase text-zinc-500">Roblox User ID</div>
+            <div className="mt-1 break-all text-3xl font-bold text-primary">{account.userId || "ID unavailable"}</div>
+            <div className="mt-3 text-zinc-300">Username: {account.username || "Unknown"}</div>
+            {account.displayName ? <div className="text-zinc-400">Display Name: {account.displayName}</div> : null}
+            <div className="text-zinc-400">First evidence: {formatDate(account.firstSeen)}</div>
+            <div className="text-zinc-400">Last evidence: {formatDate(account.lastSeen)}</div>
+            {(account.places || []).length ? <div className="mt-2 break-words text-zinc-500">Place IDs: {(account.places || []).join(", ")}</div> : null}
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-zinc-400">Evidence sources ({(account.sources || []).length})</summary>
+              <div className="mt-2 space-y-1">
+                {(account.sources || []).map((source, sourceIndex) => (
+                  <div key={sourceIndex} className="break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">{source}</div>
+                ))}
+              </div>
+            </details>
+          </div>
+        ))}
+        {!accounts.length ? <p className="text-sm text-zinc-500">None.</p> : null}
+      </div>
+    </section>
+  );
+}
+
 type EvidenceGroup = {
   title: string;
   items: Record<string, unknown>[];
 };
+
+type AccountGroups = {
+  played: AccountIdentifier[];
+  historical: AccountIdentifier[];
+  weak: AccountIdentifier[];
+};
+
+function groupRobloxAccounts(accounts: AccountIdentifier[], sessions: SecuroSession[], logs: RobloxLogArtifact[]): AccountGroups {
+  const playedIds = new Set<string>();
+  for (const session of sessions || []) {
+    const id = normalizeAccountId(session.userId);
+    if (id && (session.placeId || session.gameId || session.jobId || session.launchTime || session.exitTime)) playedIds.add(id);
+  }
+  for (const log of logs || []) {
+    const id = normalizeAccountId(log.userId);
+    if (id && (log.placeId || log.jobId || robloxLogHasPlayEvidence(log))) playedIds.add(id);
+  }
+
+  const grouped: AccountGroups = { played: [], historical: [], weak: [] };
+  for (const account of accounts || []) {
+    const id = normalizeAccountId(account.userId);
+    if (id && playedIds.has(id)) {
+      grouped.played.push(account);
+    } else if (isWeakOldAccountArtifact(account)) {
+      grouped.weak.push(account);
+    } else {
+      grouped.historical.push(account);
+    }
+  }
+  return grouped;
+}
+
+function normalizeAccountId(value: unknown) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function robloxLogHasPlayEvidence(log: RobloxLogArtifact) {
+  return (log.events || []).some((event) => {
+    const text = `${event.type || ""} ${event.message || ""}`.toLowerCase();
+    return text.includes("join") || text.includes("place") || text.includes("teleport") || text.includes("game_join");
+  });
+}
+
+function isWeakOldAccountArtifact(account: AccountIdentifier) {
+  const sources = account.sources || [];
+  const hasCrashSource = sources.some((source) => /crashes?[\\/]+attachments?|crash/i.test(source));
+  const allCrashSources = sources.length > 0 && sources.every((source) => /crashes?[\\/]+attachments?|crash/i.test(source));
+  const first = parseTimestamp(account.firstSeen)?.getTime();
+  const last = parseTimestamp(account.lastSeen)?.getTime();
+  return allCrashSources || (hasCrashSource && first !== undefined && last !== undefined && first === last);
+}
 
 function parseTimestamp(value: unknown) {
   if (!value) return null;
@@ -471,16 +571,30 @@ function buildExportHtml(report: ReportRow) {
     </details>
   `)).join("");
   const accountContext = data.accountIdentifiers || {};
-  const accounts = (accountContext.roblox || []).map((account) => `
+  const accountGroups = groupRobloxAccounts(accountContext.roblox || [], data.sessions || [], data.robloxLogs || []);
+  const accountCard = (account: AccountIdentifier) => `
     <div class="report-entry account-card">
-      <p><b>${escape(account.platform || "Account")}</b></p>
+      <p><b>${escape(account.platform || "Roblox")}</b></p>
       <small>ROBLOX USER ID</small>
       <div class="account-id">${escape(account.userId || "ID unavailable")}</div>
       <p>Username: ${escape(account.username || "Unknown")} ${account.displayName ? `· Display Name: ${escape(account.displayName)}` : ""}</p>
       <p>First evidence: ${escape(account.firstSeen || "")} · Last evidence: ${escape(account.lastSeen || "")}</p>
+      ${(account.places || []).length ? `<p>Place IDs: ${escape((account.places || []).join(", "))}</p>` : ""}
       <p>Sources: ${escape((account.sources || []).join("; "))}</p>
     </div>
-  `).join("");
+  `;
+  const accountGroup = (title: string, description: string, accounts: AccountIdentifier[]) => `
+    <div class="account-group">
+      <h3>${escape(title)}</h3>
+      <p class="muted">${escape(description)}</p>
+      ${accounts.map(accountCard).join("") || "<p class=\"muted\">None.</p>"}
+    </div>
+  `;
+  const accounts = [
+    accountGroup("Played Accounts", "Accounts tied to Roblox session, join, place, or teleport evidence in the available logs.", accountGroups.played),
+    accountGroup("Historical Account IDs Found", "IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play.", accountGroups.historical),
+    accountGroup("Weak/Old Account Artifacts", "Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play.", accountGroups.weak)
+  ].join("");
   const resetHistory = (data.systemResetEvidence || []).slice(0, 12).map((item) => entry(item.timestamp, `
     <p><b>${escape(item.type || "Reset/install evidence")}</b></p>
     <p>${escape(item.timestamp || "Time unavailable")}</p>
@@ -500,6 +614,8 @@ function buildExportHtml(report: ReportRow) {
       pre{white-space:pre-wrap;word-break:break-word;background:#050807;padding:12px;border-radius:8px;max-height:420px;overflow:auto}
       table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #264234;padding:8px;text-align:left;vertical-align:top}
       .report-entry{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 0}
+      .muted{color:#8b93a7}
+      .account-group{margin:18px 0}
       .account-card{border:1px solid #264234;border-radius:8px;padding:14px;margin:10px 0}
       .account-card small{color:#8b93a7}.account-id{color:#00d26a;font-size:26px;font-weight:700;overflow-wrap:anywhere;margin:4px 0 12px}
       .timeline-reset-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}

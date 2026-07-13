@@ -5759,6 +5759,7 @@ def render_html(report: dict) -> str:
     account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
     account_rows = []
     for row in account_context.get("roblox", []):
+        sources = row.get("sources", []) if isinstance(row.get("sources"), list) else []
         account_rows.append({
             "Platform": row.get("platform", ""),
             "User ID": row.get("userId", ""),
@@ -5766,21 +5767,70 @@ def render_html(report: dict) -> str:
             "Display Name": row.get("displayName", ""),
             "First Seen": row.get("firstSeen", ""),
             "Last Seen": row.get("lastSeen", ""),
-            "Sources": "; ".join(row.get("sources", [])[:4]) if isinstance(row.get("sources"), list) else "",
+            "Places": ", ".join(row.get("places", [])[:12]) if isinstance(row.get("places"), list) else "",
+            "Sources": "; ".join(sources[:8]),
+            "Sources List": sources,
         })
-    account_cards_html = "".join(
-        f"<div class='account-card report-entry'{html_data_timestamp(row.get('Last Seen'))}>"
-        f"<b>{html.escape(str(row.get('Platform') or 'Roblox'))}</b>"
-        f"<small>ROBLOX USER ID</small>"
-        f"<div class='account-id'>{html.escape(str(row.get('User ID') or 'ID unavailable'))}</div>"
-        f"<p><b>Username:</b> {html.escape(str(row.get('Username') or 'Unknown'))}</p>"
-        f"<p><b>Display Name:</b> {html.escape(str(row.get('Display Name') or 'Unknown'))}</p>"
-        f"<p>First evidence: {html.escape(str(row.get('First Seen') or 'Unavailable'))}</p>"
-        f"<p>Last evidence: {html.escape(str(row.get('Last Seen') or 'Unavailable'))}</p>"
-        f"<p>Sources: {html.escape(str(row.get('Sources') or 'Unavailable'))}</p>"
-        f"</div>"
-        for row in account_rows
-    )
+
+    played_account_ids = set()
+    for session in report.get("sessions", []):
+        user_id = re.sub(r"\D", "", str(session.get("userId") or ""))
+        if user_id and (session.get("placeId") or session.get("gameId") or session.get("jobId") or session.get("launchTime") or session.get("exitTime")):
+            played_account_ids.add(user_id)
+    for log in report.get("robloxLogs", []):
+        user_id = re.sub(r"\D", "", str(log.get("userId") or ""))
+        events = log.get("events", []) if isinstance(log.get("events"), list) else []
+        event_text = " ".join(str(e.get("type", "")) + " " + str(e.get("message", "")) for e in events if isinstance(e, dict)).lower()
+        has_play_evidence = bool(log.get("placeId") or log.get("jobId") or any(token in event_text for token in ["join", "place", "teleport", "game_join"]))
+        if user_id and has_play_evidence:
+            played_account_ids.add(user_id)
+
+    account_groups = {"played": [], "historical": [], "weak": []}
+    for row in account_rows:
+        user_id = re.sub(r"\D", "", str(row.get("User ID") or ""))
+        sources = row.get("Sources List", []) if isinstance(row.get("Sources List"), list) else []
+        has_crash_source = any(re.search(r"crashes?[\\/]+attachments?|crash", str(source), re.I) for source in sources)
+        all_crash_sources = bool(sources) and all(re.search(r"crashes?[\\/]+attachments?|crash", str(source), re.I) for source in sources)
+        same_single_timestamp = bool(has_crash_source and row.get("First Seen") and row.get("First Seen") == row.get("Last Seen"))
+        if user_id and user_id in played_account_ids:
+            account_groups["played"].append(row)
+        elif all_crash_sources or same_single_timestamp:
+            account_groups["weak"].append(row)
+        else:
+            account_groups["historical"].append(row)
+
+    def account_card(row: dict) -> str:
+        places = f"<p>Place IDs: {html.escape(str(row.get('Places') or ''))}</p>" if row.get("Places") else ""
+        return (
+            f"<div class='account-card report-entry'{html_data_timestamp(row.get('Last Seen'))}>"
+            f"<b>{html.escape(str(row.get('Platform') or 'Roblox'))}</b>"
+            f"<small>ROBLOX USER ID</small>"
+            f"<div class='account-id'>{html.escape(str(row.get('User ID') or 'ID unavailable'))}</div>"
+            f"<p><b>Username:</b> {html.escape(str(row.get('Username') or 'Unknown'))}</p>"
+            f"<p><b>Display Name:</b> {html.escape(str(row.get('Display Name') or 'Unknown'))}</p>"
+            f"<p>First evidence: {html.escape(str(row.get('First Seen') or 'Unavailable'))}</p>"
+            f"<p>Last evidence: {html.escape(str(row.get('Last Seen') or 'Unavailable'))}</p>"
+            f"{places}"
+            f"<p>Sources: {html.escape(str(row.get('Sources') or 'Unavailable'))}</p>"
+            f"</div>"
+        )
+
+    def account_group_html(title: str, description: str, rows: list[dict]) -> str:
+        cards = "".join(account_card(row) for row in rows)
+        body = cards or "<p class='muted'>None.</p>"
+        return (
+            f"<div class='account-group'>"
+            f"<h3>{html.escape(title)}</h3>"
+            f"<p class='muted'>{html.escape(description)}</p>"
+            f"{body}"
+            f"</div>"
+        )
+
+    account_cards_html = "".join([
+        account_group_html("Played Accounts", "Accounts tied to Roblox session, join, place, or teleport evidence in the available logs.", account_groups["played"]),
+        account_group_html("Historical Account IDs Found", "IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play.", account_groups["historical"]),
+        account_group_html("Weak/Old Account Artifacts", "Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play.", account_groups["weak"]),
+    ])
     reset_rows = [{
         "Type": item.get("type", ""),
         "Timestamp": item.get("timestamp", ""),
@@ -5884,7 +5934,7 @@ def render_html(report: dict) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
 <style>
-body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.account-card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;margin:10px 0;background:#fbfcfd}}.account-card small{{display:block;color:#667085;margin-top:12px}}.account-id{{color:#16a34a;font-size:28px;font-weight:700;overflow-wrap:anywhere;margin:3px 0 12px}}.timeline-reset-grid{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}}.timeline-reset-grid section{{margin:0}}.timeline-reset-grid>aside{{display:grid;gap:12px}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.reset-entry{{border-left:3px solid #16a34a;padding:4px 0 8px 10px;margin:10px 0}}.reset-entry time,.reset-entry small{{display:block;color:#667085;font-size:12px;margin-top:3px;overflow-wrap:anywhere}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}@media(max-width:800px){{.timeline-reset-grid{{grid-template-columns:1fr}}}}
+body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#15191f}}header{{background:#111827;color:white;padding:24px 32px}}main{{max-width:1180px;margin:auto;padding:24px}}section{{background:white;border:1px solid #d8dee6;border-radius:8px;margin:16px 0;padding:18px}}.summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}.card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;background:#fbfcfd}}.value{{font-size:24px;font-weight:700}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{border-bottom:1px solid #e7ebf0;padding:8px;text-align:left;vertical-align:top}}th{{background:#f0f3f6}}.account-group{{margin:18px 0}}.account-card{{border:1px solid #d8dee6;border-radius:8px;padding:14px;margin:10px 0;background:#fbfcfd}}.account-card small{{display:block;color:#667085;margin-top:12px}}.account-id{{color:#16a34a;font-size:28px;font-weight:700;overflow-wrap:anywhere;margin:3px 0 12px}}.timeline-reset-grid{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}}.timeline-reset-grid section{{margin:0}}.timeline-reset-grid>aside{{display:grid;gap:12px}}.timeline li{{display:grid;grid-template-columns:170px minmax(0,1fr) 130px;gap:12px;padding:8px 10px;border-bottom:1px solid #edf0f3;overflow:hidden}}.timeline span{{min-width:0;overflow-wrap:anywhere;word-break:break-word}}.timeline small{{white-space:nowrap;color:#667085}}.reset-entry{{border-left:3px solid #16a34a;padding:4px 0 8px 10px;margin:10px 0}}.reset-entry time,.reset-entry small{{display:block;color:#667085;font-size:12px;margin-top:3px;overflow-wrap:anywhere}}.muted{{color:#667085}}.true{{color:#157347}}.false{{color:#b42318}}details{{border:1px solid #d8dee6;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px;max-height:520px;overflow:auto}}.warn{{border:1px solid #dc2626;background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:12px;margin:10px 0}}.confidence-possible{{border-left:4px solid #9ca3af!important;background:#f9fafb}}.confidence-likely{{border-left:4px solid #f59e0b!important;background:#fffbeb}}.confidence-confirmed{{border-left:4px solid #dc2626!important;background:#fee2e2;color:#7f1d1d}}.filters{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px}}.pill{{border:1px solid #d8dee6;border-radius:999px;padding:5px 10px;background:#fbfcfd;font-size:12px}}@media(max-width:800px){{.timeline-reset-grid{{grid-template-columns:1fr}}}}
 </style></head><body><header><h1>{APP_NAME} Report</h1><p>No confirmed result means only that available logs did not prove it. Logging coverage may be incomplete.</p></header><main>
 <section><h2>Summary</h2><div class="summary"><div class="card"><div>Scan Date</div><div class="value">{html.escape(report['scanTime'])}</div></div><div class="card"><div>Highest Result</div><div class="value">{report['highestResult']}</div></div><div class="card"><div>Top Score</div><div class="value">{report.get('topScore', 0)}</div></div><div class="card"><div>Roblox Sessions</div><div class="value">{len(report['sessions'])}</div></div></div></section>
 <section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed Exploit','Suspicious'] else 'Not confirmed')}</div></div></div></section>
