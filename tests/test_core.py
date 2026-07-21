@@ -235,6 +235,35 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn(token_adjacent_id, ids)
         self.assertEqual(accounts[0]["platform"], "Discord")
 
+    def test_discord_identifier_collection_handles_current_user_json_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_appdata = os.environ.get("APPDATA")
+            old_local = os.environ.get("LOCALAPPDATA")
+            os.environ["APPDATA"] = tmp
+            os.environ["LOCALAPPDATA"] = tmp
+            log_dir = Path(tmp) / "discordcanary" / "logs"
+            log_dir.mkdir(parents=True)
+            user_id = "222222222222222222"
+            (log_dir / "discord.log").write_text(
+                f'info currentUser={{"id":"{user_id}","username":"CurrentUser"}} ready\n',
+                encoding="utf-8",
+            )
+            config = test_config()
+            try:
+                accounts = checker.collect_safe_discord_identifiers(config)
+            finally:
+                if old_appdata is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = old_appdata
+                if old_local is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
+        self.assertEqual(accounts[0]["userId"], user_id)
+        self.assertEqual(config["_discord_account_status"]["logFilesScanned"], 1)
+        self.assertEqual(config["_discord_account_status"]["candidateIdsFound"], 1)
+
     def test_missing_telemetry_lowers_confidence(self):
         quality = {"Roblox logs available": True, "Prefetch available": False, "Sysmon Event ID 8 available": False}
         self.assertEqual(checker.confidence_for("Clean-but-limited", quality), "limited")
@@ -410,6 +439,39 @@ File Name           : notes.txt
         self.assertEqual(findings[0]["name"], "Solara.exe")
         self.assertIn("Suspicious File Deletion", findings[0]["detection_categories"])
         self.assertTrue(any("Solara.exe" in event["text"] for event in timeline))
+
+    def test_usn_collector_tries_alternate_csv_argument_order(self):
+        sample = (
+            '"File name","Time stamp","Reason","USN","File ID","Parent file ID"\n'
+            f'"Solara.exe","{dt.datetime.now().strftime("%m/%d/%Y %H:%M:%S")}","FILE_DELETE | CLOSE","0x100","0x10","0x01"\n'
+        )
+        config = test_config()
+        config["usn_journal_enabled"] = True
+        original_query = checker.query_usn_journal_state
+        original_run = checker.run_command
+        calls = []
+        try:
+            checker.query_usn_journal_state = lambda volume="C:": {
+                "available": True,
+                "volume": volume,
+                "firstUsn": 0x10,
+                "nextUsn": 0x1000,
+                "error": "",
+            }
+            def fake_run(args, timeout=20):
+                calls.append(args)
+                if args[-1] == "csv":
+                    return "COMMAND_ERROR: invalid parameter"
+                return sample
+            checker.run_command = fake_run
+            findings, timeline, events = checker.collect_usn_journal_events(7, config, [])
+        finally:
+            checker.query_usn_journal_state = original_query
+            checker.run_command = original_run
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("csv", calls[1])
+        self.assertEqual(config["_usn_journal_status"]["recordsCollected"], 1)
 
     def test_prefetch_inventory_reports_readable_entries(self):
         with tempfile.TemporaryDirectory() as tmp:

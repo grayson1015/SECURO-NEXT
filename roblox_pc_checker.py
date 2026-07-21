@@ -2040,10 +2040,12 @@ def collect_safe_account_identifiers(sessions: list[dict], config: dict) -> dict
                 result[key] = sorted(result[key])
         return result
 
+    discord_accounts = collect_safe_discord_identifiers(config) if config.get("collect_safe_account_identifiers", True) else []
     return {
         "privacyNote": "Only non-secret Roblox and Discord account identifiers from retained logs/artifacts are included. Discord collection excludes tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, private messages, DMs, friend lists, and server lists.",
         "roblox": [clean(row) for row in roblox_accounts.values()],
-        "discord": collect_safe_discord_identifiers(config) if config.get("collect_safe_account_identifiers", True) else [],
+        "discord": discord_accounts,
+        "discordStatus": config.get("_discord_account_status", {}),
     }
 
 
@@ -2061,12 +2063,24 @@ def discord_log_roots() -> list[Path]:
 
 def collect_safe_discord_identifiers(config: dict) -> list[dict]:
     # Privacy boundary: only plain Discord log files are inspected. Token/cookie/storage/cache/message stores are intentionally skipped.
+    status = {
+        "rootsChecked": [],
+        "logFilesFound": 0,
+        "logFilesScanned": 0,
+        "bytesRead": 0,
+        "candidateIdsFound": 0,
+        "skippedUnsafeLines": 0,
+        "skippedNoAccountContextLines": 0,
+        "note": "Only Discord log .log/.txt files are scanned. Token/cookie/storage/cache/message databases are excluded.",
+    }
+    config["_discord_account_status"] = status
     max_files = max(1, int(config.get("discord_log_max_files", 180) or 180))
     max_bytes = max(32_000, int(config.get("discord_log_max_bytes", 500_000) or 500_000))
     max_total_bytes = max(max_bytes, int(config.get("discord_log_total_bytes", 6_000_000) or 6_000_000))
     deadline = time.monotonic() + max(2, int(config.get("discord_account_scan_time_budget_seconds", 5) or 5))
     candidates = []
     for root in discord_log_roots():
+        status["rootsChecked"].append(str(root))
         try:
             candidates.extend(path for path in root.glob("*.log") if path.is_file())
             candidates.extend(path for path in root.glob("*.txt") if path.is_file())
@@ -2080,12 +2094,50 @@ def collect_safe_discord_identifiers(config: dict) -> list[dict]:
             return 0
 
     candidates = sorted(set(candidates), key=modified_time, reverse=True)[:max_files]
+    status["logFilesFound"] = len(candidates)
     snowflake_pattern = re.compile(r"\b([1-9]\d{16,19})\b")
-    account_context_pattern = re.compile(r"(?i)\b(user[_\s-]?id|userid|current[_\s-]?user|account[_\s-]?id|discord[_\s-]?id|global[_\s-]?name|username)\b")
+    account_context_pattern = re.compile(
+        r"(?i)\b("
+        r"user[_\s-]?id|userid|userId|current[_\s-]?user|currentUser|account[_\s-]?id|"
+        r"discord[_\s-]?id|global[_\s-]?name|username|display[_\s-]?name|me[_\s-]?store|"
+        r"user[_\s-]?settings|authenticated[_\s-]?user|login[_\s-]?user|self"
+        r")\b"
+    )
     unsafe_context_pattern = re.compile(r"(?i)\b(token|authorization|cookie|session[_\s-]?storage|local[_\s-]?storage|indexeddb|cache|message|dm|direct message|guild|channel)\b")
-    username_pattern = re.compile(r"(?i)(?:username|global[_\s-]?name|display[_\s-]?name)[^\w@.-]{0,24}([A-Za-z0-9_.@-]{2,64})")
+    username_pattern = re.compile(r"(?i)(?:username|global[_\s-]?name|display[_\s-]?name)[\"'\s:=,-]{0,24}([A-Za-z0-9_.@-]{2,64})")
+    current_user_json_pattern = re.compile(
+        r"(?i)(?:currentUser|current_user|authenticatedUser|authenticated_user|me|self)[^\n\r]{0,240}?"
+        r"(?:\"id\"|id|userId|user_id)[\"'\s:=,-]{0,16}([1-9]\d{16,19})"
+    )
     accounts: dict[str, dict] = {}
     bytes_read = 0
+
+    def remember_account(user_id: str, line: str, path: Path, timestamp: str) -> None:
+        window_match = re.search(re.escape(user_id), line)
+        if window_match:
+            window = line[max(0, window_match.start() - 160):window_match.end() + 160]
+        else:
+            window = line[:320]
+        username_match = username_pattern.search(window)
+        row = accounts.setdefault(user_id, {
+            "platform": "Discord",
+            "userId": user_id,
+            "username": "Unknown",
+            "displayName": "",
+            "firstSeen": timestamp,
+            "lastSeen": timestamp,
+            "places": set(),
+            "jobs": set(),
+            "sources": set(),
+            "confidenceLevel": "Possible",
+            "evidenceNote": "Safe Discord log identifier evidence only. This is not token/cookie/session data and may require manual review.",
+        })
+        if username_match and row.get("username") == "Unknown":
+            row["username"] = username_match.group(1).strip().strip('"').strip("'")
+        row["firstSeen"] = first_time(row.get("firstSeen"), timestamp) or row.get("firstSeen", "")
+        row["lastSeen"] = max([v for v in [row.get("lastSeen"), timestamp] if v] or [""], default="")
+        row["sources"].add(str(path))
+
     for path in candidates:
         if time.monotonic() >= deadline or bytes_read >= max_total_bytes:
             break
@@ -2102,32 +2154,20 @@ def collect_safe_discord_identifiers(config: dict) -> list[dict]:
         except OSError:
             continue
         bytes_read += len(text.encode("utf-8", errors="replace"))
+        status["logFilesScanned"] += 1
+        status["bytesRead"] = bytes_read
         timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
         for line in text.splitlines():
-            if unsafe_context_pattern.search(line) or not account_context_pattern.search(line):
+            if unsafe_context_pattern.search(line):
+                status["skippedUnsafeLines"] += 1
                 continue
-            for match in snowflake_pattern.finditer(line):
-                window = line[max(0, match.start() - 120):match.end() + 120]
-                user_id = match.group(1)
-                username_match = username_pattern.search(window)
-                row = accounts.setdefault(user_id, {
-                    "platform": "Discord",
-                    "userId": user_id,
-                    "username": "Unknown",
-                    "displayName": "",
-                    "firstSeen": timestamp,
-                    "lastSeen": timestamp,
-                    "places": set(),
-                    "jobs": set(),
-                    "sources": set(),
-                    "confidenceLevel": "Possible",
-                    "evidenceNote": "Safe Discord log identifier evidence only. This is not token/cookie/session data and may require manual review.",
-                })
-                if username_match and row.get("username") == "Unknown":
-                    row["username"] = username_match.group(1).strip()
-                row["firstSeen"] = first_time(row.get("firstSeen"), timestamp) or row.get("firstSeen", "")
-                row["lastSeen"] = max([v for v in [row.get("lastSeen"), timestamp] if v] or [""], default="")
-                row["sources"].add(str(path))
+            direct_ids = [match.group(1) for match in current_user_json_pattern.finditer(line)]
+            if not direct_ids and not account_context_pattern.search(line):
+                status["skippedNoAccountContextLines"] += 1
+                continue
+            ids = direct_ids or [match.group(1) for match in snowflake_pattern.finditer(line)]
+            for user_id in ids:
+                remember_account(user_id, line, path, timestamp)
 
     cleaned = []
     for row in accounts.values():
@@ -2136,6 +2176,7 @@ def collect_safe_discord_identifiers(config: dict) -> list[dict]:
             if key in result:
                 result[key] = sorted(result[key])
         cleaned.append(result)
+    status["candidateIdsFound"] = len(cleaned)
     return sorted(cleaned, key=lambda item: item.get("lastSeen", ""), reverse=True)
 
 
@@ -3489,8 +3530,8 @@ def query_usn_journal_state(volume: str = "C:") -> dict:
     if "COMMAND_ERROR" in out or re.search(r"(access is denied|error \d+)", out, re.I):
         state["error"] = out.strip()[:300]
         return state
-    first = re.search(r"First Usn\s*:\s*(0x[0-9a-f]+|\d+)", out, re.I)
-    next_value = re.search(r"Next Usn\s*:\s*(0x[0-9a-f]+|\d+)", out, re.I)
+    first = re.search(r"First\s*Usn\s*:\s*(0x[0-9a-f]+|\d+)", out, re.I)
+    next_value = re.search(r"Next\s*Usn\s*:\s*(0x[0-9a-f]+|\d+)", out, re.I)
     try:
         if first:
             state["firstUsn"] = int(first.group(1), 0)
@@ -3637,22 +3678,33 @@ def collect_usn_journal_events(days: int, config: dict, sessions: list[dict]) ->
     max_records = max(100, int(config.get("usn_journal_max_records") or 5000))
     timeout = max(3, int(config.get("usn_journal_timeout_seconds") or 12))
     start_usn = max(int(state.get("firstUsn") or 0), int(state.get("nextUsn") or 0) - window)
-    output = run_command(
+    read_errors = []
+    output = ""
+    for args in (
         ["fsutil", "usn", "readJournal", volume, f"startUsn=0x{start_usn:x}", "csv"],
-        timeout=timeout,
-    )
+        ["fsutil", "usn", "readJournal", volume, "csv", f"startUsn=0x{start_usn:x}"],
+    ):
+        output = run_command(args, timeout=timeout)
+        if "COMMAND_ERROR" not in output and not re.search(r"(access is denied|error \d+|invalid parameter|invalid syntax)", output, re.I):
+            state["readCommand"] = " ".join(args)
+            break
+        read_errors.append(output.strip()[:240])
     if "COMMAND_ERROR" in output or re.search(r"(access is denied|error \d+)", output, re.I):
-        state["error"] = output.strip()[:300]
+        state["error"] = " | ".join(error for error in read_errors if error)[:500] or output.strip()[:300]
         state["readable"] = False
         return [], [], []
     events = parse_usn_journal_csv(output, volume, max_records, days)
     if not events:
-        plain_output = run_command(
+        for args in (
             ["fsutil", "usn", "readJournal", volume, f"startUsn=0x{start_usn:x}"],
-            timeout=timeout,
-        )
-        if "COMMAND_ERROR" not in plain_output and not re.search(r"(access is denied|error \d+)", plain_output, re.I):
-            events = parse_usn_journal_text(plain_output, volume, max_records, days)
+            ["fsutil", "usn", "readJournal", volume],
+        ):
+            plain_output = run_command(args, timeout=timeout)
+            if "COMMAND_ERROR" not in plain_output and not re.search(r"(access is denied|error \d+|invalid parameter|invalid syntax)", plain_output, re.I):
+                state["readCommand"] = " ".join(args)
+                events = parse_usn_journal_text(plain_output, volume, max_records, days)
+                if events:
+                    break
     state["readable"] = bool(events)
     state["recordsCollected"] = len(events)
     if not events:
@@ -5180,8 +5232,11 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     quality["Defender exclusions collected"] = bool(defender_exclusions)
     quality["Defender exclusions needing review"] = sum(1 for item in defender_exclusions if item.get("manualReviewRequired"))
     usn_status = config.get("_usn_journal_status", {})
+    quality["USN Change Journal available"] = bool(usn_status.get("available"))
     quality["USN Change Journal readable"] = bool(usn_status.get("readable"))
     quality["USN Journal records collected"] = int(usn_status.get("recordsCollected", 0) or 0)
+    if usn_status.get("error"):
+        quality["USN Journal status"] = str(usn_status.get("error"))[:240]
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}
@@ -5215,6 +5270,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
         "usnJournalEvents": usn_events,
+        "usnJournalStatus": usn_status,
         "shellBagArtifacts": shellbag_artifacts,
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
@@ -5544,8 +5600,11 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     quality["Defender exclusions collected"] = bool(defender_exclusions)
     quality["Defender exclusions needing review"] = sum(1 for item in defender_exclusions if item.get("manualReviewRequired"))
     usn_status = config.get("_usn_journal_status", {})
+    quality["USN Change Journal available"] = bool(usn_status.get("available"))
     quality["USN Change Journal readable"] = bool(usn_status.get("readable"))
     quality["USN Journal records collected"] = int(usn_status.get("recordsCollected", 0) or 0)
+    if usn_status.get("error"):
+        quality["USN Journal status"] = str(usn_status.get("error"))[:240]
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}
@@ -5580,6 +5639,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
         "usnJournalEvents": usn_events,
+        "usnJournalStatus": usn_status,
         "shellBagArtifacts": shellbag_artifacts,
         "findings": [camel_finding(f) for f in findings],
         "detectLogs": detect_logs,
@@ -5800,6 +5860,13 @@ def render_txt(report: dict) -> str:
             f"Discord ID={account.get('userId') or 'unknown'} Username={account.get('username') or 'Unknown'} "
             f"First={account.get('firstSeen') or ''} Last={account.get('lastSeen') or ''} Sources={'; '.join(account.get('sources', [])[:4])}"
         )
+    discord_status = account_context.get("discordStatus", {}) if isinstance(account_context.get("discordStatus"), dict) else {}
+    if discord_status:
+        lines.append(
+            f"Discord log scan status: files_found={discord_status.get('logFilesFound', 0)} "
+            f"files_scanned={discord_status.get('logFilesScanned', 0)} "
+            f"candidate_ids={discord_status.get('candidateIdsFound', 0)} bytes_read={discord_status.get('bytesRead', 0)}"
+        )
     lines += ["", "Detected FastFlags", "------------------"]
     if not report.get("detectedFastFlags"):
         lines.append("No FastFlags detected in captured Roblox logs.")
@@ -5819,6 +5886,12 @@ def render_txt(report: dict) -> str:
             lines.append(f"  {event.get('timestamp')} [{event.get('type')}] {event.get('message')}")
         lines += ["Raw Roblox Log:", item.get("rawLog", ""), ""]
     lines += ["", "USN Journal Events", "------------------"]
+    usn_status = report.get("usnJournalStatus", {}) if isinstance(report.get("usnJournalStatus"), dict) else {}
+    if usn_status:
+        lines.append(
+            f"Status: available={usn_status.get('available')} readable={usn_status.get('readable')} "
+            f"records={usn_status.get('recordsCollected', 0)} error={usn_status.get('error', '')}"
+        )
     if not report.get("usnJournalEvents"):
         lines.append("No USN Change Journal events were available.")
     for item in report.get("usnJournalEvents", []):
@@ -5988,6 +6061,15 @@ def render_html(report: dict) -> str:
         "USN": item.get("usn", ""),
         "Parent ID": item.get("parentFileId", ""),
     } for item in report.get("usnJournalEvents", [])]
+    usn_status = report.get("usnJournalStatus", {}) if isinstance(report.get("usnJournalStatus"), dict) else {}
+    usn_status_rows = [{
+        "Available": usn_status.get("available", ""),
+        "Readable": usn_status.get("readable", ""),
+        "Records": usn_status.get("recordsCollected", ""),
+        "Volume": usn_status.get("volume", ""),
+        "Read Command": usn_status.get("readCommand", ""),
+        "Status/Error": usn_status.get("error", ""),
+    }] if usn_status else []
     shellbag_rows = [{
         "Timestamp": item.get("timestamp", ""),
         "Classification": item.get("classification", ""),
@@ -5998,6 +6080,14 @@ def render_html(report: dict) -> str:
         "MRU": item.get("mruPosition", ""),
     } for item in report.get("shellBagArtifacts", [])]
     account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
+    discord_status = account_context.get("discordStatus", {}) if isinstance(account_context.get("discordStatus"), dict) else {}
+    discord_status_rows = [{
+        "Log Files Found": discord_status.get("logFilesFound", ""),
+        "Log Files Scanned": discord_status.get("logFilesScanned", ""),
+        "Candidate IDs": discord_status.get("candidateIdsFound", ""),
+        "Bytes Read": discord_status.get("bytesRead", ""),
+        "Note": discord_status.get("note", ""),
+    }] if discord_status else []
     account_rows = []
     for row in account_context.get("roblox", []):
         sources = row.get("sources", []) if isinstance(row.get("sources"), list) else []
@@ -6199,7 +6289,7 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Primary Roblox Account</h2><div class="summary"><div class="card"><div>User</div><div class="value">{html.escape(primary_session.get('username', 'Unknown'))}</div></div><div class="card"><div>User ID</div><div class="value">{html.escape(primary_session.get('userId', ''))}</div></div><div class="card"><div>Place ID</div><div class="value">{html.escape(primary_session.get('placeId', ''))}</div></div><div class="card"><div>Injection Evidence</div><div class="value">{html.escape(report['highestResult'] if report['highestResult'] in ['Confirmed Exploit','Suspicious'] else 'Not confirmed')}</div></div></div></section>
 <section><h2>Top Suspicious Processes</h2>{html_table(top_rows, ['Process','Path','Score','Classification','Signer','First Seen','Reason'], 'First Seen')}</section>
 <section><h2>Key Artifacts</h2><p class="muted">Prefetch and deleted-file artifacts are listed here as key scan evidence. These are review artifacts, not automatic proof by themselves.</p>{html_table(key_artifact_rows, ['Type','Artifact','Path','Timestamp','Source','Confidence'], 'Timestamp')}</section>
-<section><h2>USN Journal Events</h2><p class="muted">Recent bounded NTFS create, delete, rename, and modify records. Normal file activity is not proof of cheating.</p>{html_table(usn_rows, ['Timestamp','Event','File','Reason','USN','Parent ID'], 'Timestamp')}</section>
+<section><h2>USN Journal Events</h2><p class="muted">Recent bounded NTFS create, delete, rename, and modify records. Normal file activity is not proof of cheating.</p>{html_table(usn_status_rows, ['Available','Readable','Records','Volume','Read Command','Status/Error'])}{html_table(usn_rows, ['Timestamp','Event','File','Reason','USN','Parent ID'], 'Timestamp')}</section>
 <section><h2>ShellBag Analyzer</h2><p class="muted">Read-only folder history exported by SBECmd. ShellBag presence shows folder interaction context and is not proof that a program executed.</p>{html_table(shellbag_rows, ['Timestamp','Classification','Path','Shell Type','Source Hive','Slot','MRU'], 'Timestamp')}</section>
 <section><h2>Forensic Correlation Findings</h2><p class="muted">These findings are built from multiple artifacts lining up in time, not from a single filename, hash, or keyword.</p>{correlation_html}</section>
 <section><h2>Interaction / Detect Logs</h2><div class="filters">{''.join(f"<span class='pill'>{x}</span>" for x in DETECT_LOG_TYPES)}</div>{html_table(detect_rows, ['Type','Detection','Severity','Confidence','Manual Review','Evidence','Timestamp','Explanation'], 'Timestamp')}</section>
@@ -6208,7 +6298,7 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Antivirus Logs</h2>{html_table(antivirus_rows, ['Source','Detection','Severity','Timestamp','Path'], 'Timestamp')}</section>
 <section><h2>Defender Exclusions</h2><p class="muted">Configured AV exclusions. Review entries can hide executor folders from Defender, but exclusions are not proof by themselves.</p>{html_table(defender_exclusion_rows, ['Type','Value','Severity','Manual Review','Reasons','Source'])}</section>
 <section><h2>Engines</h2>{html_table(engine_rows, ['File','Score','Local Hits','Detectability','VirusTotal','Manual Review'])}</section>
-<section><h2>Roblox Account History</h2><p class="muted">{html.escape(str(account_context.get('privacyNote', 'Only non-secret Roblox account identifiers are included.')))}</p>{account_cards_html or "<p class='muted'>No Roblox account identifiers were available.</p>"}</section>
+<section><h2>Roblox Account History</h2><p class="muted">{html.escape(str(account_context.get('privacyNote', 'Only non-secret Roblox account identifiers are included.')))}</p>{html_table(discord_status_rows, ['Log Files Found','Log Files Scanned','Candidate IDs','Bytes Read','Note'])}{account_cards_html or "<p class='muted'>No Roblox account identifiers were available.</p>"}</section>
 <section><h2>Detected FastFlags</h2><p class="muted">FastFlags are grouped with the Roblox log where they were found.</p>{html_table(fastflag_rows, ['FastFlag','Value','Source Log','Timestamp','Place ID','Job ID'], 'Timestamp')}</section>
 <section><h2>Show All Roblox Logs</h2><p class="muted">Expand each log to inspect every captured Roblox event and the raw log text.</p>{roblox_log_html or "<p class='muted'>No raw Roblox logs were captured.</p>"}</section>
 <div class="timeline-reset-grid"><section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section><aside><section><h2>Factory Reset Information</h2><p class="muted">Install records may represent a reset, reinstall, or major Windows upgrade.</p>{install_list_html or reset_list_html or "<p class='muted'>No Windows installation records were available.</p>"}</section><section><h2>Services</h2>{service_panel_html}</section><section><h2>Defender Exclusions</h2><p class="muted">Configured AV exclusions. Review entries can hide executor folders from Defender.</p>{defender_exclusion_panel_html}</section></aside></div>
@@ -6395,6 +6485,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
         compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), profile["robloxLogs"], include_raw=profile["rawRoblox"])
         compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:profile["fastFlags"]]
         compacted["usnJournalEvents"] = list(report.get("usnJournalEvents", []))[:profile["usnEvents"]]
+        compacted["usnJournalStatus"] = report.get("usnJournalStatus", {})
         compacted["shellBagArtifacts"] = list(report.get("shellBagArtifacts", []))[:profile["shellbags"]]
         if isinstance(compacted.get("rawArtifacts"), list):
             compacted["rawArtifacts"] = list(report.get("rawArtifacts", []))[:profile["rawArtifacts"]]
@@ -6419,6 +6510,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     compacted["robloxLogs"] = compact_roblox_logs_for_upload(list(report.get("robloxLogs", [])), 10, include_raw=False)
     compacted["detectedFastFlags"] = list(report.get("detectedFastFlags", []))[:120]
     compacted["usnJournalEvents"] = list(report.get("usnJournalEvents", []))[:100]
+    compacted["usnJournalStatus"] = report.get("usnJournalStatus", {})
     compacted["shellBagArtifacts"] = list(report.get("shellBagArtifacts", []))[:80]
     if isinstance(compacted.get("rawArtifacts"), list):
         compacted["rawArtifacts"] = []
@@ -6432,6 +6524,7 @@ def compact_account_identifiers(value) -> dict:
         "privacyNote": value.get("privacyNote", "Only non-secret Roblox and Discord account identifiers are included."),
         "roblox": list(value.get("roblox", []))[:80],
         "discord": list(value.get("discord", []))[:80],
+        "discordStatus": value.get("discordStatus", {}),
     }
 
 

@@ -33,9 +33,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredFastFlags = data.detectedFastFlags || [];
   const filteredShellBags = data.shellBagArtifacts || [];
   const usnEvents = data.usnJournalEvents || [];
-  const usnAvailable = data.evidenceSources?.["USN Change Journal available"];
-  const usnReadable = data.evidenceSources?.["USN Change Journal readable"];
-  const usnCollected = data.evidenceSources?.["USN Journal records collected"];
+  const usnStatus = data.usnJournalStatus || {};
+  const usnAvailable = usnStatus.available ?? data.evidenceSources?.["USN Change Journal available"];
+  const usnReadable = usnStatus.readable ?? data.evidenceSources?.["USN Change Journal readable"];
+  const usnCollected = usnStatus.recordsCollected ?? data.evidenceSources?.["USN Journal records collected"];
   const accountContext = data.accountIdentifiers || {};
   const accountRows = accountContext.roblox || [];
   const discordRows = accountContext.discord || [];
@@ -257,6 +258,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               </details>
             ))}
             {!usnEvents.length ? <p className="text-sm text-zinc-500">No USN Change Journal events were included in this report. If available/readable is false, Windows denied access or the journal was unavailable. If readable is true with 0 suspicious timeline entries, the journal had no suspicious matches.</p> : null}
+            {usnStatus.error ? <p className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-100">USN status: {usnStatus.error}</p> : null}
+            {usnStatus.readCommand ? <p className="text-xs text-zinc-500">Read command: {usnStatus.readCommand}</p> : null}
             {usnEvents.length > 120 ? <p className="text-xs text-zinc-500">Showing first 120 of {usnEvents.length}. Full list is in Detailed Evidence / Raw report data.</p> : null}
           </div>
         </Card>
@@ -303,6 +306,26 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           <p className="mb-4 text-sm text-zinc-400">
             {accountContext.privacyNote || "Only non-secret account identifiers are collected. Tokens, cookies, messages, and credentials are excluded."}
           </p>
+          {accountContext.discordStatus ? (
+            <div className="mb-4 grid gap-3 text-xs md:grid-cols-4">
+              <div className="rounded-md border border-border bg-black/20 p-3">
+                <div className="text-zinc-500">Discord log files found</div>
+                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.logFilesFound)}</div>
+              </div>
+              <div className="rounded-md border border-border bg-black/20 p-3">
+                <div className="text-zinc-500">Discord log files scanned</div>
+                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.logFilesScanned)}</div>
+              </div>
+              <div className="rounded-md border border-border bg-black/20 p-3">
+                <div className="text-zinc-500">Candidate IDs found</div>
+                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.candidateIdsFound)}</div>
+              </div>
+              <div className="rounded-md border border-border bg-black/20 p-3">
+                <div className="text-zinc-500">Bytes read</div>
+                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.bytesRead)}</div>
+              </div>
+            </div>
+          ) : null}
           <AccountGroup
             title="Played Accounts"
             description="Accounts tied to Roblox session, join, place, or teleport evidence in the available logs."

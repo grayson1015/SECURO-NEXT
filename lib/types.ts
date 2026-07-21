@@ -85,6 +85,18 @@ export type AccountIdentifierContext = {
   privacyNote?: string;
   roblox?: AccountIdentifier[];
   discord?: AccountIdentifier[];
+  discordStatus?: Record<string, unknown>;
+};
+
+export type UsnJournalStatus = {
+  available?: boolean;
+  readable?: boolean;
+  recordsCollected?: number;
+  volume?: string;
+  firstUsn?: number;
+  nextUsn?: number;
+  error?: string;
+  readCommand?: string;
 };
 
 export type SystemResetEvidence = {
@@ -164,6 +176,7 @@ export type SecuroReportJson = {
   robloxLogs?: RobloxLogArtifact[];
   detectedFastFlags?: RobloxFastFlag[];
   usnJournalEvents?: UsnJournalEvent[];
+  usnJournalStatus?: UsnJournalStatus;
   shellBagArtifacts?: {
     path?: string;
     classification?: string;
