@@ -12,9 +12,66 @@ PACKAGER_ROOT = ROOT / ".securo_build_tools"
 APP_NAME = "Securo"
 ICON_PATH = ROOT / "assets" / "securo.ico"
 
+ROOT_TOOL_FILES = {
+    "AmcacheParser.exe",
+    "AppCompatCacheParser.exe",
+    "JLECmd.exe",
+    "MFTECmd.exe",
+    "PECmd.exe",
+    "SBECmd.exe",
+    "SrumECmd.exe",
+}
+
+NET9_TOOL_FILE_STEMS = {
+    "AmcacheParser",
+    "AppCompatCacheParser",
+    "bstrings",
+    "JLECmd",
+    "LECmd",
+    "MFTECmd",
+    "PECmd",
+    "RBCmd",
+    "RecentFileCacheParser",
+    "rla",
+    "SBECmd",
+    "SrumECmd",
+    "SumECmd",
+    "VSCMount",
+    "WxTCmd",
+}
+
+NET9_TOOL_DIRS = {
+    "EvtxeCmd",
+    "RECmd",
+    "SQLECmd",
+}
+
 
 def run(args):
     subprocess.run(args, cwd=ROOT, check=True)
+
+
+def copy_securo_tools(tools_src: Path, tools_dst: Path):
+    tools_dst.mkdir(parents=True, exist_ok=True)
+    for name in sorted(ROOT_TOOL_FILES):
+        src = tools_src / name
+        if src.exists():
+            shutil.copy2(src, tools_dst / name)
+
+    net9_src = tools_src / "net9"
+    if not net9_src.exists():
+        return
+    net9_dst = tools_dst / "net9"
+    net9_dst.mkdir(parents=True, exist_ok=True)
+    for stem in sorted(NET9_TOOL_FILE_STEMS):
+        for suffix in (".exe", ".dll", ".runtimeconfig.json"):
+            src = net9_src / f"{stem}{suffix}"
+            if src.exists():
+                shutil.copy2(src, net9_dst / src.name)
+    for name in sorted(NET9_TOOL_DIRS):
+        src = net9_src / name
+        if src.exists():
+            shutil.copytree(src, net9_dst / name, dirs_exist_ok=True)
 
 
 def main():
@@ -87,7 +144,7 @@ def main():
     tools_src = ROOT / "Tools"
     tools_dst = portable_dir / "Tools"
     if tools_src.exists():
-        shutil.copytree(tools_src, tools_dst, dirs_exist_ok=True)
+        copy_securo_tools(tools_src, tools_dst)
     for name in ("config.json", "securo_iocs.json"):
         src = ROOT / name
         if src.exists():
