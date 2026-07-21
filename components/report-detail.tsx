@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import Link from "next/link";
 import { ArrowLeft, Download } from "lucide-react";
-import type { AccountIdentifier, ReportRow, RobloxLogArtifact, SecuroFinding, SecuroSession } from "@/lib/types";
+import type { AccountIdentifier, KeyArtifact, ReportRow, RobloxLogArtifact, SecuroFinding, SecuroSession } from "@/lib/types";
 import { countFindings } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +32,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredRobloxLogs = data.robloxLogs || [];
   const filteredFastFlags = data.detectedFastFlags || [];
   const filteredShellBags = data.shellBagArtifacts || [];
+  const keyArtifacts = data.keyArtifacts || [];
+  const forensicSummary = useMemo(() => buildForensicSummary(data), [data]);
   const usnEvents = data.usnJournalEvents || [];
   const usnStatus = data.usnJournalStatus || {};
   const usnAvailable = usnStatus.available ?? data.evidenceSources?.["USN Change Journal available"];
@@ -190,8 +192,65 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 {defenderExclusions.length > 6 ? <p className="text-xs text-zinc-500">Showing first 6 of {defenderExclusions.length}. Full list is in Detailed Evidence.</p> : null}
               </div>
             </Card>
+
+            <Card>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">Forensic Artifacts</h2>
+                  <p className="mt-1 text-xs text-zinc-500">Compact view of parser evidence. Full details stay lower in the report.</p>
+                </div>
+                <span className="text-sm text-primary">{forensicSummary.total}</span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {forensicSummary.cards.map((item) => (
+                  <div key={item.label} className="rounded-md border border-border bg-black/20 p-3">
+                    <div className="text-xs text-zinc-500">{item.label}</div>
+                    <div className="mt-1 text-xl font-bold text-zinc-100">{item.count}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 space-y-2">
+                {forensicSummary.highlights.slice(0, 6).map((item, index) => (
+                  <div key={`${item.type}-${item.artifact}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-zinc-200">{item.type || "Artifact"}</span>
+                      <span className="text-zinc-500">{formatDate(item.timestamp)}</span>
+                    </div>
+                    <div className="mt-1 break-words text-zinc-400 [overflow-wrap:anywhere]">{item.artifact || item.path || "Artifact unavailable"}</div>
+                    <div className="mt-1 text-zinc-500">{item.source || item.confidence || "Forensic parser"}</div>
+                  </div>
+                ))}
+                {!forensicSummary.highlights.length ? <p className="text-sm text-zinc-500">No key forensic artifacts were included.</p> : null}
+                {keyArtifacts.length > 6 ? <p className="text-xs text-zinc-500">Showing newest 6 of {keyArtifacts.length}. Full list is below.</p> : null}
+              </div>
+            </Card>
           </div>
         </section>
+
+        <Card className="mt-5">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Key Forensic Artifacts</h2>
+              <p className="mt-1 text-sm text-zinc-400">Prefetch, deleted-file, Recycle Bin, registry, shortcut, and parser artifacts. These are review signals unless paired with stronger evidence.</p>
+            </div>
+            <span className="text-sm text-primary">{keyArtifacts.length} artifacts</span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {keyArtifacts.slice(0, 40).map((item, index) => (
+              <div key={`${item.type}-${item.artifact}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold text-zinc-200">{item.type || "Artifact"}</span>
+                  <span className="text-xs text-zinc-500">{formatDate(item.timestamp)}</span>
+                </div>
+                <div className="mt-2 break-words text-zinc-300 [overflow-wrap:anywhere]">{item.artifact || "Artifact unavailable"}</div>
+                {item.path ? <div className="mt-1 break-words text-zinc-500 [overflow-wrap:anywhere]">{item.path}</div> : null}
+                <div className="mt-2 text-xs text-zinc-500">{item.source || "Forensic parser"} · {item.confidence || "Review"}</div>
+              </div>
+            ))}
+            {!keyArtifacts.length ? <p className="text-sm text-zinc-500">No key forensic artifacts were included in this report.</p> : null}
+          </div>
+          {keyArtifacts.length > 40 ? <p className="mt-3 text-xs text-zinc-500">Showing first 40 of {keyArtifacts.length}. The full list remains in Detailed Evidence and Raw report data.</p> : null}
+        </Card>
 
         <Card className="mt-5">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -631,9 +690,32 @@ function confidenceClasses(confidence: string) {
   return "border-zinc-700 bg-black/20 text-zinc-200";
 }
 
+function buildForensicSummary(data: ReportRow["report_json"]) {
+  const keyArtifacts = data.keyArtifacts || [];
+  const countType = (patterns: RegExp[]) =>
+    keyArtifacts.filter((item) => patterns.some((pattern) => pattern.test(`${item.type || ""} ${item.artifact || ""} ${item.source || ""}`))).length;
+  const cards = [
+    { label: "Prefetch", count: countType([/prefetch/i]) },
+    { label: "Deleted", count: countType([/deleted|deletion|recycle/i]) + (data.usnJournalEvents || []).filter((item) => /delete/i.test(`${item.eventType || ""} ${item.reason || ""}`)).length },
+    { label: "ShellBags", count: (data.shellBagArtifacts || []).length },
+    { label: "USN", count: (data.usnJournalEvents || []).length },
+    { label: "FastFlags", count: (data.detectedFastFlags || []).length },
+    { label: "Defender", count: (data.defenderExclusions || []).length }
+  ];
+  const highlights = [...keyArtifacts]
+    .sort((a, b) => (parseTimestamp(b.timestamp)?.getTime() || 0) - (parseTimestamp(a.timestamp)?.getTime() || 0))
+    .slice(0, 12);
+  return {
+    cards,
+    highlights,
+    total: cards.reduce((sum, item) => sum + item.count, 0)
+  };
+}
+
 function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
   const raw = data as Record<string, unknown>;
   const groups: Array<[string, unknown]> = [
+    ["Key Forensic Artifacts", raw.keyArtifacts || raw.key_artifacts],
     ["Detect Logs", raw.detectLogs || raw.detect_logs],
     ["Warning Logs", raw.warningLogs || raw.warning_logs],
     ["Recovery", raw.recoveryArtifacts || raw.recovery_artifacts || raw.recoveredFiles || raw.recovered_files],
@@ -660,6 +742,7 @@ function buildExportHtml(report: ReportRow) {
   const data = report.report_json;
   const visibleFindings = data.findings.filter((finding) => !isSecuroSuppressedFinding(finding));
   const evidenceGroups = reportEvidenceGroups(data);
+  const forensicSummary = buildForensicSummary(data);
   const entry = (timestamp: unknown, content: string, tag = "div", keepVisible = false) => {
     const stamp = parseTimestamp(timestamp)?.toISOString() || "";
     return `<${tag} class="report-entry"${stamp ? ` data-timestamp="${escape(stamp)}"` : ""}${keepVisible ? ` data-keep-visible="true"` : ""}>${content}</${tag}>`;
@@ -731,6 +814,19 @@ function buildExportHtml(report: ReportRow) {
     ${(item.reasons || []).length ? `<p>Reasons: ${escape((item.reasons || []).join("; "))}</p>` : ""}
     <p>Source: ${escape(item.source || "Defender preferences")}</p>
   `)).join("");
+  const forensicCards = forensicSummary.cards.map((item) => `<div class="mini-card"><small>${escape(item.label)}</small><b>${item.count}</b></div>`).join("");
+  const forensicHighlights = forensicSummary.highlights.slice(0, 8).map((item) => entry(item.timestamp, `
+    <p><b>${escape(item.type || "Artifact")}</b> · ${escape(formatDate(item.timestamp))}</p>
+    <p>${escape(item.artifact || item.path || "Artifact unavailable")}</p>
+    ${item.path ? `<p>${escape(item.path)}</p>` : ""}
+    <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
+  `)).join("");
+  const keyArtifactRows = (data.keyArtifacts || []).slice(0, 60).map((item) => entry(item.timestamp, `
+    <p><b>${escape(item.type || "Artifact")}</b> · ${escape(formatDate(item.timestamp))}</p>
+    <p>${escape(item.artifact || "Artifact unavailable")}</p>
+    ${item.path ? `<p>${escape(item.path)}</p>` : ""}
+    <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
+  `)).join("");
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
     <style>
@@ -748,12 +844,16 @@ function buildExportHtml(report: ReportRow) {
       .timeline-entry{display:grid;grid-template-columns:160px minmax(0,1fr) 180px;gap:16px;align-items:start;overflow:hidden}
       .timeline-message{min-width:0;overflow-wrap:anywhere;word-break:break-word;white-space:normal}
       .timeline-source{white-space:nowrap;color:#8b93a7}
+      .mini-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+      .mini-card{border:1px solid #264234;border-radius:8px;padding:10px;background:rgba(0,0,0,.22)}
+      .mini-card small{display:block;color:#8b93a7}.mini-card b{font-size:22px}
       @media(max-width:720px){.timeline-entry,.timeline-reset-grid{grid-template-columns:1fr}.timeline-source{white-space:normal}}
     </style>
     </head><body>
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
-    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section></aside></div>
+    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section><section><h2>Forensic Artifacts</h2><p>Compact parser evidence summary. Full entries are lower in the report.</p><div class="mini-grid">${forensicCards}</div>${forensicHighlights || "<p>No key forensic artifacts included.</p>"}</section></aside></div>
+    <section><h2>Key Forensic Artifacts</h2><p>Prefetch, deleted-file, Recycle Bin, registry, shortcut, and parser artifacts. These are review signals unless paired with stronger evidence.</p>${keyArtifactRows || "<p>No key forensic artifacts were included.</p>"}${(data.keyArtifacts || []).length > 60 ? `<p>Showing first 60 of ${(data.keyArtifacts || []).length}. Full list is in raw report data.</p>` : ""}</section>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>

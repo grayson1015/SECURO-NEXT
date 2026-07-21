@@ -146,6 +146,15 @@ export type UsnJournalEvent = {
   source?: string;
 };
 
+export type KeyArtifact = {
+  type?: string;
+  artifact?: string;
+  path?: string;
+  timestamp?: string;
+  source?: string;
+  confidence?: string;
+};
+
 export type SecuroFinding = {
   name?: string;
   path?: string;
@@ -175,6 +184,7 @@ export type SecuroReportJson = {
   sessions: SecuroSession[];
   robloxLogs?: RobloxLogArtifact[];
   detectedFastFlags?: RobloxFastFlag[];
+  keyArtifacts?: KeyArtifact[];
   usnJournalEvents?: UsnJournalEvent[];
   usnJournalStatus?: UsnJournalStatus;
   shellBagArtifacts?: {
