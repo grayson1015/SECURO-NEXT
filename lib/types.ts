@@ -148,6 +148,7 @@ export type UsnJournalEvent = {
 
 export type KeyArtifact = {
   type?: string;
+  label?: string;
   artifact?: string;
   path?: string;
   timestamp?: string;

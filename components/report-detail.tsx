@@ -211,12 +211,12 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               </div>
               <div className="mt-3 space-y-2">
                 {forensicSummary.highlights.slice(0, 6).map((item, index) => (
-                  <div key={`${item.type}-${item.artifact}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-xs">
+                  <div key={`${item.type}-${artifactText(item)}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-xs">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-semibold text-zinc-200">{item.type || "Artifact"}</span>
                       <span className="text-zinc-500">{formatDate(item.timestamp)}</span>
                     </div>
-                    <div className="mt-1 break-words text-zinc-400 [overflow-wrap:anywhere]">{item.artifact || item.path || "Artifact unavailable"}</div>
+                    <div className="mt-1 break-words text-zinc-400 [overflow-wrap:anywhere]">{artifactText(item)}</div>
                     <div className="mt-1 text-zinc-500">{item.source || item.confidence || "Forensic parser"}</div>
                   </div>
                 ))}
@@ -237,12 +237,12 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             {keyArtifacts.slice(0, 40).map((item, index) => (
-              <div key={`${item.type}-${item.artifact}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-sm">
+              <div key={`${item.type}-${artifactText(item)}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-semibold text-zinc-200">{item.type || "Artifact"}</span>
                   <span className="text-xs text-zinc-500">{formatDate(item.timestamp)}</span>
                 </div>
-                <div className="mt-2 break-words text-zinc-300 [overflow-wrap:anywhere]">{item.artifact || "Artifact unavailable"}</div>
+                <div className="mt-2 break-words text-zinc-300 [overflow-wrap:anywhere]">{artifactText(item)}</div>
                 {item.path ? <div className="mt-1 break-words text-zinc-500 [overflow-wrap:anywhere]">{item.path}</div> : null}
                 <div className="mt-2 text-xs text-zinc-500">{item.source || "Forensic parser"} · {item.confidence || "Review"}</div>
               </div>
@@ -690,10 +690,14 @@ function confidenceClasses(confidence: string) {
   return "border-zinc-700 bg-black/20 text-zinc-200";
 }
 
+function artifactText(item: KeyArtifact) {
+  return item.label || item.artifact || item.path || "Artifact unavailable";
+}
+
 function buildForensicSummary(data: ReportRow["report_json"]) {
   const keyArtifacts = data.keyArtifacts || [];
   const countType = (patterns: RegExp[]) =>
-    keyArtifacts.filter((item) => patterns.some((pattern) => pattern.test(`${item.type || ""} ${item.artifact || ""} ${item.source || ""}`))).length;
+    keyArtifacts.filter((item) => patterns.some((pattern) => pattern.test(`${item.type || ""} ${artifactText(item)} ${item.source || ""}`))).length;
   const cards = [
     { label: "Prefetch", count: countType([/prefetch/i]) },
     { label: "Deleted", count: countType([/deleted|deletion|recycle/i]) + (data.usnJournalEvents || []).filter((item) => /delete/i.test(`${item.eventType || ""} ${item.reason || ""}`)).length },
@@ -817,13 +821,13 @@ function buildExportHtml(report: ReportRow) {
   const forensicCards = forensicSummary.cards.map((item) => `<div class="mini-card"><small>${escape(item.label)}</small><b>${item.count}</b></div>`).join("");
   const forensicHighlights = forensicSummary.highlights.slice(0, 8).map((item) => entry(item.timestamp, `
     <p><b>${escape(item.type || "Artifact")}</b> · ${escape(formatDate(item.timestamp))}</p>
-    <p>${escape(item.artifact || item.path || "Artifact unavailable")}</p>
+    <p>${escape(artifactText(item))}</p>
     ${item.path ? `<p>${escape(item.path)}</p>` : ""}
     <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
   `)).join("");
   const keyArtifactRows = (data.keyArtifacts || []).slice(0, 60).map((item) => entry(item.timestamp, `
     <p><b>${escape(item.type || "Artifact")}</b> · ${escape(formatDate(item.timestamp))}</p>
-    <p>${escape(item.artifact || "Artifact unavailable")}</p>
+    <p>${escape(artifactText(item))}</p>
     ${item.path ? `<p>${escape(item.path)}</p>` : ""}
     <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
   `)).join("");
