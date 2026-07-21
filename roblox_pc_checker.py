@@ -1781,6 +1781,22 @@ def get_common_roblox_log_dirs() -> list[Path]:
     return found
 
 
+def is_roblox_studio_artifact(path: Path | str, text_sample: str = "") -> bool:
+    # Roblox Studio activity should not be treated as Roblox player/account play evidence.
+    combined = f"{path} {text_sample[:12000]}".lower()
+    studio_terms = [
+        "robloxstudio",
+        "roblox studio",
+        "studiobeta",
+        "studioapp",
+        "studio.log",
+        "studiobeta.log",
+        "robloxstudiobeta.exe",
+        "robloxstudio.exe",
+    ]
+    return any(term in combined for term in studio_terms)
+
+
 def parse_log_timestamp(line: str, fallback_date: dt.datetime):
     patterns = [
         r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})",
@@ -1880,6 +1896,8 @@ def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict]
         except OSError:
             continue
         for path in logs:
+            if is_roblox_studio_artifact(path):
+                continue
             try:
                 mtime = dt.datetime.fromtimestamp(path.stat().st_mtime)
             except Exception:
@@ -1915,6 +1933,8 @@ def parse_roblox_logs(days: int, config: dict | None = None) -> tuple[list[dict]
                 session["raw_lines"] = lines
             except Exception:
                 lines = []
+            if is_roblox_studio_artifact(path, session["raw_log"]):
+                continue
             seen_times = []
             for line in lines:
                 ts = parse_log_timestamp(line, mtime)
@@ -2206,7 +2226,7 @@ def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
     candidates = []
     for folder in get_common_roblox_log_dirs():
         try:
-            candidates.extend(path for path in folder.rglob("*.log") if path.is_file())
+            candidates.extend(path for path in folder.rglob("*.log") if path.is_file() and not is_roblox_studio_artifact(path))
         except OSError:
             continue
     def modified_time(path: Path) -> float:
@@ -2242,6 +2262,8 @@ def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 text = handle.read(read_size)
         except OSError:
+            continue
+        if is_roblox_studio_artifact(path, text):
             continue
         bytes_read += len(text.encode("utf-8", errors="replace"))
         timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")

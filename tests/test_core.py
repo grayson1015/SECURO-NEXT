@@ -204,6 +204,34 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(any("FFlagDebugGraphicsPreferD3D11" in event.get("text", "") for event in timeline))
         self.assertFalse(any(event.get("source", "").startswith("Roblox FastFlag") for event in timeline))
 
+    def test_roblox_studio_logs_are_not_used_as_player_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_local = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = tmp
+            log_dir = Path(tmp) / "Roblox" / "logs"
+            log_dir.mkdir(parents=True)
+            (log_dir / "Player.log").write_text(
+                "2026-06-03 12:00:00 userId: 123 username: Player placeId: 999 jobId: abcdefgh-1234\n",
+                encoding="utf-8",
+            )
+            (log_dir / "Studio.log").write_text(
+                "2026-06-03 12:01:00 Roblox Studio RobloxStudioBeta.exe userId: 999 username: StudioUser placeId: 111\n",
+                encoding="utf-8",
+            )
+            fixed = dt.datetime.now().timestamp()
+            os.utime(log_dir / "Player.log", (fixed, fixed))
+            os.utime(log_dir / "Studio.log", (fixed, fixed))
+            try:
+                sessions, _ = checker.parse_roblox_logs(30, test_config())
+            finally:
+                if old_local is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
+        ids = {session.get("user_id") for session in sessions}
+        self.assertIn("123", ids)
+        self.assertNotIn("999", ids)
+
     def test_discord_identifier_collection_skips_token_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             old_appdata = os.environ.get("APPDATA")
@@ -1709,6 +1737,29 @@ File Name           : notes.txt
         self.assertEqual(result["roblox"][0]["userId"], "24681012")
         self.assertEqual(result["roblox"][0]["username"], "OlderPlayer")
         self.assertIn("old-session.log", result["roblox"][0]["sources"][0])
+
+    def test_historical_roblox_accounts_ignore_studio_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "Roblox" / "logs"
+            log_dir.mkdir(parents=True)
+            (log_dir / "studio-history.log").write_text(
+                "2025-01-01 12:00:00 Roblox Studio RobloxStudioBeta.exe userId: 1357911 username: StudioOnly",
+                encoding="utf-8",
+            )
+            original_dirs = checker.get_common_roblox_log_dirs
+            original_command = checker.run_command
+            try:
+                checker.get_common_roblox_log_dirs = lambda: [log_dir]
+                checker.run_command = lambda *args, **kwargs: ""
+                result = checker.collect_safe_account_identifiers([], {
+                    "collect_safe_account_identifiers": True,
+                    "account_log_max_files": 20,
+                    "account_log_max_bytes": 100000,
+                })
+            finally:
+                checker.get_common_roblox_log_dirs = original_dirs
+                checker.run_command = original_command
+        self.assertEqual(result["roblox"], [])
 
     def test_reset_history_uses_windows_install_timestamp(self):
         original_command = checker.run_command
