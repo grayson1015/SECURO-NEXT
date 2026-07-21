@@ -1573,7 +1573,7 @@ File Name           : notes.txt
         self.assertGreater(captured.get("remaining", 0), 40)
         self.assertLess(captured.get("remaining", 999), 60)
 
-    def test_deleted_file_artifacts_run_before_optional_deadline_skips(self):
+    def test_deleted_file_artifacts_survive_when_file_scan_is_skipped(self):
         config = test_config()
         config["_scan_deadline_monotonic"] = time.monotonic() - 1
         calls = []
@@ -1612,10 +1612,74 @@ File Name           : notes.txt
         finally:
             for name, value in originals.items():
                 setattr(checker, name, value)
-        self.assertLess(calls.index("deleted"), calls.index("files"))
-        self.assertLess(calls.index("jump"), calls.index("files"))
-        self.assertLess(calls.index("amcache"), calls.index("files"))
+        self.assertNotIn("files", calls)
+        self.assertIn("deleted", calls)
         self.assertIn("DELETED FILE:", json.dumps(report))
+
+    def test_priority_forensic_stages_run_before_file_artifacts(self):
+        config = test_config()
+        config["_scan_deadline_monotonic"] = time.monotonic() + 600
+        calls = []
+        originals = {}
+        for name in [
+            "parse_roblox_logs",
+            "collect_process_evidence",
+            "collect_running_processes",
+            "collect_network_ioc_evidence",
+            "collect_prefetch_evidence",
+            "collect_usn_journal_events",
+            "collect_recycle_bin_context",
+            "collect_jump_list_context",
+            "collect_amcache_context",
+            "execute_external_forensic_tools",
+            "collect_sbecmd_shellbags",
+            "collect_external_forensic_exports",
+            "collect_powershell_history",
+            "collect_defender_history",
+            "collect_defender_exclusions",
+            "collect_persistence",
+            "collect_browser_downloads",
+            "collect_shellbag_context",
+            "collect_recovery_artifacts",
+            "collect_warning_logs",
+            "collect_file_artifacts",
+            "collect_safe_account_identifiers",
+            "evidence_quality",
+            "collect_system_info",
+        ]:
+            originals[name] = getattr(checker, name)
+        try:
+            checker.parse_roblox_logs = lambda days, cfg: ([], [])
+            checker.collect_process_evidence = lambda days, cfg, sessions: ([], [])
+            checker.collect_running_processes = lambda cfg, sessions: ([], [])
+            checker.collect_network_ioc_evidence = lambda cfg: ([], [])
+            checker.collect_prefetch_evidence = lambda days, cfg, sessions: (calls.append("prefetch") or ([], []))
+            checker.collect_usn_journal_events = lambda days, cfg, sessions: (calls.append("usn") or ([], [], []))
+            checker.collect_recycle_bin_context = lambda days, cfg, sessions: (calls.append("deleted") or ([], []))
+            checker.collect_jump_list_context = lambda days, cfg, sessions: (calls.append("jump") or ([], []))
+            checker.collect_amcache_context = lambda days, cfg, sessions: (calls.append("amcache") or ([], []))
+            checker.execute_external_forensic_tools = lambda days, cfg: (calls.append("external-tools") or [])
+            checker.collect_sbecmd_shellbags = lambda days, cfg, sessions: (calls.append("sbecmd") or ([], [], []))
+            checker.collect_external_forensic_exports = lambda days, cfg, sessions: (calls.append("external-exports") or ([], []))
+            checker.collect_powershell_history = lambda days, cfg, sessions: (calls.append("powershell") or ([], []))
+            checker.collect_defender_history = lambda days, cfg, sessions: (calls.append("defender") or ([], []))
+            checker.collect_defender_exclusions = lambda cfg: (calls.append("exclusions") or ([], []))
+            checker.collect_persistence = lambda days, cfg, sessions: (calls.append("persistence") or ([], []))
+            checker.collect_browser_downloads = lambda days, cfg, sessions: (calls.append("browser") or ([], []))
+            checker.collect_shellbag_context = lambda days, cfg, sessions: (calls.append("shellbag") or ([], []))
+            checker.collect_recovery_artifacts = lambda days, cfg, sessions: (calls.append("recovery") or ([], [], []))
+            checker.collect_warning_logs = lambda days, cfg, sessions: (calls.append("warnings") or ([], [], []))
+            checker.collect_file_artifacts = lambda days, cfg, sessions, verbose=False, progress=None: (calls.append("files") or ([], []))
+            checker.collect_safe_account_identifiers = lambda sessions, cfg: {}
+            checker.evidence_quality = lambda days: {"Prefetch available": True}
+            checker.collect_system_info = lambda: {"hostname": "unit-host", "scan_time": "old"}
+            checker.build_scan_report_with_progress(7, config, lambda message: None)
+        finally:
+            for name, value in originals.items():
+                setattr(checker, name, value)
+        self.assertIn("files", calls)
+        for stage in ["prefetch", "usn", "deleted", "jump", "amcache", "defender", "persistence", "browser", "shellbag", "recovery", "warnings"]:
+            self.assertLess(calls.index(stage), calls.index("files"))
 
     def test_scan_profiles_apply_expected_coverage(self):
         quick = checker.apply_scan_profile(test_config(), "quick")

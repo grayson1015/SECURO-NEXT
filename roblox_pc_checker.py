@@ -4008,6 +4008,9 @@ def collect_file_artifacts(days: int, config: dict, sessions: list[dict], verbos
     cut = cutoff(days)
     max_files = int(config.get("max_files_scanned") or 25000)
     time_budget = int(config.get("file_artifact_time_budget_seconds") or 240)
+    remaining = scan_time_remaining(config)
+    if remaining is not None:
+        time_budget = max(1, min(time_budget, int(remaining) - 12))
     started = time.monotonic()
     stage_deadline = started + max(1, time_budget)
     seen_files = 0
@@ -5686,57 +5689,62 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     emit_progress(progress, "Checking forensic parser exports", 32)
     sbecmd_findings, sbecmd_timeline, shellbag_artifacts = collect_sbecmd_shellbags(days, config, sessions_raw)
     external_forensic_findings, external_forensic_timeline = collect_external_forensic_exports(days, config, sessions_raw)
-    emit_progress(progress, "Checking file artifacts", 34)
-    file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
-    emit_progress(progress, "Checking PowerShell history", 50)
-    if has_scan_time_for(config, 170):
+
+    emit_progress(progress, "Checking PowerShell history", 38)
+    if has_scan_time_for(config, 95):
         ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
     else:
         ps_findings, ps_timeline = [], []
-        note_stage_skipped(config, progress, "PowerShell history", stage_limitations, 170, 50)
-    emit_progress(progress, "Checking Defender artifacts", 58)
-    if has_scan_time_for(config, 145):
+        note_stage_skipped(config, progress, "PowerShell history", stage_limitations, 95, 38)
+    emit_progress(progress, "Checking Defender artifacts", 46)
+    if has_scan_time_for(config, 80):
         defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
     else:
         defender_findings, defender_timeline = [], []
-        note_stage_skipped(config, progress, "Defender artifacts", stage_limitations, 145, 58)
+        note_stage_skipped(config, progress, "Defender artifacts", stage_limitations, 80, 46)
     defender_exclusions, defender_exclusion_timeline = collect_defender_exclusions(config)
-    emit_progress(progress, "Checking persistence entries", 66)
-    if has_scan_time_for(config, 120):
+    emit_progress(progress, "Checking persistence entries", 54)
+    if has_scan_time_for(config, 65):
         persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
     else:
         persistence_findings, persistence_timeline = [], []
-        note_stage_skipped(config, progress, "Persistence entries", stage_limitations, 120, 66)
-    emit_progress(progress, "Checking browser artifacts", 74)
+        note_stage_skipped(config, progress, "Persistence entries", stage_limitations, 65, 54)
+    emit_progress(progress, "Checking browser artifacts", 62)
     if config.get("skip_browser_artifacts"):
         browser_findings, browser_timeline = [], []
-        emit_progress(progress, "Browser artifacts skipped by scan profile", 74)
-    elif not has_scan_time_for(config, 100):
+        emit_progress(progress, "Browser artifacts skipped by scan profile", 62)
+    elif not has_scan_time_for(config, 55):
         browser_findings, browser_timeline = [], []
-        note_stage_skipped(config, progress, "Browser artifacts", stage_limitations, 100, 74)
+        note_stage_skipped(config, progress, "Browser artifacts", stage_limitations, 55, 62)
     else:
         browser_findings, browser_timeline = collect_browser_downloads(days, config, sessions_raw)
-    emit_progress(progress, "Checking ShellBag Analyzer context", 80)
-    if has_scan_time_for(config, 80):
+    emit_progress(progress, "Checking ShellBag Analyzer context", 70)
+    if has_scan_time_for(config, 45):
         shellbag_findings, shellbag_timeline = collect_shellbag_context(days, config, sessions_raw)
     else:
         shellbag_findings, shellbag_timeline = [], []
-        note_stage_skipped(config, progress, "ShellBag Analyzer context", stage_limitations, 80, 80)
-    emit_progress(progress, "Checking recovery metadata", 88)
+        note_stage_skipped(config, progress, "ShellBag Analyzer context", stage_limitations, 45, 70)
+    emit_progress(progress, "Checking recovery metadata", 78)
     if config.get("skip_recovery_metadata"):
         recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
-        emit_progress(progress, "Recovery metadata skipped by scan profile", 88)
-    elif not has_scan_time_for(config, 55):
+        emit_progress(progress, "Recovery metadata skipped by scan profile", 78)
+    elif not has_scan_time_for(config, 35):
         recovery_findings, recovery_timeline, recovery_artifacts = [], [], []
-        note_stage_skipped(config, progress, "Recovery metadata", stage_limitations, 55, 88)
+        note_stage_skipped(config, progress, "Recovery metadata", stage_limitations, 35, 78)
     else:
         recovery_findings, recovery_timeline, recovery_artifacts = collect_recovery_artifacts(days, config, sessions_raw)
-    emit_progress(progress, "Checking warning indicators", 92)
-    if has_scan_time_for(config, 45):
+    emit_progress(progress, "Checking warning indicators", 84)
+    if has_scan_time_for(config, 30):
         warning_findings, warning_timeline, warning_logs = collect_warning_logs(days, config, sessions_raw)
     else:
         warning_findings, warning_timeline, warning_logs = [], [], []
-        note_stage_skipped(config, progress, "Warning indicators", stage_limitations, 45, 92)
+        note_stage_skipped(config, progress, "Warning indicators", stage_limitations, 30, 84)
+    emit_progress(progress, "Checking file artifacts", 90)
+    if has_scan_time_for(config, 20):
+        file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=False, progress=progress)
+    else:
+        file_findings, file_timeline = [], []
+        note_stage_skipped(config, progress, "File artifacts", stage_limitations, 20, 90)
     emit_progress(progress, "Building report", 96)
     raw_timeline = (
         roblox_timeline
