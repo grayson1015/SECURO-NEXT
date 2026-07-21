@@ -2113,13 +2113,14 @@ def collect_safe_discord_identifiers(config: dict) -> list[dict]:
         r"(?i)\b("
         r"user[_\s-]?id|userid|userId|current[_\s-]?user|currentUser|account[_\s-]?id|"
         r"discord[_\s-]?id|global[_\s-]?name|username|display[_\s-]?name|me[_\s-]?store|"
-        r"user[_\s-]?settings|authenticated[_\s-]?user|login[_\s-]?user|self"
+        r"user[_\s-]?settings|authenticated[_\s-]?user|login[_\s-]?user|self|users[/\\]@me"
         r")\b"
     )
-    unsafe_context_pattern = re.compile(r"(?i)\b(token|authorization|cookie|session[_\s-]?storage|local[_\s-]?storage|indexeddb|cache|message|dm|direct message|guild|channel)\b")
+    secret_context_pattern = re.compile(r"(?i)\b(token|authorization|bearer|cookie|session[_\s-]?storage|local[_\s-]?storage|indexeddb|leveldb|cache|password|secret)\b")
+    private_context_pattern = re.compile(r"(?i)\b(message|dm|direct message|guild|channel)\b")
     username_pattern = re.compile(r"(?i)(?:username|global[_\s-]?name|display[_\s-]?name)[\"'\s:=,-]{0,24}([A-Za-z0-9_.@-]{2,64})")
     current_user_json_pattern = re.compile(
-        r"(?i)(?:currentUser|current_user|authenticatedUser|authenticated_user|me|self)[^\n\r]{0,240}?"
+        r"(?i)\b(?:currentUser|current_user|authenticatedUser|authenticated_user|me|self)\b[^\n\r]{0,240}?"
         r"(?:\"id\"|id|userId|user_id)[\"'\s:=,-]{0,16}([1-9]\d{16,19})"
     )
     accounts: dict[str, dict] = {}
@@ -2171,10 +2172,13 @@ def collect_safe_discord_identifiers(config: dict) -> list[dict]:
         status["bytesRead"] = bytes_read
         timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
         for line in text.splitlines():
-            if unsafe_context_pattern.search(line):
+            if secret_context_pattern.search(line):
                 status["skippedUnsafeLines"] += 1
                 continue
             direct_ids = [match.group(1) for match in current_user_json_pattern.finditer(line)]
+            if private_context_pattern.search(line) and not direct_ids:
+                status["skippedUnsafeLines"] += 1
+                continue
             if not direct_ids and not account_context_pattern.search(line):
                 status["skippedNoAccountContextLines"] += 1
                 continue
@@ -3689,7 +3693,7 @@ def parse_usn_timestamp(value: str) -> dt.datetime | None:
     if parsed:
         return parsed
     clean = str(value or "").strip().strip('"')
-    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S.%f"):
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S.%f", "%m/%d/%Y %I:%M:%S.%f %p"):
         try:
             return dt.datetime.strptime(clean, fmt)
         except ValueError:
@@ -3719,16 +3723,16 @@ def parse_usn_journal_csv(text: str, volume: str, max_records: int, days: int) -
     for row in reader:
         if len(events) >= max_records:
             break
-        name = csv_value(row, "File name", "FileName", "Name", "SourceFilename", "FullPath", "Path")
+        name = csv_value(row, "File name", "FileName", "File Name", "Name", "SourceFilename", "FullPath", "Full Path", "Path", "Filename")
         if not name:
             continue
-        timestamp_text = csv_value(row, "Time stamp", "Timestamp", "TimeStamp", "Time")
+        timestamp_text = csv_value(row, "Time stamp", "Time Stamp", "Timestamp", "TimeStamp", "Time", "DateTime", "EventTime")
         when = parse_usn_timestamp(timestamp_text)
         if when and when < cut:
             continue
-        reason = csv_value(row, "Reason", "Reasons", "ChangeReason")
-        file_id = csv_value(row, "File ID", "FileId", "FileReferenceNumber", "FRN")
-        parent_id = csv_value(row, "Parent file ID", "ParentFileId", "ParentFileReferenceNumber", "ParentFRN")
+        reason = csv_value(row, "Reason", "Reasons", "ChangeReason", "Reason(s)")
+        file_id = csv_value(row, "File ID", "FileId", "File Ref#", "File Reference", "FileReferenceNumber", "FRN")
+        parent_id = csv_value(row, "Parent file ID", "ParentFileId", "Parent File Ref#", "Parent File Reference", "ParentFileReferenceNumber", "ParentFRN")
         usn = csv_value(row, "USN", "UpdateSequenceNumber")
         display_path = name if re.match(r"^[A-Za-z]:[\\/]", name) else f"{volume}\\{name}"
         events.append({
@@ -3776,12 +3780,12 @@ def parse_usn_journal_text(text: str, volume: str, max_records: int, days: int) 
         })
 
     aliases = {
-        "filename": {"filename", "name"},
-        "timestamp": {"timestamp", "time"},
+        "filename": {"filename", "name", "filenameinfile", "pathname", "fullpath"},
+        "timestamp": {"timestamp", "timestamp", "time", "datetime", "eventtime"},
         "reason": {"reason", "reasons", "changereason"},
         "usn": {"usn", "updatesequencenumber"},
-        "fileid": {"fileid", "fileref", "filereference", "filereferencenumber", "frn"},
-        "parentfileid": {"parentfileid", "parentfileref", "parentfilereference", "parentfilereferencenumber", "parentfrn"},
+        "fileid": {"fileid", "fileref", "filereference", "filereferencenumber", "frn", "fileref#"},
+        "parentfileid": {"parentfileid", "parentfileref", "parentfilereference", "parentfilereferencenumber", "parentfrn", "parentfileref#"},
     }
     for raw_line in text.lstrip("\ufeff").splitlines():
         line = raw_line.strip()
@@ -3821,6 +3825,10 @@ def collect_usn_journal_events(days: int, config: dict, sessions: list[dict]) ->
     for args in (
         ["fsutil", "usn", "readJournal", volume, f"startUsn=0x{start_usn:x}", "csv"],
         ["fsutil", "usn", "readJournal", volume, "csv", f"startUsn=0x{start_usn:x}"],
+        ["fsutil", "usn", "readjournal", volume, f"startusn=0x{start_usn:x}", "csv"],
+        ["fsutil", "usn", "readjournal", volume, "csv", f"startusn=0x{start_usn:x}"],
+        ["fsutil", "usn", "readjournal", volume, f"startusn=0x{start_usn:x}", "readData", "csv"],
+        ["fsutil", "usn", "readjournal", volume, "readData", "csv", f"startusn=0x{start_usn:x}"],
     ):
         output = run_command(args, timeout=timeout)
         if "COMMAND_ERROR" not in output and not re.search(r"(access is denied|error \d+|invalid parameter|invalid syntax)", output, re.I):
@@ -3836,6 +3844,8 @@ def collect_usn_journal_events(days: int, config: dict, sessions: list[dict]) ->
         for args in (
             ["fsutil", "usn", "readJournal", volume, f"startUsn=0x{start_usn:x}"],
             ["fsutil", "usn", "readJournal", volume],
+            ["fsutil", "usn", "readjournal", volume, f"startusn=0x{start_usn:x}", "readData"],
+            ["fsutil", "usn", "readjournal", volume, "readData"],
         ):
             plain_output = run_command(args, timeout=timeout)
             if "COMMAND_ERROR" not in plain_output and not re.search(r"(access is denied|error \d+|invalid parameter|invalid syntax)", plain_output, re.I):
@@ -3853,10 +3863,15 @@ def collect_usn_journal_events(days: int, config: dict, sessions: list[dict]) ->
         name = event.get("fileName", "")
         path_text = event.get("path", "")
         reason = event.get("reason", "")
-        suspicious = suspicious_name(name, config) or bool(ioc_text_matches(f"{name} {path_text}", config))
+        probe = make_finding(path_text, name, "usn_journal", config)
+        suspicious = (
+            suspicious_name(name, config)
+            or bool(ioc_text_matches(f"{name} {path_text}", config))
+            or executor_filename_keyword_match(probe, config)
+        )
         if not suspicious:
             continue
-        finding = make_finding(path_text, name, "usn_journal", config)
+        finding = probe
         finding["first_seen"] = event.get("timestamp") or iso_now()
         finding["supporting_evidence"].append(
             f"USN Journal: {event.get('eventType')} {path_text}; reason={reason}; usn={event.get('usn', '')}"

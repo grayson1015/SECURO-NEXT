@@ -264,6 +264,37 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(config["_discord_account_status"]["logFilesScanned"], 1)
         self.assertEqual(config["_discord_account_status"]["candidateIdsFound"], 1)
 
+    def test_discord_identifier_allows_current_user_lines_with_message_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_appdata = os.environ.get("APPDATA")
+            old_local = os.environ.get("LOCALAPPDATA")
+            os.environ["APPDATA"] = tmp
+            os.environ["LOCALAPPDATA"] = tmp
+            log_dir = Path(tmp) / "discord" / "logs"
+            log_dir.mkdir(parents=True)
+            user_id = "333333333333333333"
+            other_id = "444444444444444444"
+            (log_dir / "discord.log").write_text(
+                f'info message router currentUser={{"id":"{user_id}","username":"SafeUser"}} channel ready\n'
+                f"message author id {other_id} channel dispatch only\n",
+                encoding="utf-8",
+            )
+            config = test_config()
+            try:
+                accounts = checker.collect_safe_discord_identifiers(config)
+            finally:
+                if old_appdata is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = old_appdata
+                if old_local is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
+        ids = {account["userId"] for account in accounts}
+        self.assertIn(user_id, ids)
+        self.assertNotIn(other_id, ids)
+
     def test_missing_telemetry_lowers_confidence(self):
         quality = {"Roblox logs available": True, "Prefetch available": False, "Sysmon Event ID 8 available": False}
         self.assertEqual(checker.confidence_for("Clean-but-limited", quality), "limited")
@@ -472,6 +503,38 @@ File Name           : notes.txt
         self.assertEqual(len(findings), 1)
         self.assertIn("csv", calls[1])
         self.assertEqual(config["_usn_journal_status"]["recordsCollected"], 1)
+
+    def test_usn_collector_tries_read_data_csv_variant(self):
+        sample = (
+            '"File Name","Time Stamp","Reason(s)","USN","File Ref#","Parent File Ref#"\n'
+            f'"Xeno.dll","{dt.datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")}","FILE_DELETE | CLOSE","0x100","0x10","0x01"\n'
+        )
+        config = test_config()
+        config["usn_journal_enabled"] = True
+        original_query = checker.query_usn_journal_state
+        original_run = checker.run_command
+        calls = []
+        try:
+            checker.query_usn_journal_state = lambda volume="C:": {
+                "available": True,
+                "volume": volume,
+                "firstUsn": 0x10,
+                "nextUsn": 0x1000,
+                "error": "",
+            }
+            def fake_run(args, timeout=20):
+                calls.append(args)
+                if "readData" in args:
+                    return sample
+                return "COMMAND_ERROR: invalid parameter"
+            checker.run_command = fake_run
+            findings, timeline, events = checker.collect_usn_journal_events(7, config, [])
+        finally:
+            checker.query_usn_journal_state = original_query
+            checker.run_command = original_run
+        self.assertEqual(len(events), 1)
+        self.assertEqual(findings[0]["name"], "Xeno.dll")
+        self.assertTrue(any("readData" in call for call in calls))
 
     def test_prefetch_inventory_reports_readable_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
