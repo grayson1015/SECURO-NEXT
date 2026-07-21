@@ -30,14 +30,14 @@
     },
     "deep": {
       "scan_days": 90,
-      "scan_timeout_seconds": 480,
+      "scan_timeout_seconds": 600,
       "scan_finish_buffer_seconds": 55,
       "max_files_scanned": 60000,
       "file_artifact_time_budget_seconds": 210,
       "external_forensic_tools_enabled": true,
       "collect_safe_account_identifiers": true,
       "collect_system_reset_evidence": true,
-      "description": "Maximum coverage scan with an 8 minute hard stop and terminal report upload."
+      "description": "Maximum coverage scan with a 10 minute hard stop and terminal report upload."
     }
   },
   "virustotal_api_key": "",

@@ -541,7 +541,7 @@ def scan_profiles() -> dict:
         },
         "deep": {
             "scan_days": 90,
-            "scan_timeout_seconds": 480,
+            "scan_timeout_seconds": 600,
             "scan_finish_buffer_seconds": 55,
             "max_files_scanned": 60000,
             "file_artifact_time_budget_seconds": 210,
@@ -554,7 +554,7 @@ def scan_profiles() -> dict:
             "usn_journal_window_bytes": 12_000_000,
             "usn_journal_timeout_seconds": 24,
             "shellbag_max_records": 12000,
-            "description": "Maximum coverage scan with an 8 minute hard stop and terminal report upload.",
+            "description": "Maximum coverage scan with a 10 minute hard stop and terminal report upload.",
         },
     }
 

@@ -1689,7 +1689,7 @@ File Name           : notes.txt
         self.assertTrue(quick["skip_browser_artifacts"])
         self.assertEqual(quick["scan_timeout_seconds"], 120)
         self.assertEqual(standard["scan_timeout_seconds"], 360)
-        self.assertEqual(deep["scan_timeout_seconds"], 480)
+        self.assertEqual(deep["scan_timeout_seconds"], 600)
         self.assertEqual(quick["scan_finish_buffer_seconds"], 20)
         self.assertEqual(standard["scan_finish_buffer_seconds"], 35)
         self.assertEqual(deep["scan_finish_buffer_seconds"], 55)
@@ -1708,7 +1708,7 @@ File Name           : notes.txt
         self.assertTrue(quick["collect_system_reset_evidence"])
         self.assertTrue(standard["collect_system_reset_evidence"])
         self.assertTrue(deep["collect_system_reset_evidence"])
-        self.assertEqual(deep["scan_timeout_seconds"], 480)
+        self.assertEqual(deep["scan_timeout_seconds"], 600)
         self.assertGreaterEqual(deep["scan_days"], 90)
         self.assertGreaterEqual(deep["max_files_scanned"], 60000)
 
