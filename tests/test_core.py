@@ -1961,6 +1961,27 @@ InstallDate    REG_DWORD    0x60764fa0
         encoded = json.dumps(compacted, separators=(",", ":"), default=str).encode("utf-8", errors="replace")
         self.assertLess(len(encoded), 900_000)
 
+    def test_make_finding_skips_expensive_file_checks_near_deadline(self):
+        original_signer = checker.signer_info
+        original_sha256 = checker.sha256_file
+        try:
+            checker.signer_info = lambda path: (_ for _ in ()).throw(AssertionError("signer check should be skipped"))
+            checker.sha256_file = lambda path: (_ for _ in ()).throw(AssertionError("hash check should be skipped"))
+            config = checker.load_config()
+            config["_scan_deadline_monotonic"] = time.monotonic() + 5
+            finding = checker.make_finding(
+                r"C:\Users\Example\Downloads\Potassium.exe",
+                "Potassium.exe",
+                "unit",
+                config,
+            )
+        finally:
+            checker.signer_info = original_signer
+            checker.sha256_file = original_sha256
+        self.assertEqual(finding["sha256"], "")
+        self.assertEqual(finding["signer"]["status"], "not checked")
+        self.assertIn("Skipped hash/signature checks", " ".join(finding["supporting_evidence"]))
+
 
 if __name__ == "__main__":
     unittest.main()

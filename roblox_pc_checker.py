@@ -377,6 +377,8 @@ def load_config() -> dict:
     config.setdefault("account_log_total_bytes", 32_000_000)
     config.setdefault("account_scan_time_budget_seconds", 12)
     config.setdefault("collect_system_reset_evidence", True)
+    config.setdefault("max_hash_file_bytes", 50_000_000)
+    config.setdefault("min_seconds_for_expensive_file_checks", 25)
     config.setdefault("ioc_file", "securo_iocs.json")
     config.setdefault("iocs", load_iocs(config.get("ioc_file", "securo_iocs.json")))
     return config
@@ -774,6 +776,28 @@ def sha256_file(path: str) -> str:
         return ""
 
 
+def file_size_or_none(path: str) -> int | None:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
+def can_run_expensive_file_checks(path: str, config: dict, size: int | None = None) -> tuple[bool, str]:
+    if not path or "://" in path or str(path).startswith(NETWORK_PATH_PREFIXES):
+        return False, "Skipped hash/signature checks for a URL or network path."
+    remaining = scan_time_remaining(config)
+    minimum = int(config.get("min_seconds_for_expensive_file_checks") or 25)
+    if remaining is not None and remaining < minimum:
+        return False, f"Skipped hash/signature checks to preserve scan timeout ({int(max(0, remaining))} seconds left)."
+    if size is None:
+        size = file_size_or_none(path)
+    max_size = int(config.get("max_hash_file_bytes") or 50_000_000)
+    if size is not None and size > max_size:
+        return False, f"Skipped hash/signature checks because file is larger than {max_size // 1_000_000} MB."
+    return True, ""
+
+
 def normalize_path(path: str) -> str:
     if not path:
         return ""
@@ -1094,9 +1118,12 @@ def key_artifacts_from_report_parts(findings: list[dict], timeline: list[dict], 
 def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     norm = path if "://" in (path or "") or str(path or "").startswith(NETWORK_PATH_PREFIXES) else (normalize_path(path) if path else "")
     suppressed = securo_internal_path(norm, config)
-    signer = signer_info(norm) if Path(norm).suffix.lower() in [".exe", ".dll"] else {"status": "not checked", "subject": "", "issuer": ""}
+    suffix = Path(norm).suffix.lower()
+    size = file_size_or_none(norm) if norm else None
+    expensive_ok, expensive_skip_reason = can_run_expensive_file_checks(norm, config, size)
+    signer = signer_info(norm) if expensive_ok and suffix in [".exe", ".dll"] else {"status": "not checked", "subject": "", "issuer": ""}
     try:
-        hashable = Path(norm).is_file() and Path(norm).suffix.lower() in [".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"]
+        hashable = expensive_ok and Path(norm).is_file() and suffix in [".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"]
     except OSError:
         hashable = False
     finding = {
@@ -1122,6 +1149,8 @@ def make_finding(path: str, name: str, source: str, config: dict) -> dict:
     }
     if suppressed:
         return finding
+    if expensive_skip_reason and suffix in [".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z"]:
+        finding["supporting_evidence"].append(expensive_skip_reason)
     if is_known_safe_signer(signer, config):
         add_score(finding, config["score_rules"]["known_safe_signer"], "Signed by known-safe signer")
     elif signer.get("status", "").lower() in ["notsigned", "unknown", "missing"]:

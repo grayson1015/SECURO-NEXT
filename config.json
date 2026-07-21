@@ -76,6 +76,8 @@
   "account_log_total_bytes": 32000000,
   "account_scan_time_budget_seconds": 12,
   "collect_system_reset_evidence": true,
+  "max_hash_file_bytes": 50000000,
+  "min_seconds_for_expensive_file_checks": 25,
   "ioc_file": "securo_iocs.json",
   "known_bad_hashes": [],
   "executor_confirmation_keywords": [
