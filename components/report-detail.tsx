@@ -32,6 +32,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredRobloxLogs = data.robloxLogs || [];
   const filteredFastFlags = data.detectedFastFlags || [];
   const filteredShellBags = data.shellBagArtifacts || [];
+  const usnEvents = data.usnJournalEvents || [];
+  const usnAvailable = data.evidenceSources?.["USN Change Journal available"];
+  const usnReadable = data.evidenceSources?.["USN Change Journal readable"];
+  const usnCollected = data.evidenceSources?.["USN Journal records collected"];
   const accountContext = data.accountIdentifiers || {};
   const accountRows = accountContext.roblox || [];
   const discordRows = accountContext.discord || [];
@@ -211,6 +215,49 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               </details>
             ))}
             {!filteredShellBags.length ? <p className="text-sm text-zinc-500">No SBECmd ShellBag artifacts were included in this report.</p> : null}
+          </div>
+        </Card>
+
+        <Card className="mt-5">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">USN Journal Events</h2>
+              <p className="mt-1 text-sm text-zinc-400">Recent bounded NTFS create, delete, rename, and modify records. These are context, not proof of cheating by themselves.</p>
+            </div>
+            <span className="text-sm text-primary">{usnEvents.length} events</span>
+          </div>
+          <div className="mb-4 grid gap-3 text-xs md:grid-cols-3">
+            <div className="rounded-md border border-border bg-black/20 p-3">
+              <div className="text-zinc-500">Journal available</div>
+              <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(usnAvailable)}</div>
+            </div>
+            <div className="rounded-md border border-border bg-black/20 p-3">
+              <div className="text-zinc-500">Journal readable</div>
+              <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(usnReadable)}</div>
+            </div>
+            <div className="rounded-md border border-border bg-black/20 p-3">
+              <div className="text-zinc-500">Records collected</div>
+              <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(usnCollected ?? usnEvents.length)}</div>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {usnEvents.slice(0, 120).map((item, index) => (
+              <details key={`${item.usn}-${item.path}-${index}`} className="rounded-md border border-border bg-black/20 p-3">
+                <summary className="cursor-pointer text-sm font-medium text-zinc-200">
+                  USN {item.eventType || "Changed"}: {item.fileName || item.path || "File unavailable"}
+                </summary>
+                <div className="mt-3 grid gap-2 text-xs text-zinc-400 md:grid-cols-2">
+                  <div>Time: {item.timestamp ? formatDate(item.timestamp) : "Unavailable"}</div>
+                  <div>Volume: {item.volume || "Unknown"}</div>
+                  <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Path: {item.path || "Unavailable"}</div>
+                  <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Reason: {item.reason || "Unavailable"}</div>
+                  <div>USN: {item.usn || "Unavailable"}</div>
+                  <div>Parent ID: {item.parentFileId || "Unavailable"}</div>
+                </div>
+              </details>
+            ))}
+            {!usnEvents.length ? <p className="text-sm text-zinc-500">No USN Change Journal events were included in this report. If available/readable is false, Windows denied access or the journal was unavailable. If readable is true with 0 suspicious timeline entries, the journal had no suspicious matches.</p> : null}
+            {usnEvents.length > 120 ? <p className="text-xs text-zinc-500">Showing first 120 of {usnEvents.length}. Full list is in Detailed Evidence / Raw report data.</p> : null}
           </div>
         </Card>
 
@@ -507,6 +554,13 @@ function parseTimestamp(value: unknown) {
 function evidenceTimestamp(item: Record<string, unknown>) {
   const value = item.timestamp || item.time || item.firstSeen || item.first_seen || item.createdAt || item.created_at || item.modifiedAt || item.modified_at || item.activated_at || item.last_seen_at || "";
   return value ? String(value) : "";
+}
+
+function formatEvidenceValue(value: unknown) {
+  if (value === true) return "Yes";
+  if (value === false) return "No";
+  if (value === null || value === undefined || value === "") return "Unknown";
+  return String(value);
 }
 
 function findingConfidence(finding: SecuroFinding) {
