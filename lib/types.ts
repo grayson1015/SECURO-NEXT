@@ -109,6 +109,15 @@ export type SysMainServiceInfo = {
   manualReviewRequired?: boolean;
 };
 
+export type DefenderExclusion = {
+  type?: "Path" | "Process" | "Extension" | "IP Address" | string;
+  value?: string;
+  source?: string;
+  severity?: "Info" | "Review" | string;
+  manualReviewRequired?: boolean;
+  reasons?: string[];
+};
+
 export type UsnJournalEvent = {
   timestamp?: string;
   eventType?: "Created" | "Deleted" | "Renamed" | "Modified" | "Changed" | string;
@@ -169,6 +178,7 @@ export type SecuroReportJson = {
   systemResetEvidence?: SystemResetEvidence[];
   windowsInstallHistory?: WindowsInstallRecord[];
   sysMainService?: SysMainServiceInfo;
+  defenderExclusions?: DefenderExclusion[];
   findings: SecuroFinding[];
   limitations: string[];
   [key: string]: unknown;

@@ -4222,6 +4222,110 @@ def collect_defender_history(days: int, config: dict, sessions: list[dict]) -> t
     return list(findings.values()), timeline
 
 
+def defender_exclusion_reasons(kind: str, value: str, config: dict) -> list[str]:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    reasons = []
+    if not text:
+        return reasons
+    if kind in {"Path", "Process"} and user_writable_path(text):
+        reasons.append("points to a user-writable location")
+    if kind in {"Path", "Process"} and suspicious_text(text, config):
+        reasons.append("contains Roblox/executor-style suspicious terms")
+    if kind == "Extension" and lowered.strip(".") in {"exe", "dll", "ps1", "bat", "cmd", "vbs", "js"}:
+        reasons.append("excludes a high-risk executable/script extension")
+    if any(token in lowered for token in ["roblox", "executor", "inject", "loader", "bypass", "xeno", "solara", "wave", "potassium", "synapse"]):
+        reasons.append("matches Roblox exploit review terms")
+    if lowered.startswith("\\\\") or lowered.startswith("file://"):
+        reasons.append("references a network location")
+    return sorted(set(reasons))
+
+
+def collect_defender_exclusions(config: dict) -> tuple[list[dict], list[dict]]:
+    # Read-only Defender preference check. Exclusions can hide executor folders from AV, so they are review context.
+    exclusions: list[dict] = []
+    seen = set()
+
+    def add(kind: str, value: str, source: str):
+        value = str(value or "").strip()
+        if not value:
+            return
+        key = (kind.lower(), value.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        reasons = defender_exclusion_reasons(kind, value, config)
+        exclusions.append({
+            "type": kind,
+            "value": value,
+            "source": source,
+            "severity": "Review" if reasons else "Info",
+            "manualReviewRequired": bool(reasons),
+            "reasons": reasons,
+        })
+
+    def values_list(value) -> list:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    ps = (
+        "$p=Get-MpPreference;"
+        "[pscustomobject]@{"
+        "ExclusionPath=@($p.ExclusionPath);"
+        "ExclusionProcess=@($p.ExclusionProcess);"
+        "ExclusionExtension=@($p.ExclusionExtension);"
+        "ExclusionIpAddress=@($p.ExclusionIpAddress)"
+        "} | ConvertTo-Json -Depth 4 -Compress"
+    )
+    output = run_command(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], timeout=12)
+    try:
+        parsed = json.loads(output[output.find("{"):]) if "{" in output else {}
+    except (json.JSONDecodeError, ValueError):
+        parsed = {}
+    if isinstance(parsed, dict):
+        for value in values_list(parsed.get("ExclusionPath")):
+            add("Path", value, "Get-MpPreference")
+        for value in values_list(parsed.get("ExclusionProcess")):
+            add("Process", value, "Get-MpPreference")
+        for value in values_list(parsed.get("ExclusionExtension")):
+            add("Extension", value, "Get-MpPreference")
+        for value in values_list(parsed.get("ExclusionIpAddress")):
+            add("IP Address", value, "Get-MpPreference")
+
+    registry_keys = [
+        ("Path", r"HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths"),
+        ("Process", r"HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Processes"),
+        ("Extension", r"HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Extensions"),
+        ("IP Address", r"HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\IpAddresses"),
+    ]
+    for kind, key in registry_keys:
+        out = run_command(["reg", "query", key], timeout=8)
+        if "ERROR:" in out or "COMMAND_ERROR" in out:
+            continue
+        for line in out.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("HKEY_"):
+                continue
+            parts = re.split(r"\s+REG_\w+\s+", stripped, maxsplit=1)
+            if parts[0].strip().lower() == "(default)":
+                continue
+            add(kind, parts[0].strip(), "Defender exclusion registry")
+
+    timeline = []
+    for item in exclusions:
+        if item.get("manualReviewRequired"):
+            timeline.append({
+                "time": iso_now(),
+                "source": "Defender exclusions",
+                "text": f"Defender exclusion requires review: {item['type']} {item['value']}",
+                "confidence": "Possible",
+            })
+    return exclusions, timeline
+
+
 def collect_persistence(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
     # Persistence locations catch loaders that re-run at login or via scheduled tasks/services.
     findings = {}
@@ -4926,6 +5030,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     file_findings, file_timeline = collect_file_artifacts(days, config, sessions_raw, verbose=verbose)
     ps_findings, ps_timeline = collect_powershell_history(days, config, sessions_raw)
     defender_findings, defender_timeline = collect_defender_history(days, config, sessions_raw)
+    defender_exclusions, defender_exclusion_timeline = collect_defender_exclusions(config)
     persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
     if config.get("skip_browser_artifacts"):
         browser_findings, browser_timeline = [], []
@@ -4960,6 +5065,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         + file_timeline
         + ps_timeline
         + defender_timeline
+        + defender_exclusion_timeline
         + persistence_timeline
         + browser_timeline
         + shellbag_timeline
@@ -4978,6 +5084,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
     engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
+    quality["Defender exclusions collected"] = bool(defender_exclusions)
+    quality["Defender exclusions needing review"] = sum(1 for item in defender_exclusions if item.get("manualReviewRequired"))
     usn_status = config.get("_usn_journal_status", {})
     quality["USN Change Journal readable"] = bool(usn_status.get("readable"))
     quality["USN Journal records collected"] = int(usn_status.get("recordsCollected", 0) or 0)
@@ -5021,6 +5129,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "warningLogs": warning_logs,
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
+        "defenderExclusions": defender_exclusions,
         "engineResults": engine_results,
         "accountIdentifiers": account_identifiers,
         "systemResetEvidence": reset_evidence,
@@ -5155,6 +5264,7 @@ def diagnostic_report(status: str, reason: str, diagnostics: ScanDiagnostics, co
         }],
         "recoveryArtifacts": [],
         "antivirusLogs": [],
+        "defenderExclusions": [],
         "engineResults": [],
         "limitations": [
             reason,
@@ -5266,6 +5376,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     else:
         defender_findings, defender_timeline = [], []
         note_stage_skipped(config, progress, "Defender artifacts", stage_limitations, 145, 58)
+    defender_exclusions, defender_exclusion_timeline = collect_defender_exclusions(config)
     emit_progress(progress, "Checking persistence entries", 66)
     if has_scan_time_for(config, 120):
         persistence_findings, persistence_timeline = collect_persistence(days, config, sessions_raw)
@@ -5318,6 +5429,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         + file_timeline
         + ps_timeline
         + defender_timeline
+        + defender_exclusion_timeline
         + persistence_timeline
         + browser_timeline
         + shellbag_timeline
@@ -5336,6 +5448,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
     engine_results = [engine_assessment(f, config) for f in findings if f.get("path") or f.get("sha256")]
     sessions_raw = attach_session_status(sessions_raw, findings)
     quality = evidence_quality(days)
+    quality["Defender exclusions collected"] = bool(defender_exclusions)
+    quality["Defender exclusions needing review"] = sum(1 for item in defender_exclusions if item.get("manualReviewRequired"))
     usn_status = config.get("_usn_journal_status", {})
     quality["USN Change Journal readable"] = bool(usn_status.get("readable"))
     quality["USN Journal records collected"] = int(usn_status.get("recordsCollected", 0) or 0)
@@ -5380,6 +5494,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "warningLogs": warning_logs,
         "recoveryArtifacts": recovery_artifacts,
         "antivirusLogs": antivirus_logs,
+        "defenderExclusions": defender_exclusions,
         "engineResults": engine_results,
         "accountIdentifiers": account_identifiers,
         "systemResetEvidence": reset_evidence,
@@ -5636,6 +5751,13 @@ def render_txt(report: dict) -> str:
     for item in report.get("antivirusLogs", []):
         lines.append(f"{item.get('timestamp')} {item.get('antivirusSource')} {item.get('severity')} {item.get('detectionName')}: {item.get('filePath')}")
     lines.append("")
+    lines += ["Defender Exclusions", "-------------------"]
+    if not report.get("defenderExclusions"):
+        lines.append("No Defender exclusions were found or accessible.")
+    for item in report.get("defenderExclusions", []):
+        reasons = "; ".join(item.get("reasons", [])) if isinstance(item.get("reasons"), list) else ""
+        lines.append(f"{item.get('type')} {item.get('severity')} ManualReview={'yes' if item.get('manualReviewRequired') else 'no'}: {item.get('value')} {reasons}")
+    lines.append("")
     lines += ["Engines", "-------"]
     if not report.get("engineResults"):
         lines.append("No engine heuristic results found.")
@@ -5723,6 +5845,14 @@ def render_html(report: dict) -> str:
         "Timestamp": a.get("timestamp", ""),
         "Path": a.get("filePath", ""),
     } for a in report.get("antivirusLogs", [])]
+    defender_exclusion_rows = [{
+        "Type": item.get("type", ""),
+        "Value": item.get("value", ""),
+        "Severity": item.get("severity", ""),
+        "Manual Review": "yes" if item.get("manualReviewRequired") else "no",
+        "Reasons": "; ".join(item.get("reasons", [])) if isinstance(item.get("reasons"), list) else "",
+        "Source": item.get("source", ""),
+    } for item in report.get("defenderExclusions", [])]
     engine_rows = [{
         "File": e.get("file", ""),
         "Score": e.get("localHeuristicScore", ""),
@@ -5930,6 +6060,7 @@ def render_html(report: dict) -> str:
         f"<p>Startup Type: {html.escape(str(sysmain.get('startupType') or 'Unavailable'))}</p>"
         f"<p>Last Changed: {html.escape(str(sysmain.get('lastChanged') or 'Could not determine'))}</p></div>"
     )
+    defender_exclusion_panel_html = html_table(defender_exclusion_rows[:8], ["Type", "Value", "Severity", "Manual Review", "Reasons", "Source"])
     raw = html.escape(json.dumps(report, indent=2))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{APP_NAME} Report</title>
@@ -5947,11 +6078,12 @@ body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f5f7f9;color:#1
 <section><h2>Warning Logs</h2><p class="muted">Warnings indicate modifications or behaviors that may reduce confidence or require review. They are not automatically cheating evidence.</p>{html_table(warning_rows, ['Detection','Severity','Confidence','Manual Review','Source','Timestamp','Explanation'], 'Timestamp')}</section>
 <section><h2>Recovery</h2>{html_table(recovery_rows, ['Name','Path','Source','Timestamp','Manual Review'], 'Timestamp')}</section>
 <section><h2>Antivirus Logs</h2>{html_table(antivirus_rows, ['Source','Detection','Severity','Timestamp','Path'], 'Timestamp')}</section>
+<section><h2>Defender Exclusions</h2><p class="muted">Configured AV exclusions. Review entries can hide executor folders from Defender, but exclusions are not proof by themselves.</p>{html_table(defender_exclusion_rows, ['Type','Value','Severity','Manual Review','Reasons','Source'])}</section>
 <section><h2>Engines</h2>{html_table(engine_rows, ['File','Score','Local Hits','Detectability','VirusTotal','Manual Review'])}</section>
 <section><h2>Roblox Account History</h2><p class="muted">{html.escape(str(account_context.get('privacyNote', 'Only non-secret Roblox account identifiers are included.')))}</p>{account_cards_html or "<p class='muted'>No Roblox account identifiers were available.</p>"}</section>
 <section><h2>Detected FastFlags</h2><p class="muted">FastFlags are grouped with the Roblox log where they were found.</p>{html_table(fastflag_rows, ['FastFlag','Value','Source Log','Timestamp','Place ID','Job ID'], 'Timestamp')}</section>
 <section><h2>Show All Roblox Logs</h2><p class="muted">Expand each log to inspect every captured Roblox event and the raw log text.</p>{roblox_log_html or "<p class='muted'>No raw Roblox logs were captured.</p>"}</section>
-<div class="timeline-reset-grid"><section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section><aside><section><h2>Factory Reset Information</h2><p class="muted">Install records may represent a reset, reinstall, or major Windows upgrade.</p>{install_list_html or reset_list_html or "<p class='muted'>No Windows installation records were available.</p>"}</section><section><h2>Services</h2>{service_panel_html}</section></aside></div>
+<div class="timeline-reset-grid"><section><h2>Timeline</h2><ul class="timeline">{timeline or "<p class='muted'>No timeline events found.</p>"}</ul></section><aside><section><h2>Factory Reset Information</h2><p class="muted">Install records may represent a reset, reinstall, or major Windows upgrade.</p>{install_list_html or reset_list_html or "<p class='muted'>No Windows installation records were available.</p>"}</section><section><h2>Services</h2>{service_panel_html}</section><section><h2>Defender Exclusions</h2><p class="muted">Configured AV exclusions. Review entries can hide executor folders from Defender.</p>{defender_exclusion_panel_html}</section></aside></div>
 <section><h2>Findings</h2>{findings_html}</section>
 <section><h2>Evidence Limitations</h2><ul>{quality}</ul></section>
 <section><h2>Raw Artifacts</h2><pre>{raw}</pre></section>
@@ -6115,9 +6247,9 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     # Vercel rejects large function payloads before the API route can store them.
     # Keep the website report useful, but reserve the complete report for local files.
     size_profiles = [
-        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "usnEvents": 1200, "shellbags": 800, "rawRoblox": False},
-        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "usnEvents": 600, "shellbags": 400, "rawRoblox": False},
-        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "usnEvents": 250, "shellbags": 180, "rawRoblox": False},
+        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "defenderExclusions": 80, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "usnEvents": 1200, "shellbags": 800, "rawRoblox": False},
+        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "defenderExclusions": 60, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "usnEvents": 600, "shellbags": 400, "rawRoblox": False},
+        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "defenderExclusions": 40, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "usnEvents": 250, "shellbags": 180, "rawRoblox": False},
     ]
     for profile in size_profiles:
         compacted["timeline"] = list(report.get("timeline", []))[-profile["timeline"]:]
@@ -6128,6 +6260,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
         compacted["warningLogs"] = list(report.get("warningLogs", []))[:profile["warningLogs"]]
         compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:profile["recoveryArtifacts"]]
         compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:profile["antivirusLogs"]]
+        compacted["defenderExclusions"] = list(report.get("defenderExclusions", []))[:profile["defenderExclusions"]]
         compacted["engineResults"] = list(report.get("engineResults", []))[:profile["engineResults"]]
         compacted["accountIdentifiers"] = compact_account_identifiers(report.get("accountIdentifiers", {}))
         compacted["systemResetEvidence"] = list(report.get("systemResetEvidence", []))[:80]
@@ -6151,6 +6284,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     compacted["warningLogs"] = list(report.get("warningLogs", []))[:20]
     compacted["recoveryArtifacts"] = list(report.get("recoveryArtifacts", []))[:20]
     compacted["antivirusLogs"] = list(report.get("antivirusLogs", []))[:30]
+    compacted["defenderExclusions"] = list(report.get("defenderExclusions", []))[:20]
     compacted["engineResults"] = list(report.get("engineResults", []))[:40]
     compacted["accountIdentifiers"] = compact_account_identifiers(report.get("accountIdentifiers", {}))
     compacted["systemResetEvidence"] = list(report.get("systemResetEvidence", []))[:40]

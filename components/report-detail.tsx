@@ -40,6 +40,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   );
   const installHistory = data.windowsInstallHistory || [];
   const sysMain = data.sysMainService || {};
+  const defenderExclusions = data.defenderExclusions || [];
+  const reviewDefenderExclusions = defenderExclusions.filter((item) => item.manualReviewRequired);
   const resetHistory = useMemo(
     () => [...(data.systemResetEvidence || [])].sort((a, b) => {
       const priority = (item: { type?: string }) => {
@@ -158,6 +160,29 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               {sysMain.manualReviewRequired ? (
                 <p className="mt-3 text-xs text-yellow-300">SysMain is disabled. This reduces Prefetch coverage and requires manual review.</p>
               ) : null}
+            </Card>
+
+            <Card>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">Defender Exclusions</h2>
+                  <p className="mt-1 text-xs text-zinc-500">Configured AV exclusions. Review entries can hide executor folders from Defender.</p>
+                </div>
+                <span className={reviewDefenderExclusions.length ? "text-sm text-yellow-300" : "text-sm text-primary"}>
+                  {reviewDefenderExclusions.length}/{defenderExclusions.length}
+                </span>
+              </div>
+              <div className="mt-3 space-y-2">
+                {defenderExclusions.slice(0, 6).map((item, index) => (
+                  <div key={`${item.type}-${item.value}-${index}`} className={`rounded-md border p-3 text-xs ${item.manualReviewRequired ? "border-yellow-500/40 bg-yellow-500/10 text-yellow-100" : "border-border bg-black/20 text-zinc-300"}`}>
+                    <div className="font-semibold">{item.type || "Exclusion"}</div>
+                    <div className="mt-1 break-words [overflow-wrap:anywhere]">{item.value || "Value unavailable"}</div>
+                    {(item.reasons || []).length ? <div className="mt-2 text-yellow-100/80">{(item.reasons || []).join("; ")}</div> : null}
+                  </div>
+                ))}
+                {!defenderExclusions.length ? <p className="text-sm text-zinc-500">No Defender exclusions were found or accessible.</p> : null}
+                {defenderExclusions.length > 6 ? <p className="text-xs text-zinc-500">Showing first 6 of {defenderExclusions.length}. Full list is in Detailed Evidence.</p> : null}
+              </div>
             </Card>
           </div>
         </section>
@@ -522,6 +547,7 @@ function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
     ["Warning Logs", raw.warningLogs || raw.warning_logs],
     ["Recovery", raw.recoveryArtifacts || raw.recovery_artifacts || raw.recoveredFiles || raw.recovered_files],
     ["Antivirus Logs", raw.antivirusLogs || raw.antivirus_logs],
+    ["Defender Exclusions", raw.defenderExclusions || raw.defender_exclusions],
     ["Engine Results", raw.engineResults || raw.engine_results],
     ["Detected FastFlags", raw.detectedFastFlags || raw.detected_fast_flags],
     ["USN Journal Events", raw.usnJournalEvents || raw.usn_journal_events],
@@ -606,6 +632,12 @@ function buildExportHtml(report: ReportRow) {
     <p>${escape(item.installDate || "Install time unavailable")}</p>
   `)).join("");
   const sysMain = data.sysMainService || {};
+  const defenderExclusionRows = (data.defenderExclusions || []).slice(0, 20).map((item) => entry("", `
+    <p><b>${escape(item.type || "Exclusion")}</b> ${item.manualReviewRequired ? "Review" : "Info"}</p>
+    <p>${escape(item.value || "Value unavailable")}</p>
+    ${(item.reasons || []).length ? `<p>Reasons: ${escape((item.reasons || []).join("; "))}</p>` : ""}
+    <p>Source: ${escape(item.source || "Defender preferences")}</p>
+  `)).join("");
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
     <style>
@@ -628,7 +660,7 @@ function buildExportHtml(report: ReportRow) {
     </head><body>
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
-    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section></aside></div>
+    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section></aside></div>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>
