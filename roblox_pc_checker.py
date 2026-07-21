@@ -353,6 +353,16 @@ def load_config() -> dict:
     config.setdefault("prefetch_parser_timeout_seconds", 25)
     config.setdefault("shellbag_parser_enabled", True)
     config.setdefault("shellbag_parser_timeout_seconds", 30)
+    config.setdefault("registry_parser_enabled", True)
+    config.setdefault("registry_parser_timeout_seconds", 45)
+    config.setdefault("eventlog_parser_enabled", True)
+    config.setdefault("eventlog_parser_timeout_seconds", 45)
+    config.setdefault("shortcut_parser_enabled", True)
+    config.setdefault("shortcut_parser_timeout_seconds", 30)
+    config.setdefault("recycle_parser_enabled", True)
+    config.setdefault("recycle_parser_timeout_seconds", 30)
+    config.setdefault("timeline_parser_enabled", True)
+    config.setdefault("timeline_parser_timeout_seconds", 35)
     config.setdefault("shellbag_max_records", 5000)
     config.setdefault("usn_journal_enabled", True)
     config.setdefault("usn_journal_max_records", 5000)
@@ -503,6 +513,7 @@ def scan_profiles() -> dict:
             "file_artifact_time_budget_seconds": 35,
             "skip_browser_artifacts": True,
             "skip_recovery_metadata": True,
+            "external_forensic_tools_enabled": False,
             "collect_safe_account_identifiers": True,
             "collect_system_reset_evidence": True,
             "usn_journal_max_records": 1500,
@@ -519,6 +530,7 @@ def scan_profiles() -> dict:
             "file_artifact_time_budget_seconds": 90,
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
+            "external_forensic_tools_enabled": False,
             "collect_safe_account_identifiers": True,
             "collect_system_reset_evidence": True,
             "usn_journal_max_records": 5000,
@@ -535,6 +547,7 @@ def scan_profiles() -> dict:
             "file_artifact_time_budget_seconds": 210,
             "skip_browser_artifacts": False,
             "skip_recovery_metadata": False,
+            "external_forensic_tools_enabled": True,
             "collect_safe_account_identifiers": True,
             "collect_system_reset_evidence": True,
             "usn_journal_max_records": 12000,
@@ -2467,6 +2480,13 @@ FORENSIC_TOOL_NAMES = {
     "SrumECmd.exe",
     "AmcacheParser.exe",
     "AppCompatCacheParser.exe",
+    "RECmd.exe",
+    "RBCmd.exe",
+    "EvtxECmd.exe",
+    "LECmd.exe",
+    "WxTCmd.exe",
+    "RecentFileCacheParser.exe",
+    "SQLECmd.exe",
 }
 
 
@@ -2493,6 +2513,13 @@ def available_forensic_tools(config: dict | None = None) -> dict[str, Path]:
             candidate = root / name
             if safe_exists(candidate) and name not in found:
                 found[name] = candidate
+                continue
+            try:
+                nested = next(root.rglob(name))
+            except (OSError, StopIteration):
+                nested = None
+            if nested and safe_exists(nested) and name not in found:
+                found[name] = nested
     return found
 
 
@@ -2502,6 +2529,40 @@ def run_forensic_tool(args: list[str], config: dict, timeout: int) -> str:
     except Exception:
         pass
     return run_command(args, timeout=timeout)
+
+
+def recmd_batch_file(tool_path: Path, name: str) -> Path | None:
+    for base in [tool_path.parent / "BatchExamples", tool_path.parent]:
+        candidate = base / name
+        if safe_exists(candidate):
+            return candidate
+    return None
+
+
+def windows_recent_root() -> Path:
+    return Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Recent"
+
+
+def activities_cache_dbs() -> list[Path]:
+    base = Path(os.environ.get("LOCALAPPDATA", "")) / "ConnectedDevicesPlatform"
+    if not safe_exists(base):
+        return []
+    try:
+        return [path for path in base.rglob("ActivitiesCache.db") if path.is_file()]
+    except OSError:
+        return []
+
+
+def selected_event_log_files() -> list[Path]:
+    log_dir = Path("C:/Windows/System32/winevt/Logs")
+    names = [
+        "Microsoft-Windows-Windows Defender%4Operational.evtx",
+        "Microsoft-Windows-Sysmon%4Operational.evtx",
+        "Security.evtx",
+        "System.evtx",
+        "Application.evtx",
+    ]
+    return [log_dir / name for name in names if safe_exists(log_dir / name)]
 
 
 def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
@@ -2519,6 +2580,11 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
     timeout = max(10, int(config.get("external_forensic_tool_timeout_seconds") or 55))
     prefetch_timeout = max(8, int(config.get("prefetch_parser_timeout_seconds") or 25))
     shellbag_timeout = max(8, int(config.get("shellbag_parser_timeout_seconds") or 30))
+    registry_timeout = max(10, int(config.get("registry_parser_timeout_seconds") or 45))
+    eventlog_timeout = max(10, int(config.get("eventlog_parser_timeout_seconds") or 45))
+    shortcut_timeout = max(8, int(config.get("shortcut_parser_timeout_seconds") or 30))
+    recycle_timeout = max(8, int(config.get("recycle_parser_timeout_seconds") or 30))
+    timeline_timeout = max(8, int(config.get("timeline_parser_timeout_seconds") or 35))
     notes = []
 
     def note(message: str):
@@ -2572,6 +2638,40 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
         out = run_forensic_tool([str(tools["AppCompatCacheParser.exe"]), "-f", str(system_hive), "--csv", str(output_root)], config, timeout)
         note("AppCompatCacheParser completed." if "COMMAND_ERROR" not in out else f"AppCompatCacheParser issue: {out[:180]}")
 
+    recycle_root = Path("C:/$Recycle.Bin")
+    if config.get("recycle_parser_enabled", True) and "RBCmd.exe" in tools and safe_exists(recycle_root):
+        out = run_forensic_tool([str(tools["RBCmd.exe"]), "-d", str(recycle_root), "--csv", str(output_root)], config, recycle_timeout)
+        note("RBCmd Recycle Bin parser completed." if "COMMAND_ERROR" not in out else f"RBCmd Recycle Bin parser issue: {out[:180]}")
+
+    recent_root = windows_recent_root()
+    if config.get("shortcut_parser_enabled", True) and "LECmd.exe" in tools and safe_exists(recent_root):
+        out = run_forensic_tool([str(tools["LECmd.exe"]), "-d", str(recent_root), "--csv", str(output_root)], config, shortcut_timeout)
+        note("LECmd shortcut parser completed." if "COMMAND_ERROR" not in out else f"LECmd shortcut parser issue: {out[:180]}")
+
+    recent_cache = Path("C:/Windows/AppCompat/Programs/RecentFileCache.bcf")
+    if "RecentFileCacheParser.exe" in tools and safe_exists(recent_cache):
+        out = run_forensic_tool([str(tools["RecentFileCacheParser.exe"]), "-f", str(recent_cache), "--csv", str(output_root)], config, timeout)
+        note("RecentFileCacheParser completed." if "COMMAND_ERROR" not in out else f"RecentFileCacheParser issue: {out[:180]}")
+
+    if config.get("timeline_parser_enabled", True) and "WxTCmd.exe" in tools:
+        for db in activities_cache_dbs()[:3]:
+            out = run_forensic_tool([str(tools["WxTCmd.exe"]), "-f", str(db), "--csv", str(output_root)], config, timeline_timeout)
+            note("WxTCmd ActivitiesCache parser completed." if "COMMAND_ERROR" not in out else f"WxTCmd ActivitiesCache parser issue: {out[:180]}")
+
+    if config.get("eventlog_parser_enabled", True) and "EvtxECmd.exe" in tools:
+        for evtx in selected_event_log_files()[:5]:
+            out = run_forensic_tool([str(tools["EvtxECmd.exe"]), "-f", str(evtx), "--csv", str(output_root)], config, eventlog_timeout)
+            note(f"EvtxECmd parsed {evtx.name}." if "COMMAND_ERROR" not in out else f"EvtxECmd issue for {evtx.name}: {out[:180]}")
+
+    if config.get("registry_parser_enabled", True) and "RECmd.exe" in tools:
+        batch_files = [
+            recmd_batch_file(tools["RECmd.exe"], "UserActivity.reb"),
+            recmd_batch_file(tools["RECmd.exe"], "AllRegExecutablesFoundOrRun.reb"),
+        ]
+        for batch in [path for path in batch_files if path]:
+            out = run_forensic_tool([str(tools["RECmd.exe"]), "-d", "C:/Users", "--bn", str(batch), "--csv", str(output_root)], config, registry_timeout)
+            note(f"RECmd registry parser completed ({batch.name})." if "COMMAND_ERROR" not in out else f"RECmd registry parser issue ({batch.name}): {out[:180]}")
+
     if notes:
         config["_external_forensic_output_dir"] = str(output_root)
     return notes
@@ -2613,6 +2713,8 @@ def forensic_export_family(path: Path, headers: list[str]) -> str:
     text = name + " " + header_text
     if "pecmd" in text or "prefetch" in text:
         return "PECmd"
+    if "rbcmd" in text or "recycle" in text or "$i" in text:
+        return "RBCmd"
     if "mftecmd" in text or "mft" in text or "deleted" in text:
         return "MFTECmd"
     if "sbecmd" in text or "shellbag" in text or "shell bag" in text:
@@ -2625,6 +2727,18 @@ def forensic_export_family(path: Path, headers: list[str]) -> str:
         return "AmcacheParser"
     if "appcompat" in text or "shimcache" in text:
         return "AppCompatCacheParser"
+    if "recmd" in text or "userassist" in text or "muicache" in text or "recentdocs" in text or "bam" in text or "dam" in text or "runmru" in text:
+        return "RECmd"
+    if "evtxecmd" in text or "evtx" in text or "eventlog" in text:
+        return "EvtxECmd"
+    if "lecmd" in text or "lnk" in text or "shortcut" in text:
+        return "LECmd"
+    if "wxtcmd" in text or "activitiescache" in text or "activity" in text:
+        return "WxTCmd"
+    if "recentfilecache" in text:
+        return "RecentFileCacheParser"
+    if "sqlecmd" in text:
+        return "SQLECmd"
     return "Forensic Export"
 
 
@@ -2643,7 +2757,9 @@ def forensic_row_time(row: dict) -> dt.datetime | None:
         "Timestamp", "Time", "Created", "Created0x10", "Modified", "LastModified", "LastModified0x30",
         "LastRun", "LastRun0", "LastRunTime", "LastWriteTime", "KeyLastWriteTimestamp",
         "SourceCreated", "SourceModified", "DeletedTime", "DeletionTime", "FirstInteracted",
-        "LastInteracted", "CreatedOn", "ModifiedOn", "AccessedOn",
+        "LastInteracted", "CreatedOn", "ModifiedOn", "AccessedOn", "LastExecutionTime",
+        "LastExecuted", "LastRunTimeUTC", "LastModifiedTime", "LastWriteTimestamp",
+        "CreationTime", "ModifiedTime", "AccessedTime", "EventTime", "ActivityTime",
     ):
         parsed = parse_dt(csv_value(row, key))
         if parsed:
@@ -2656,7 +2772,8 @@ def forensic_row_path(row: dict) -> str:
         "FullPath", "Path", "FilePath", "TargetPath", "LocalPath", "ExecutablePath",
         "ProgramPath", "ApplicationPath", "Name", "Filename", "FileName", "ExecutableName",
         "SourceFile", "SourceFilename", "Application", "AppId", "AbsolutePath", "FolderPath",
-        "FolderName", "Value",
+        "FolderName", "Value", "Target", "TargetName", "TargetPath", "CommandLine",
+        "Executable", "ProgramName", "ItemName", "File", "Data", "ValueData", "Details",
     ):
         value = csv_value(row, key)
         if value:
@@ -2715,7 +2832,7 @@ def collect_external_forensic_exports(days: int, config: dict, sessions: list[di
                             continue
 
                         is_prefetch = family == "PECmd" or path_text.lower().endswith(".pf") or "prefetch" in row_blob.lower()
-                        is_deleted = forensic_row_deleted(row)
+                        is_deleted = forensic_row_deleted(row) or family == "RBCmd"
                         is_suspicious = (
                             suspicious_text(row_blob, config)
                             or bool(ioc_text_matches(row_blob, config))
@@ -2766,6 +2883,27 @@ def collect_external_forensic_exports(days: int, config: dict, sessions: list[di
                         elif family == "AppCompatCacheParser":
                             add_detection(finding, "ShimCache/AppCompat Context", "AppCompat/ShimCache export referenced execution compatibility context.", "Medium", 20)
                             finding["evidence_types"].append("appcompat_context")
+                        elif family == "RECmd":
+                            add_detection(finding, "Registry User Activity Context", "RECmd registry export referenced user activity or execution-related registry artifacts.", "Medium", 20)
+                            finding["evidence_types"].append("registry_user_activity")
+                        elif family == "RBCmd":
+                            add_detection(finding, "Recycle Bin Parser Artifact", "RBCmd export provided structured deleted-file metadata.", "Info", 10)
+                            finding["evidence_types"].append("recycle_bin_parser")
+                        elif family == "EvtxECmd":
+                            add_detection(finding, "Event Log Parser Context", "EvtxECmd export referenced security, Defender, Sysmon, or Windows event-log context.", "Medium", 20)
+                            finding["evidence_types"].append("eventlog_parser")
+                        elif family == "LECmd":
+                            add_detection(finding, "Shortcut / LNK Context", "LECmd export referenced shortcut/opened-file context for a suspicious or review-worthy path.", "Medium", 15)
+                            finding["evidence_types"].append("lnk_context")
+                        elif family == "WxTCmd":
+                            add_detection(finding, "ActivitiesCache Timeline Context", "WxTCmd export referenced Windows Timeline/ActivitiesCache activity context.", "Medium", 15)
+                            finding["evidence_types"].append("activitiescache_context")
+                        elif family == "RecentFileCacheParser":
+                            add_detection(finding, "RecentFileCache Context", "RecentFileCache export referenced a recently seen executable path.", "Medium", 15)
+                            finding["evidence_types"].append("recentfilecache_context")
+                        elif family == "SQLECmd":
+                            add_detection(finding, "SQLite Artifact Context", "SQLECmd export referenced scoped SQLite activity/download metadata.", "Medium", 10)
+                            finding["evidence_types"].append("sqlite_artifact_context")
                         if near_any_session(when, sessions):
                             add_score(finding, config["score_rules"].get("near_roblox_session", 25), f"{family} export timestamp is near Roblox activity")
                         apply_ioc_matches(finding, config, row_blob)

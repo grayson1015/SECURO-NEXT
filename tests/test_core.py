@@ -807,6 +807,27 @@ File Name           : notes.txt
         self.assertTrue(config.get("_external_forensic_output_dir"))
         self.assertTrue(any("PECmd" in note for note in notes))
 
+    def test_forensic_tool_discovery_finds_nested_zimmerman_net9_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tools = Path(tmp) / "Tools"
+            recmd = tools / "net9" / "RECmd"
+            evtx = tools / "net9" / "EvtxECmd"
+            recmd.mkdir(parents=True)
+            evtx.mkdir(parents=True)
+            (recmd / "RECmd.exe").write_text("fixture", encoding="utf-8")
+            (evtx / "EvtxECmd.exe").write_text("fixture", encoding="utf-8")
+            config = test_config()
+            config["external_forensic_tools_dir"] = str(tools)
+            found = checker.available_forensic_tools(config)
+        self.assertEqual(found["RECmd.exe"].name, "RECmd.exe")
+        self.assertEqual(found["EvtxECmd.exe"].name, "EvtxECmd.exe")
+
+    def test_new_zimmerman_exports_are_classified(self):
+        self.assertEqual(checker.forensic_export_family(Path("RECmd_UserActivity.csv"), ["UserAssist", "Path"]), "RECmd")
+        self.assertEqual(checker.forensic_export_family(Path("RBCmd_Output.csv"), ["DeletedTime", "FileName"]), "RBCmd")
+        self.assertEqual(checker.forensic_export_family(Path("LECmd_Output.csv"), ["TargetPath", "SourceFile"]), "LECmd")
+        self.assertEqual(checker.forensic_export_family(Path("WxTCmd_Output.csv"), ["ActivityTime", "AppId"]), "WxTCmd")
+
     def test_prefetch_parser_runs_without_enabling_every_forensic_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1525,6 +1546,9 @@ File Name           : notes.txt
         self.assertLessEqual(deep["file_artifact_time_budget_seconds"], 210)
         self.assertFalse(standard["skip_browser_artifacts"])
         self.assertFalse(deep["skip_browser_artifacts"])
+        self.assertFalse(quick["external_forensic_tools_enabled"])
+        self.assertFalse(standard["external_forensic_tools_enabled"])
+        self.assertTrue(deep["external_forensic_tools_enabled"])
         self.assertTrue(deep["collect_safe_account_identifiers"])
         self.assertTrue(quick["collect_system_reset_evidence"])
         self.assertTrue(standard["collect_system_reset_evidence"])
