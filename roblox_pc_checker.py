@@ -2041,9 +2041,102 @@ def collect_safe_account_identifiers(sessions: list[dict], config: dict) -> dict
         return result
 
     return {
-        "privacyNote": "Only non-secret Roblox account identifiers from retained Roblox artifacts are included.",
+        "privacyNote": "Only non-secret Roblox and Discord account identifiers from retained logs/artifacts are included. Discord collection excludes tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, private messages, DMs, friend lists, and server lists.",
         "roblox": [clean(row) for row in roblox_accounts.values()],
+        "discord": collect_safe_discord_identifiers(config) if config.get("collect_safe_account_identifiers", True) else [],
     }
+
+
+def discord_log_roots() -> list[Path]:
+    appdata = Path(os.environ.get("APPDATA", ""))
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    roots = []
+    for app in ["discord", "discordptb", "discordcanary"]:
+        if appdata:
+            roots.append(appdata / app / "logs")
+        if local:
+            roots.append(local / app / "logs")
+    return [path for path in roots if safe_exists(path)]
+
+
+def collect_safe_discord_identifiers(config: dict) -> list[dict]:
+    # Privacy boundary: only plain Discord log files are inspected. Token/cookie/storage/cache/message stores are intentionally skipped.
+    max_files = max(1, int(config.get("discord_log_max_files", 180) or 180))
+    max_bytes = max(32_000, int(config.get("discord_log_max_bytes", 500_000) or 500_000))
+    max_total_bytes = max(max_bytes, int(config.get("discord_log_total_bytes", 6_000_000) or 6_000_000))
+    deadline = time.monotonic() + max(2, int(config.get("discord_account_scan_time_budget_seconds", 5) or 5))
+    candidates = []
+    for root in discord_log_roots():
+        try:
+            candidates.extend(path for path in root.glob("*.log") if path.is_file())
+            candidates.extend(path for path in root.glob("*.txt") if path.is_file())
+        except OSError:
+            continue
+
+    def modified_time(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0
+
+    candidates = sorted(set(candidates), key=modified_time, reverse=True)[:max_files]
+    snowflake_pattern = re.compile(r"\b([1-9]\d{16,19})\b")
+    account_context_pattern = re.compile(r"(?i)\b(user[_\s-]?id|userid|current[_\s-]?user|account[_\s-]?id|discord[_\s-]?id|global[_\s-]?name|username)\b")
+    unsafe_context_pattern = re.compile(r"(?i)\b(token|authorization|cookie|session[_\s-]?storage|local[_\s-]?storage|indexeddb|cache|message|dm|direct message|guild|channel)\b")
+    username_pattern = re.compile(r"(?i)(?:username|global[_\s-]?name|display[_\s-]?name)[^\w@.-]{0,24}([A-Za-z0-9_.@-]{2,64})")
+    accounts: dict[str, dict] = {}
+    bytes_read = 0
+    for path in candidates:
+        if time.monotonic() >= deadline or bytes_read >= max_total_bytes:
+            break
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        read_size = min(max_bytes, max(0, max_total_bytes - bytes_read))
+        if read_size <= 0:
+            break
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(read_size)
+        except OSError:
+            continue
+        bytes_read += len(text.encode("utf-8", errors="replace"))
+        timestamp = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
+        for line in text.splitlines():
+            if unsafe_context_pattern.search(line) or not account_context_pattern.search(line):
+                continue
+            for match in snowflake_pattern.finditer(line):
+                window = line[max(0, match.start() - 120):match.end() + 120]
+                user_id = match.group(1)
+                username_match = username_pattern.search(window)
+                row = accounts.setdefault(user_id, {
+                    "platform": "Discord",
+                    "userId": user_id,
+                    "username": "Unknown",
+                    "displayName": "",
+                    "firstSeen": timestamp,
+                    "lastSeen": timestamp,
+                    "places": set(),
+                    "jobs": set(),
+                    "sources": set(),
+                    "confidenceLevel": "Possible",
+                    "evidenceNote": "Safe Discord log identifier evidence only. This is not token/cookie/session data and may require manual review.",
+                })
+                if username_match and row.get("username") == "Unknown":
+                    row["username"] = username_match.group(1).strip()
+                row["firstSeen"] = first_time(row.get("firstSeen"), timestamp) or row.get("firstSeen", "")
+                row["lastSeen"] = max([v for v in [row.get("lastSeen"), timestamp] if v] or [""], default="")
+                row["sources"].add(str(path))
+
+    cleaned = []
+    for row in accounts.values():
+        result = dict(row)
+        for key in ("places", "jobs", "sources"):
+            if key in result:
+                result[key] = sorted(result[key])
+        cleaned.append(result)
+    return sorted(cleaned, key=lambda item: item.get("lastSeen", ""), reverse=True)
 
 
 def collect_historical_roblox_identifiers(config: dict) -> list[dict]:
@@ -5689,6 +5782,24 @@ def render_txt(report: dict) -> str:
         ]
         for linked in s.get("linkedDetections", []):
             lines += [f"  Detection: {linked.get('name')} {linked.get('classification')} {linked.get('path')}"]
+    account_context = report.get("accountIdentifiers", {}) if isinstance(report.get("accountIdentifiers"), dict) else {}
+    lines += ["", "Account History", "---------------", account_context.get("privacyNote", "Only non-secret account identifiers are included.")]
+    lines += ["Played / Historical Roblox IDs:"]
+    if not account_context.get("roblox"):
+        lines.append("No Roblox account identifiers found.")
+    for account in account_context.get("roblox", []):
+        lines.append(
+            f"Roblox ID={account.get('userId') or 'unknown'} Username={account.get('username') or 'Unknown'} "
+            f"First={account.get('firstSeen') or ''} Last={account.get('lastSeen') or ''} Sources={'; '.join(account.get('sources', [])[:4])}"
+        )
+    lines += ["Discord Account Evidence:"]
+    if not account_context.get("discord"):
+        lines.append("No Discord account identifiers found.")
+    for account in account_context.get("discord", []):
+        lines.append(
+            f"Discord ID={account.get('userId') or 'unknown'} Username={account.get('username') or 'Unknown'} "
+            f"First={account.get('firstSeen') or ''} Last={account.get('lastSeen') or ''} Sources={'; '.join(account.get('sources', [])[:4])}"
+        )
     lines += ["", "Detected FastFlags", "------------------"]
     if not report.get("detectedFastFlags"):
         lines.append("No FastFlags detected in captured Roblox logs.")
@@ -5901,6 +6012,20 @@ def render_html(report: dict) -> str:
             "Sources": "; ".join(sources[:8]),
             "Sources List": sources,
         })
+    discord_account_rows = []
+    for row in account_context.get("discord", []):
+        sources = row.get("sources", []) if isinstance(row.get("sources"), list) else []
+        discord_account_rows.append({
+            "Platform": row.get("platform", "Discord"),
+            "User ID": row.get("userId", ""),
+            "Username": row.get("username", ""),
+            "Display Name": row.get("displayName", ""),
+            "First Seen": row.get("firstSeen", ""),
+            "Last Seen": row.get("lastSeen", ""),
+            "Sources": "; ".join(sources[:8]),
+            "Sources List": sources,
+            "Evidence Note": row.get("evidenceNote", ""),
+        })
 
     played_account_ids = set()
     for session in report.get("sessions", []):
@@ -5929,24 +6054,26 @@ def render_html(report: dict) -> str:
         else:
             account_groups["historical"].append(row)
 
-    def account_card(row: dict) -> str:
+    def account_card(row: dict, id_label: str = "Roblox User ID") -> str:
         places = f"<p>Place IDs: {html.escape(str(row.get('Places') or ''))}</p>" if row.get("Places") else ""
+        evidence_note = f"<p>{html.escape(str(row.get('Evidence Note') or ''))}</p>" if row.get("Evidence Note") else ""
         return (
             f"<div class='account-card report-entry'{html_data_timestamp(row.get('Last Seen'))}>"
             f"<b>{html.escape(str(row.get('Platform') or 'Roblox'))}</b>"
-            f"<small>ROBLOX USER ID</small>"
+            f"<small>{html.escape(id_label)}</small>"
             f"<div class='account-id'>{html.escape(str(row.get('User ID') or 'ID unavailable'))}</div>"
             f"<p><b>Username:</b> {html.escape(str(row.get('Username') or 'Unknown'))}</p>"
             f"<p><b>Display Name:</b> {html.escape(str(row.get('Display Name') or 'Unknown'))}</p>"
             f"<p>First evidence: {html.escape(str(row.get('First Seen') or 'Unavailable'))}</p>"
             f"<p>Last evidence: {html.escape(str(row.get('Last Seen') or 'Unavailable'))}</p>"
             f"{places}"
+            f"{evidence_note}"
             f"<p>Sources: {html.escape(str(row.get('Sources') or 'Unavailable'))}</p>"
             f"</div>"
         )
 
-    def account_group_html(title: str, description: str, rows: list[dict]) -> str:
-        cards = "".join(account_card(row) for row in rows)
+    def account_group_html(title: str, description: str, rows: list[dict], id_label: str = "Roblox User ID") -> str:
+        cards = "".join(account_card(row, id_label) for row in rows)
         body = cards or "<p class='muted'>None.</p>"
         return (
             f"<div class='account-group'>"
@@ -5957,9 +6084,10 @@ def render_html(report: dict) -> str:
         )
 
     account_cards_html = "".join([
-        account_group_html("Played Accounts", "Accounts tied to Roblox session, join, place, or teleport evidence in the available logs.", account_groups["played"]),
-        account_group_html("Historical Account IDs Found", "IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play.", account_groups["historical"]),
-        account_group_html("Weak/Old Account Artifacts", "Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play.", account_groups["weak"]),
+        account_group_html("Played Accounts", "Accounts tied to Roblox session, join, place, or teleport evidence in the available logs.", account_groups["played"], "Roblox User ID"),
+        account_group_html("Historical Account IDs Found", "IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play.", account_groups["historical"], "Roblox User ID"),
+        account_group_html("Weak/Old Account Artifacts", "Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play.", account_groups["weak"], "Roblox User ID"),
+        account_group_html("Discord Account Evidence", "Safe Discord log identifier evidence only. Tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, DMs, private messages, friend lists, and server lists are excluded.", discord_account_rows, "Discord User ID"),
     ])
     reset_rows = [{
         "Type": item.get("type", ""),
@@ -6299,10 +6427,11 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
 
 def compact_account_identifiers(value) -> dict:
     if not isinstance(value, dict):
-        return {"privacyNote": "Only non-secret Roblox account identifiers are included.", "roblox": []}
+        return {"privacyNote": "Only non-secret Roblox and Discord account identifiers are included.", "roblox": [], "discord": []}
     return {
-        "privacyNote": value.get("privacyNote", "Only non-secret Roblox account identifiers are included."),
+        "privacyNote": value.get("privacyNote", "Only non-secret Roblox and Discord account identifiers are included."),
         "roblox": list(value.get("roblox", []))[:80],
+        "discord": list(value.get("discord", []))[:80],
     }
 
 

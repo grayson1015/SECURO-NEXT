@@ -89,6 +89,7 @@ class CoreTests(unittest.TestCase):
             "collect_file_artifacts",
             "collect_powershell_history",
             "collect_defender_history",
+            "collect_defender_exclusions",
             "collect_persistence",
             "collect_browser_downloads",
             "collect_shellbag_context",
@@ -111,6 +112,7 @@ class CoreTests(unittest.TestCase):
             checker.collect_file_artifacts = lambda days, config, sessions, verbose=False: ([], [])
             checker.collect_powershell_history = lambda days, config, sessions: ([], [])
             checker.collect_defender_history = lambda days, config, sessions: ([], [])
+            checker.collect_defender_exclusions = lambda config: ([], [])
             checker.collect_persistence = lambda days, config, sessions: ([], [])
             checker.collect_browser_downloads = lambda days, config, sessions: ([], [])
             checker.collect_shellbag_context = lambda days, config, sessions: ([], [])
@@ -128,7 +130,7 @@ class CoreTests(unittest.TestCase):
         dt.datetime.fromisoformat(report["scanTime"])
         for key in ["hostname", "highestResult", "confidence", "evidenceSources", "timeline", "sessions", "findings", "limitations"]:
             self.assertIn(key, report)
-        for key in ["detectLogs", "warningLogs", "recoveryArtifacts", "antivirusLogs", "engineResults"]:
+        for key in ["detectLogs", "warningLogs", "recoveryArtifacts", "antivirusLogs", "defenderExclusions", "engineResults"]:
             self.assertIn(key, report)
         self.assertTrue(report["scanTransparency"]["readOnly"])
         self.assertIn("Roblox logs including user ID", " ".join(report["scanTransparency"]["scannedScope"]))
@@ -201,6 +203,37 @@ class CoreTests(unittest.TestCase):
         self.assertIn("DFIntTaskSchedulerTargetFps", {flag["name"] for flag in flags})
         self.assertFalse(any("FFlagDebugGraphicsPreferD3D11" in event.get("text", "") for event in timeline))
         self.assertFalse(any(event.get("source", "").startswith("Roblox FastFlag") for event in timeline))
+
+    def test_discord_identifier_collection_skips_token_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_appdata = os.environ.get("APPDATA")
+            old_local = os.environ.get("LOCALAPPDATA")
+            os.environ["APPDATA"] = tmp
+            os.environ["LOCALAPPDATA"] = tmp
+            log_dir = Path(tmp) / "discord" / "logs"
+            log_dir.mkdir(parents=True)
+            safe_id = "123456789012345678"
+            token_adjacent_id = "987654321098765432"
+            (log_dir / "discord.log").write_text(
+                f"current_user_id: {safe_id} username: SafeUser\n"
+                f"token refresh for user_id {token_adjacent_id} authorization header omitted\n",
+                encoding="utf-8",
+            )
+            try:
+                accounts = checker.collect_safe_discord_identifiers(test_config())
+            finally:
+                if old_appdata is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = old_appdata
+                if old_local is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
+        ids = {account["userId"] for account in accounts}
+        self.assertIn(safe_id, ids)
+        self.assertNotIn(token_adjacent_id, ids)
+        self.assertEqual(accounts[0]["platform"], "Discord")
 
     def test_missing_telemetry_lowers_confidence(self):
         quality = {"Roblox logs available": True, "Prefetch available": False, "Sysmon Event ID 8 available": False}
@@ -663,10 +696,10 @@ File Name           : notes.txt
             )
             config = test_config()
             config["forensic_export_dirs"] = [tmp]
-            findings, timeline = checker.collect_external_forensic_exports(30, config, [])
-        self.assertTrue(findings)
-        self.assertIn("prefetch_execution", findings[0]["evidence_types"])
-        self.assertTrue(any(item.startswith("PREFETCH FILE:") for item in findings[0]["supporting_evidence"]))
+            findings, timeline = checker.collect_external_forensic_exports(3650, config, [])
+        finding = next(item for item in findings if "Potassium.exe" in item.get("path", ""))
+        self.assertIn("prefetch_execution", finding["evidence_types"])
+        self.assertTrue(any(item.startswith("PREFETCH FILE:") for item in finding["supporting_evidence"]))
         self.assertTrue(any("PREFETCH FILE: Potassium.exe" in event["text"] for event in timeline))
 
     def test_external_mftecmd_export_adds_deleted_file_evidence(self):
@@ -679,11 +712,11 @@ File Name           : notes.txt
             )
             config = test_config()
             config["forensic_export_dirs"] = [tmp]
-            findings, timeline = checker.collect_external_forensic_exports(30, config, [])
-        self.assertTrue(findings)
-        self.assertIn("File Deletion", findings[0]["detection_categories"])
-        self.assertIn("recovery", findings[0]["evidence_types"])
-        self.assertTrue(any(item.startswith("DELETED FILE:") for item in findings[0]["supporting_evidence"]))
+            findings, timeline = checker.collect_external_forensic_exports(3650, config, [])
+        finding = next(item for item in findings if "Wave.exe" in item.get("path", ""))
+        self.assertIn("File Deletion", finding["detection_categories"])
+        self.assertIn("recovery", finding["evidence_types"])
+        self.assertTrue(any(item.startswith("DELETED FILE:") for item in finding["supporting_evidence"]))
         self.assertTrue(any("DELETED FILE: C:\\Users\\Test\\Downloads\\Wave.exe" in event["text"] for event in timeline))
 
     def test_external_forensic_tool_runner_is_opt_in_and_whitelisted(self):
@@ -1205,6 +1238,7 @@ File Name           : notes.txt
             "accountIdentifiers": {
                 "privacyNote": "Only non-secret identifiers.",
                 "roblox": [{"platform": "Roblox", "userId": "123", "username": "ExampleUser", "displayName": "Example", "firstSeen": "2026-06-02 17:55:00", "lastSeen": "2026-06-02 17:55:00", "sources": ["Client.log"]}],
+                "discord": [{"platform": "Discord", "userId": "123456789012345678", "username": "DiscordUser", "displayName": "", "firstSeen": "2026-06-02 17:55:00", "lastSeen": "2026-06-02 17:55:00", "sources": ["discord.log"], "evidenceNote": "Safe Discord log identifier evidence only."}],
             },
             "systemResetEvidence": [{
                 "type": "Possible Windows Reset/Reinstall",
@@ -1258,6 +1292,8 @@ File Name           : notes.txt
         self.assertIn("Key Artifacts", rendered)
         self.assertIn("PREFETCH FILE: Example.exe", rendered)
         self.assertIn("Roblox Account History", rendered)
+        self.assertIn("Discord Account Evidence", rendered)
+        self.assertIn("123456789012345678", rendered)
         self.assertIn("Factory Reset Information", rendered)
         self.assertIn("Windows 10 Home", rendered)
         self.assertIn("Startup Type: Disabled", rendered)
@@ -1435,6 +1471,37 @@ File Name           : notes.txt
         self.assertGreaterEqual(deep["scan_days"], 90)
         self.assertGreaterEqual(deep["max_files_scanned"], 60000)
 
+    def test_file_artifact_budget_is_enforced_inside_large_directory(self):
+        config = test_config()
+        config["file_artifact_time_budget_seconds"] = 1
+        config["max_files_scanned"] = 100
+        progress_messages = []
+        ticks = iter([0.0, 0.0, 0.0, 2.0])
+        original_roots = checker.scan_roots
+        original_walk = checker.os.walk
+        original_monotonic = checker.time.monotonic
+        try:
+            checker.scan_roots = lambda: [Path("C:/large")]
+            checker.os.walk = lambda root, topdown=True: iter([
+                ("C:/large", [], ["first.exe", "second.exe", "third.exe"])
+            ])
+            checker.time.monotonic = lambda: next(ticks, 2.0)
+            findings, timeline = checker.collect_file_artifacts(
+                7,
+                config,
+                [],
+                progress=lambda message, files_scanned=0: progress_messages.append((message, files_scanned)),
+            )
+        finally:
+            checker.scan_roots = original_roots
+            checker.os.walk = original_walk
+            checker.time.monotonic = original_monotonic
+        self.assertEqual(findings, [])
+        self.assertEqual(timeline, [])
+        self.assertTrue(any("hit time cap after 1 files" in message for message, _ in progress_messages))
+        self.assertTrue(config["_file_artifact_status"]["truncated"])
+        self.assertEqual(config["_file_artifact_status"]["filesScanned"], 1)
+
     def test_switching_from_quick_to_deep_clears_quick_skips(self):
         quick = checker.apply_scan_profile(test_config(), "quick")
         deep = checker.apply_scan_profile(quick, "deep")
@@ -1454,14 +1521,19 @@ File Name           : notes.txt
             "log_file": "Client.log",
         }]
         original_roblox = checker.collect_historical_roblox_identifiers
+        original_discord = checker.collect_safe_discord_identifiers
         try:
             checker.collect_historical_roblox_identifiers = lambda config: []
+            checker.collect_safe_discord_identifiers = lambda config: []
             result = checker.collect_safe_account_identifiers(sessions, {"collect_safe_account_identifiers": True})
         finally:
             checker.collect_historical_roblox_identifiers = original_roblox
+            checker.collect_safe_discord_identifiers = original_discord
         self.assertEqual(result["roblox"][0]["userId"], "123456789")
-        self.assertNotIn("discord", result)
+        self.assertIn("discord", result)
+        self.assertEqual(result["discord"], [])
         self.assertIn("roblox", result["privacyNote"].lower())
+        self.assertIn("discord", result["privacyNote"].lower())
 
     def test_historical_roblox_accounts_are_collected_outside_session_window(self):
         with tempfile.TemporaryDirectory() as tmp:

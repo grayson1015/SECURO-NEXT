@@ -77,11 +77,14 @@ export type AccountIdentifier = {
   places?: string[];
   jobs?: string[];
   sources?: string[];
+  confidenceLevel?: string;
+  evidenceNote?: string;
 };
 
 export type AccountIdentifierContext = {
   privacyNote?: string;
   roblox?: AccountIdentifier[];
+  discord?: AccountIdentifier[];
 };
 
 export type SystemResetEvidence = {

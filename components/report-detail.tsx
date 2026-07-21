@@ -34,6 +34,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredShellBags = data.shellBagArtifacts || [];
   const accountContext = data.accountIdentifiers || {};
   const accountRows = accountContext.roblox || [];
+  const discordRows = accountContext.discord || [];
   const accountGroups = useMemo(
     () => groupRobloxAccounts(accountRows, data.sessions || [], filteredRobloxLogs),
     [accountRows, data.sessions, filteredRobloxLogs]
@@ -260,18 +261,28 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             description="Accounts tied to Roblox session, join, place, or teleport evidence in the available logs."
             accounts={accountGroups.played}
             tone="played"
+            idLabel="Roblox User ID"
           />
           <AccountGroup
             title="Historical Account IDs Found"
             description="IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play."
             accounts={accountGroups.historical}
             tone="historical"
+            idLabel="Roblox User ID"
           />
           <AccountGroup
             title="Weak/Old Account Artifacts"
             description="Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play."
             accounts={accountGroups.weak}
             tone="weak"
+            idLabel="Roblox User ID"
+          />
+          <AccountGroup
+            title="Discord Account Evidence"
+            description="Safe Discord log identifier evidence only. Tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, DMs, private messages, friend lists, and server lists are excluded."
+            accounts={discordRows}
+            tone="historical"
+            idLabel="Discord User ID"
           />
         </Card>
 
@@ -381,12 +392,14 @@ function AccountGroup({
   title,
   description,
   accounts,
-  tone
+  tone,
+  idLabel
 }: {
   title: string;
   description: string;
   accounts: AccountIdentifier[];
   tone: "played" | "historical" | "weak";
+  idLabel: string;
 }) {
   const toneClass = {
     played: "border-primary/50 bg-primary/10",
@@ -404,13 +417,14 @@ function AccountGroup({
         {accounts.map((account, index) => (
           <div key={`${title}-${account.platform}-${account.userId}-${index}`} className={`rounded-md border p-4 text-sm ${toneClass}`}>
             <div className="font-semibold text-zinc-300">{account.platform || "Roblox"}</div>
-            <div className="mt-3 text-xs font-semibold uppercase text-zinc-500">Roblox User ID</div>
+            <div className="mt-3 text-xs font-semibold uppercase text-zinc-500">{idLabel}</div>
             <div className="mt-1 break-all text-3xl font-bold text-primary">{account.userId || "ID unavailable"}</div>
             <div className="mt-3 text-zinc-300">Username: {account.username || "Unknown"}</div>
             {account.displayName ? <div className="text-zinc-400">Display Name: {account.displayName}</div> : null}
             <div className="text-zinc-400">First evidence: {formatDate(account.firstSeen)}</div>
             <div className="text-zinc-400">Last evidence: {formatDate(account.lastSeen)}</div>
             {(account.places || []).length ? <div className="mt-2 break-words text-zinc-500">Place IDs: {(account.places || []).join(", ")}</div> : null}
+            {account.evidenceNote ? <div className="mt-2 text-xs text-zinc-500">{account.evidenceNote}</div> : null}
             <details className="mt-2">
               <summary className="cursor-pointer text-xs text-zinc-400">Evidence sources ({(account.sources || []).length})</summary>
               <div className="mt-2 space-y-1">
@@ -598,28 +612,30 @@ function buildExportHtml(report: ReportRow) {
   `)).join("");
   const accountContext = data.accountIdentifiers || {};
   const accountGroups = groupRobloxAccounts(accountContext.roblox || [], data.sessions || [], data.robloxLogs || []);
-  const accountCard = (account: AccountIdentifier) => `
+  const accountCard = (account: AccountIdentifier, idLabel: string) => `
     <div class="report-entry account-card">
       <p><b>${escape(account.platform || "Roblox")}</b></p>
-      <small>ROBLOX USER ID</small>
+      <small>${escape(idLabel)}</small>
       <div class="account-id">${escape(account.userId || "ID unavailable")}</div>
       <p>Username: ${escape(account.username || "Unknown")} ${account.displayName ? `· Display Name: ${escape(account.displayName)}` : ""}</p>
       <p>First evidence: ${escape(account.firstSeen || "")} · Last evidence: ${escape(account.lastSeen || "")}</p>
       ${(account.places || []).length ? `<p>Place IDs: ${escape((account.places || []).join(", "))}</p>` : ""}
+      ${account.evidenceNote ? `<p>${escape(account.evidenceNote)}</p>` : ""}
       <p>Sources: ${escape((account.sources || []).join("; "))}</p>
     </div>
   `;
-  const accountGroup = (title: string, description: string, accounts: AccountIdentifier[]) => `
+  const accountGroup = (title: string, description: string, accounts: AccountIdentifier[], idLabel: string) => `
     <div class="account-group">
       <h3>${escape(title)}</h3>
       <p class="muted">${escape(description)}</p>
-      ${accounts.map(accountCard).join("") || "<p class=\"muted\">None.</p>"}
+      ${accounts.map((account) => accountCard(account, idLabel)).join("") || "<p class=\"muted\">None.</p>"}
     </div>
   `;
   const accounts = [
-    accountGroup("Played Accounts", "Accounts tied to Roblox session, join, place, or teleport evidence in the available logs.", accountGroups.played),
-    accountGroup("Historical Account IDs Found", "IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play.", accountGroups.historical),
-    accountGroup("Weak/Old Account Artifacts", "Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play.", accountGroups.weak)
+    accountGroup("Played Accounts", "Accounts tied to Roblox session, join, place, or teleport evidence in the available logs.", accountGroups.played, "Roblox User ID"),
+    accountGroup("Historical Account IDs Found", "IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play.", accountGroups.historical, "Roblox User ID"),
+    accountGroup("Weak/Old Account Artifacts", "Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play.", accountGroups.weak, "Roblox User ID"),
+    accountGroup("Discord Account Evidence", "Safe Discord log identifier evidence only. Tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, DMs, private messages, friend lists, and server lists are excluded.", accountContext.discord || [], "Discord User ID")
   ].join("");
   const resetHistory = (data.systemResetEvidence || []).slice(0, 12).map((item) => entry(item.timestamp, `
     <p><b>${escape(item.type || "Reset/install evidence")}</b></p>
