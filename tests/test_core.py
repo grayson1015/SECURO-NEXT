@@ -1982,6 +1982,16 @@ InstallDate    REG_DWORD    0x60764fa0
         self.assertEqual(finding["signer"]["status"], "not checked")
         self.assertIn("Skipped hash/signature checks", " ".join(finding["supporting_evidence"]))
 
+    def test_forensic_tool_respects_shared_budget(self):
+        original_run = checker.run_command
+        try:
+            checker.run_command = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("tool should be skipped"))
+            config = {"_external_forensic_deadline_monotonic": time.monotonic() + 1}
+            out = checker.run_forensic_tool(["PECmd.exe", "-d", "C:\\Windows\\Prefetch"], config, timeout=30)
+        finally:
+            checker.run_command = original_run
+        self.assertIn("budget exhausted", out)
+
 
 if __name__ == "__main__":
     unittest.main()

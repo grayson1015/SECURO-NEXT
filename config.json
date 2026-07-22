@@ -70,6 +70,7 @@
   "external_forensic_tools_enabled": false,
   "external_forensic_tools_dir": "",
   "external_forensic_tool_timeout_seconds": 55,
+  "external_forensic_tools_total_budget_seconds": 140,
   "collect_safe_account_identifiers": true,
   "account_log_max_files": 600,
   "account_log_max_bytes": 4000000,

@@ -371,6 +371,7 @@ def load_config() -> dict:
     config.setdefault("external_forensic_tools_enabled", False)
     config.setdefault("external_forensic_tools_dir", "")
     config.setdefault("external_forensic_tool_timeout_seconds", 55)
+    config.setdefault("external_forensic_tools_total_budget_seconds", 140)
     config.setdefault("collect_safe_account_identifiers", True)
     config.setdefault("account_log_max_files", 600)
     config.setdefault("account_log_max_bytes", 4_000_000)
@@ -2579,6 +2580,20 @@ def available_forensic_tools(config: dict | None = None) -> dict[str, Path]:
 
 
 def run_forensic_tool(args: list[str], config: dict, timeout: int) -> str:
+    now = time.monotonic()
+    deadlines = [
+        float(value)
+        for value in [
+            config.get("_external_forensic_deadline_monotonic"),
+            config.get("_scan_deadline_monotonic"),
+        ]
+        if value
+    ]
+    if deadlines:
+        remaining = min(deadlines) - now
+        if remaining < 5:
+            return f"COMMAND_ERROR: skipped {' '.join(args[:2])}; forensic helper budget exhausted"
+        timeout = max(1, min(int(timeout), int(remaining)))
     try:
         write_app_log(config, "running forensic helper: " + " ".join(args[:4]))
     except Exception:
@@ -2630,6 +2645,13 @@ def execute_external_forensic_tools(days: int, config: dict) -> list[str]:
     tools = available_forensic_tools(config)
     if not tools:
         return []
+    total_budget = max(20, int(config.get("external_forensic_tools_total_budget_seconds") or 140))
+    scan_remaining = scan_time_remaining(config)
+    if scan_remaining is not None:
+        total_budget = max(5, min(total_budget, int(scan_remaining) - 25))
+    if total_budget < 8:
+        return ["Optional forensic parser tools skipped because the scan budget was nearly exhausted."]
+    config["_external_forensic_deadline_monotonic"] = time.monotonic() + total_budget
     output_root = ensure_storage_dirs(config)["tool_output"] / now_stamp()
     output_root.mkdir(parents=True, exist_ok=True)
     timeout = max(10, int(config.get("external_forensic_tool_timeout_seconds") or 55))
