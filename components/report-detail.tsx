@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Download } from "lucide-react";
 import type { AccountIdentifier, KeyArtifact, ReportRow, RobloxLogArtifact, SecuroFinding, SecuroSession } from "@/lib/types";
@@ -33,6 +33,9 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredFastFlags = data.detectedFastFlags || [];
   const filteredShellBags = data.shellBagArtifacts || [];
   const keyArtifacts = data.keyArtifacts || [];
+  const prefetchArtifacts = useMemo(() => keyArtifacts.filter(isPrefetchArtifact), [keyArtifacts]);
+  const [showAllPrefetch, setShowAllPrefetch] = useState(false);
+  const visiblePrefetchArtifacts = showAllPrefetch ? prefetchArtifacts : prefetchArtifacts.slice(0, 6);
   const forensicSummary = useMemo(() => buildForensicSummary(data), [data]);
   const usnEvents = data.usnJournalEvents || [];
   const usnStatus = data.usnJournalStatus || {};
@@ -226,6 +229,42 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             </Card>
           </div>
         </section>
+
+        <Card className="mt-5">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Prefetch Artifacts</h2>
+              <p className="mt-1 text-sm text-zinc-400">Execution-history Prefetch entries collected by Securo and parser exports. These are review signals unless paired with stronger evidence.</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-primary">{prefetchArtifacts.length} prefetches</span>
+              {prefetchArtifacts.length > 6 ? (
+                <Button className="bg-zinc-900 text-zinc-100 shadow-none hover:bg-zinc-800" onClick={() => setShowAllPrefetch((value) => !value)}>
+                  {showAllPrefetch ? "Minimize" : "Show All Prefetch"}
+                </Button>
+              ) : null}
+            </div>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {visiblePrefetchArtifacts.map((item, index) => (
+              <div key={`${item.type}-${artifactText(item)}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold text-zinc-200">PREFETCH FILE</span>
+                  <span className="text-xs text-zinc-500">{formatDate(item.timestamp)}</span>
+                </div>
+                <div className="mt-2 break-words text-zinc-300 [overflow-wrap:anywhere]">{artifactText(item)}</div>
+                {item.path ? <div className="mt-1 break-words text-zinc-500 [overflow-wrap:anywhere]">{item.path}</div> : null}
+                <div className="mt-2 text-xs text-zinc-500">{item.source || "Prefetch"} · {item.confidence || "Review"}</div>
+              </div>
+            ))}
+            {!prefetchArtifacts.length ? <p className="text-sm text-zinc-500">No Prefetch artifacts were included in this report.</p> : null}
+          </div>
+          {prefetchArtifacts.length > 6 ? (
+            <p className="mt-3 text-xs text-zinc-500">
+              {showAllPrefetch ? `Showing all ${prefetchArtifacts.length} Prefetch artifacts.` : `Showing newest 6 of ${prefetchArtifacts.length}.`}
+            </p>
+          ) : null}
+        </Card>
 
         <Card className="mt-5">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -694,6 +733,10 @@ function artifactText(item: KeyArtifact) {
   return item.label || item.artifact || item.path || "Artifact unavailable";
 }
 
+function isPrefetchArtifact(item: KeyArtifact) {
+  return /prefetch/i.test(`${item.type || ""} ${artifactText(item)} ${item.source || ""}`);
+}
+
 function buildForensicSummary(data: ReportRow["report_json"]) {
   const keyArtifacts = data.keyArtifacts || [];
   const countType = (patterns: RegExp[]) =>
@@ -831,6 +874,15 @@ function buildExportHtml(report: ReportRow) {
     ${item.path ? `<p>${escape(item.path)}</p>` : ""}
     <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
   `)).join("");
+  const prefetchArtifacts = (data.keyArtifacts || []).filter(isPrefetchArtifact);
+  const prefetchRow = (item: KeyArtifact) => entry(item.timestamp, `
+    <p><b>PREFETCH FILE</b> · ${escape(formatDate(item.timestamp))}</p>
+    <p>${escape(artifactText(item))}</p>
+    ${item.path ? `<p>${escape(item.path)}</p>` : ""}
+    <p>${escape(item.source || "Prefetch")} · ${escape(item.confidence || "Review")}</p>
+  `);
+  const prefetchPreviewRows = prefetchArtifacts.slice(0, 6).map(prefetchRow).join("");
+  const prefetchAllRows = prefetchArtifacts.map(prefetchRow).join("");
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
     <style>
@@ -857,6 +909,7 @@ function buildExportHtml(report: ReportRow) {
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
     <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section><section><h2>Forensic Artifacts</h2><p>Compact parser evidence summary. Full entries are lower in the report.</p><div class="mini-grid">${forensicCards}</div>${forensicHighlights || "<p>No key forensic artifacts included.</p>"}</section></aside></div>
+    <section><h2>Prefetch Artifacts</h2><p>Execution-history Prefetch entries collected by Securo and parser exports. These are review signals unless paired with stronger evidence.</p>${prefetchPreviewRows || "<p>No Prefetch artifacts were included in this report.</p>"}${prefetchArtifacts.length > 6 ? `<details><summary>Show all ${prefetchArtifacts.length} Prefetch artifacts</summary>${prefetchAllRows}</details>` : ""}</section>
     <section><h2>Key Forensic Artifacts</h2><p>Prefetch, deleted-file, Recycle Bin, registry, shortcut, and parser artifacts. These are review signals unless paired with stronger evidence.</p>${keyArtifactRows || "<p>No key forensic artifacts were included.</p>"}${(data.keyArtifacts || []).length > 60 ? `<p>Showing first 60 of ${(data.keyArtifacts || []).length}. Full list is in raw report data.</p>` : ""}</section>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
