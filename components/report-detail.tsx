@@ -34,13 +34,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredShellBags = data.shellBagArtifacts || [];
   const keyArtifacts = data.keyArtifacts || [];
   const prefetchArtifacts = useMemo(() => keyArtifacts.filter(isPrefetchArtifact), [keyArtifacts]);
-  const nonPrefetchKeyArtifacts = useMemo(() => keyArtifacts.filter((item) => !isPrefetchArtifact(item)), [keyArtifacts]);
   const [showAllPrefetch, setShowAllPrefetch] = useState(false);
-  const [showAllKeyArtifacts, setShowAllKeyArtifacts] = useState(false);
   const [deletedSearch, setDeletedSearch] = useState("");
   const [deletedSort, setDeletedSort] = useState<"deletionTimestamp" | "filename" | "source" | "fileSize">("deletionTimestamp");
   const visiblePrefetchArtifacts = showAllPrefetch ? prefetchArtifacts : prefetchArtifacts.slice(0, 6);
-  const visibleKeyArtifacts = showAllKeyArtifacts ? nonPrefetchKeyArtifacts : nonPrefetchKeyArtifacts.slice(0, 8);
   const deletedFileArtifacts = useMemo(() => buildDeletedFileArtifacts(data), [data]);
   const filteredDeletedFileArtifacts = useMemo(
     () => sortDeletedFileArtifacts(
@@ -213,7 +210,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <h2 className="text-lg font-semibold">Forensic Artifacts</h2>
-                  <p className="mt-1 text-xs text-zinc-500">Compact view of parser evidence. Full details stay lower in the report.</p>
+                  <p className="mt-1 text-xs text-zinc-500">Compact parser evidence counts. Detailed sections are shown below.</p>
                 </div>
                 <span className="text-sm text-primary">{forensicSummary.total}</span>
               </div>
@@ -224,20 +221,6 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                     <div className="mt-1 text-xl font-bold text-zinc-100">{item.count}</div>
                   </div>
                 ))}
-              </div>
-              <div className="mt-3 space-y-2">
-                {forensicSummary.highlights.slice(0, 6).map((item, index) => (
-                  <div key={`${item.type}-${artifactText(item)}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-xs">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold text-zinc-200">{item.type || "Artifact"}</span>
-                      <span className="text-zinc-500">{formatDate(item.timestamp)}</span>
-                    </div>
-                    <div className="mt-1 break-words text-zinc-400 [overflow-wrap:anywhere]">{artifactText(item)}</div>
-                    <div className="mt-1 text-zinc-500">{item.source || item.confidence || "Forensic parser"}</div>
-                  </div>
-                ))}
-                {!forensicSummary.highlights.length ? <p className="text-sm text-zinc-500">No key forensic artifacts were included.</p> : null}
-                {keyArtifacts.length > 6 ? <p className="text-xs text-zinc-500">Showing newest 6 of {keyArtifacts.length}. Full list is below.</p> : null}
               </div>
             </Card>
           </div>
@@ -357,42 +340,6 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           </div>
           {!deletedFileArtifacts.length ? <p className="text-sm text-zinc-500">No deleted-file artifacts were found in this report.</p> : null}
           {deletedFileArtifacts.length > 0 && !filteredDeletedFileArtifacts.length ? <p className="text-sm text-zinc-500">No deleted-file artifacts match this search.</p> : null}
-        </Card>
-
-        <Card className="mt-5">
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">Key Forensic Artifacts</h2>
-              <p className="mt-1 text-sm text-zinc-400">Deleted-file, Recycle Bin, registry, shortcut, MFT, USN Journal, and parser artifacts. Prefetch is shown separately above.</p>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-primary">{nonPrefetchKeyArtifacts.length} artifacts</span>
-              {nonPrefetchKeyArtifacts.length > 8 ? (
-                <Button className="bg-zinc-900 text-zinc-100 shadow-none hover:bg-zinc-800" onClick={() => setShowAllKeyArtifacts((value) => !value)}>
-                  {showAllKeyArtifacts ? "Minimize" : "Show All Artifacts"}
-                </Button>
-              ) : null}
-            </div>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            {visibleKeyArtifacts.map((item, index) => (
-              <div key={`${item.type}-${artifactText(item)}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-sm">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-semibold text-zinc-200">{item.type || "Artifact"}</span>
-                  <span className="text-xs text-zinc-500">{formatDate(item.timestamp)}</span>
-                </div>
-                <div className="mt-2 break-words text-zinc-300 [overflow-wrap:anywhere]">{artifactText(item)}</div>
-                {item.path ? <div className="mt-1 break-words text-zinc-500 [overflow-wrap:anywhere]">{item.path}</div> : null}
-                <div className="mt-2 text-xs text-zinc-500">{item.source || "Forensic parser"} · {item.confidence || "Review"}</div>
-              </div>
-            ))}
-            {!nonPrefetchKeyArtifacts.length ? <p className="text-sm text-zinc-500">No non-Prefetch key forensic artifacts were included in this report.</p> : null}
-          </div>
-          {nonPrefetchKeyArtifacts.length > 8 ? (
-            <p className="mt-3 text-xs text-zinc-500">
-              {showAllKeyArtifacts ? `Showing all ${nonPrefetchKeyArtifacts.length} non-Prefetch artifacts.` : `Showing newest 8 of ${nonPrefetchKeyArtifacts.length}.`}
-            </p>
-          ) : null}
         </Card>
 
         <Card className="mt-5">
@@ -992,12 +939,8 @@ function buildForensicSummary(data: ReportRow["report_json"]) {
     { label: "FastFlags", count: (data.detectedFastFlags || []).length },
     { label: "Defender", count: (data.defenderExclusions || []).length }
   ];
-  const highlights = [...keyArtifacts]
-    .sort((a, b) => (parseTimestamp(b.timestamp)?.getTime() || 0) - (parseTimestamp(a.timestamp)?.getTime() || 0))
-    .slice(0, 12);
   return {
     cards,
-    highlights,
     total: cards.reduce((sum, item) => sum + item.count, 0)
   };
 }
@@ -1005,7 +948,6 @@ function buildForensicSummary(data: ReportRow["report_json"]) {
 function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
   const raw = data as Record<string, unknown>;
   const groups: Array<[string, unknown]> = [
-    ["Key Forensic Artifacts", raw.keyArtifacts || raw.key_artifacts],
     ["Detect Logs", raw.detectLogs || raw.detect_logs],
     ["Warning Logs", raw.warningLogs || raw.warning_logs],
     ["Recovery", raw.recoveryArtifacts || raw.recovery_artifacts || raw.recoveredFiles || raw.recovered_files],
@@ -1105,19 +1047,6 @@ function buildExportHtml(report: ReportRow) {
     <p>Source: ${escape(item.source || "Defender preferences")}</p>
   `)).join("");
   const forensicCards = forensicSummary.cards.map((item) => `<div class="mini-card"><small>${escape(item.label)}</small><b>${item.count}</b></div>`).join("");
-  const forensicHighlights = forensicSummary.highlights.slice(0, 8).map((item) => entry(item.timestamp, `
-    <p><b>${escape(item.type || "Artifact")}</b> · ${escape(formatDate(item.timestamp))}</p>
-    <p>${escape(artifactText(item))}</p>
-    ${item.path ? `<p>${escape(item.path)}</p>` : ""}
-    <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
-  `)).join("");
-  const nonPrefetchKeyArtifacts = (data.keyArtifacts || []).filter((item) => !isPrefetchArtifact(item));
-  const keyArtifactRows = nonPrefetchKeyArtifacts.slice(0, 60).map((item) => entry(item.timestamp, `
-    <p><b>${escape(item.type || "Artifact")}</b> · ${escape(formatDate(item.timestamp))}</p>
-    <p>${escape(artifactText(item))}</p>
-    ${item.path ? `<p>${escape(item.path)}</p>` : ""}
-    <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
-  `)).join("");
   const deletedFileArtifacts = buildDeletedFileArtifacts(data);
   const deletedFileRows = deletedFileArtifacts.map((item) => entry(item.deletionTimestamp || item.timestamp, `
     <details>
@@ -1164,10 +1093,9 @@ function buildExportHtml(report: ReportRow) {
     </head><body>
     <h1>Securo Report</h1>
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
-    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section><section><h2>Forensic Artifacts</h2><p>Compact parser evidence summary. Full entries are lower in the report.</p><div class="mini-grid">${forensicCards}</div>${forensicHighlights || "<p>No key forensic artifacts included.</p>"}</section></aside></div>
+    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section><section><h2>Forensic Artifacts</h2><p>Compact parser evidence counts. Detailed sections are shown below.</p><div class="mini-grid">${forensicCards}</div></section></aside></div>
     <section><h2>Prefetch Artifacts</h2><p>Execution-history Prefetch entries collected by Securo and parser exports. These are review signals unless paired with stronger evidence.</p>${prefetchPreviewRows || "<p>No Prefetch artifacts were included in this report.</p>"}${prefetchArtifacts.length > 6 ? `<details><summary>Show all ${prefetchArtifacts.length} Prefetch artifacts</summary>${prefetchAllRows}</details>` : ""}</section>
     <section><h2>Deleted File Artifacts</h2><p>Merged deleted-file evidence from MFTECmd, JLECmd/LECmd, Recycle Bin, USN Journal, and recovery metadata when available.</p>${deletedFileRows || "<p>No deleted-file artifacts were found in this report.</p>"}</section>
-    <section><h2>Key Forensic Artifacts</h2><p>Deleted-file, Recycle Bin, registry, shortcut, MFT, USN Journal, and parser artifacts. Prefetch is shown separately above.</p>${keyArtifactRows || "<p>No non-Prefetch key forensic artifacts were included.</p>"}${nonPrefetchKeyArtifacts.length > 60 ? `<p>Showing first 60 of ${nonPrefetchKeyArtifacts.length}. Full list is in raw report data.</p>` : ""}</section>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>
