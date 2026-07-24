@@ -156,6 +156,28 @@ export type KeyArtifact = {
   confidence?: string;
 };
 
+export type DeletedFileArtifact = {
+  id?: string;
+  filename?: string;
+  originalPath?: string;
+  path?: string;
+  deletionTimestamp?: string;
+  timestamp?: string;
+  mftRecordNumber?: string;
+  usn?: string;
+  usnReason?: string;
+  fileSize?: string | number;
+  created?: string;
+  modified?: string;
+  accessed?: string;
+  source?: string;
+  sources?: string[];
+  sourceExport?: string;
+  confidence?: string;
+  recent?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
 export type SecuroFinding = {
   name?: string;
   path?: string;
@@ -186,6 +208,7 @@ export type SecuroReportJson = {
   robloxLogs?: RobloxLogArtifact[];
   detectedFastFlags?: RobloxFastFlag[];
   keyArtifacts?: KeyArtifact[];
+  deletedFileArtifacts?: DeletedFileArtifact[];
   usnJournalEvents?: UsnJournalEvent[];
   usnJournalStatus?: UsnJournalStatus;
   shellBagArtifacts?: {

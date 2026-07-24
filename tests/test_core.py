@@ -1992,6 +1992,33 @@ InstallDate    REG_DWORD    0x60764fa0
             checker.run_command = original_run
         self.assertIn("budget exhausted", out)
 
+    def test_deleted_file_artifacts_merge_mft_and_shortcut_sources(self):
+        exported = [{
+            "filename": "tool.exe",
+            "originalPath": r"C:\Users\Example\Downloads\tool.exe",
+            "path": r"C:\Users\Example\Downloads\tool.exe",
+            "deletionTimestamp": "2026-07-20 12:00:00",
+            "timestamp": "2026-07-20 12:00:00",
+            "mftRecordNumber": "42",
+            "source": "MFT",
+            "sources": ["MFT"],
+            "metadata": {"EntryNumber": "42"},
+        }, {
+            "filename": "tool.exe",
+            "originalPath": r"C:\Users\Example\Downloads\tool.exe",
+            "path": r"C:\Users\Example\Downloads\tool.exe",
+            "deletionTimestamp": "",
+            "timestamp": "",
+            "source": "Jump List",
+            "sources": ["Jump List"],
+            "metadata": {"TargetPath": r"C:\Users\Example\Downloads\tool.exe"},
+        }]
+        artifacts = checker.deleted_file_artifacts_from_report_parts([], [], [], [], exported)
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["mftRecordNumber"], "42")
+        self.assertIn("MFT", artifacts[0]["sources"])
+        self.assertIn("Jump List", artifacts[0]["sources"])
+
 
 if __name__ == "__main__":
     unittest.main()

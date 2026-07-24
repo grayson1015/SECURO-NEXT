@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Download } from "lucide-react";
-import type { AccountIdentifier, KeyArtifact, ReportRow, RobloxLogArtifact, SecuroFinding, SecuroSession } from "@/lib/types";
+import type { AccountIdentifier, DeletedFileArtifact, KeyArtifact, ReportRow, RobloxLogArtifact, SecuroFinding, SecuroSession } from "@/lib/types";
 import { countFindings } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -34,8 +34,21 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const filteredShellBags = data.shellBagArtifacts || [];
   const keyArtifacts = data.keyArtifacts || [];
   const prefetchArtifacts = useMemo(() => keyArtifacts.filter(isPrefetchArtifact), [keyArtifacts]);
+  const nonPrefetchKeyArtifacts = useMemo(() => keyArtifacts.filter((item) => !isPrefetchArtifact(item)), [keyArtifacts]);
   const [showAllPrefetch, setShowAllPrefetch] = useState(false);
+  const [showAllKeyArtifacts, setShowAllKeyArtifacts] = useState(false);
+  const [deletedSearch, setDeletedSearch] = useState("");
+  const [deletedSort, setDeletedSort] = useState<"deletionTimestamp" | "filename" | "source" | "fileSize">("deletionTimestamp");
   const visiblePrefetchArtifacts = showAllPrefetch ? prefetchArtifacts : prefetchArtifacts.slice(0, 6);
+  const visibleKeyArtifacts = showAllKeyArtifacts ? nonPrefetchKeyArtifacts : nonPrefetchKeyArtifacts.slice(0, 8);
+  const deletedFileArtifacts = useMemo(() => buildDeletedFileArtifacts(data), [data]);
+  const filteredDeletedFileArtifacts = useMemo(
+    () => sortDeletedFileArtifacts(
+      deletedFileArtifacts.filter((item) => deletedArtifactSearchText(item).includes(deletedSearch.trim().toLowerCase())),
+      deletedSort
+    ),
+    [deletedFileArtifacts, deletedSearch, deletedSort]
+  );
   const forensicSummary = useMemo(() => buildForensicSummary(data), [data]);
   const usnEvents = data.usnJournalEvents || [];
   const usnStatus = data.usnJournalStatus || {};
@@ -269,13 +282,100 @@ export function ReportDetail({ report }: { report: ReportRow }) {
         <Card className="mt-5">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold">Key Forensic Artifacts</h2>
-              <p className="mt-1 text-sm text-zinc-400">Prefetch, deleted-file, Recycle Bin, registry, shortcut, and parser artifacts. These are review signals unless paired with stronger evidence.</p>
+              <h2 className="text-lg font-semibold">Deleted File Artifacts</h2>
+              <p className="mt-1 text-sm text-zinc-400">Merged deleted-file evidence from MFTECmd, JLECmd/LECmd, Recycle Bin, USN Journal, and recovery metadata when available.</p>
             </div>
-            <span className="text-sm text-primary">{keyArtifacts.length} artifacts</span>
+            <span className="text-sm text-primary">{filteredDeletedFileArtifacts.length}/{deletedFileArtifacts.length} deleted</span>
+          </div>
+          <div className="mb-3 flex flex-wrap gap-2">
+            <input
+              value={deletedSearch}
+              onChange={(event) => setDeletedSearch(event.target.value)}
+              placeholder="Search deleted files"
+              className="min-h-10 flex-1 rounded-md border border-border bg-black/30 px-3 text-sm text-zinc-100 outline-none focus:border-primary"
+            />
+            <select
+              value={deletedSort}
+              onChange={(event) => setDeletedSort(event.target.value as typeof deletedSort)}
+              className="min-h-10 rounded-md border border-border bg-black/30 px-3 text-sm text-zinc-100 outline-none focus:border-primary"
+            >
+              <option value="deletionTimestamp">Deletion time</option>
+              <option value="filename">Filename</option>
+              <option value="source">Source</option>
+              <option value="fileSize">File size</option>
+            </select>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead className="text-xs uppercase text-zinc-500">
+                <tr>
+                  <th className="border-b border-border px-3 py-2">File</th>
+                  <th className="border-b border-border px-3 py-2">Deleted</th>
+                  <th className="border-b border-border px-3 py-2">Source</th>
+                  <th className="border-b border-border px-3 py-2">USN reason</th>
+                  <th className="border-b border-border px-3 py-2">Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredDeletedFileArtifacts.map((item, index) => (
+                  <tr key={`${item.originalPath}-${item.deletionTimestamp}-${index}`} className={item.recent ? "bg-yellow-500/5" : ""}>
+                    <td colSpan={5} className="border-b border-border p-0">
+                      <details className="group">
+                        <summary className="grid cursor-pointer grid-cols-[minmax(180px,1.4fr)_160px_130px_160px_90px] gap-3 px-3 py-3 text-zinc-200 marker:text-primary">
+                          <span className="min-w-0">
+                            <span className="block break-words font-semibold [overflow-wrap:anywhere]">{item.filename || "Deleted file"}</span>
+                            <span className="mt-1 block break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">{item.originalPath || item.path || "Original path unavailable"}</span>
+                            {item.recent ? <span className="mt-1 inline-flex rounded-full border border-yellow-500/40 px-2 py-0.5 text-xs text-yellow-200">Recent</span> : null}
+                          </span>
+                          <span className="text-zinc-400">{formatDate(item.deletionTimestamp || item.timestamp)}</span>
+                          <span className="text-zinc-400">{formatDeletedSources(item)}</span>
+                          <span className="break-words text-zinc-400 [overflow-wrap:anywhere]">{item.usnReason || "Unavailable"}</span>
+                          <span className="text-zinc-400">{formatFileSize(item.fileSize)}</span>
+                        </summary>
+                        <div className="grid gap-2 border-t border-border bg-black/20 p-3 text-xs text-zinc-400 md:grid-cols-2">
+                          <div>Filename: {item.filename || "Unavailable"}</div>
+                          <div>Deleted: {formatDate(item.deletionTimestamp || item.timestamp)}</div>
+                          <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Original path: {item.originalPath || item.path || "Unavailable"}</div>
+                          <div>MFT record: {item.mftRecordNumber || "Unavailable"}</div>
+                          <div>USN: {item.usn || "Unavailable"}</div>
+                          <div>USN reason: {item.usnReason || "Unavailable"}</div>
+                          <div>File size: {formatFileSize(item.fileSize)}</div>
+                          <div>Created: {formatDate(item.created)}</div>
+                          <div>Modified: {formatDate(item.modified)}</div>
+                          <div>Accessed: {formatDate(item.accessed)}</div>
+                          <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Source export: {item.sourceExport || "Unavailable"}</div>
+                          {item.metadata ? (
+                            <pre className="max-h-72 overflow-auto rounded-md bg-black/30 p-3 text-xs text-zinc-400 md:col-span-2">{JSON.stringify(item.metadata, null, 2)}</pre>
+                          ) : null}
+                        </div>
+                      </details>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!deletedFileArtifacts.length ? <p className="text-sm text-zinc-500">No deleted-file artifacts were found in this report.</p> : null}
+          {deletedFileArtifacts.length > 0 && !filteredDeletedFileArtifacts.length ? <p className="text-sm text-zinc-500">No deleted-file artifacts match this search.</p> : null}
+        </Card>
+
+        <Card className="mt-5">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Key Forensic Artifacts</h2>
+              <p className="mt-1 text-sm text-zinc-400">Deleted-file, Recycle Bin, registry, shortcut, MFT, USN Journal, and parser artifacts. Prefetch is shown separately above.</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-primary">{nonPrefetchKeyArtifacts.length} artifacts</span>
+              {nonPrefetchKeyArtifacts.length > 8 ? (
+                <Button className="bg-zinc-900 text-zinc-100 shadow-none hover:bg-zinc-800" onClick={() => setShowAllKeyArtifacts((value) => !value)}>
+                  {showAllKeyArtifacts ? "Minimize" : "Show All Artifacts"}
+                </Button>
+              ) : null}
+            </div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
-            {keyArtifacts.slice(0, 40).map((item, index) => (
+            {visibleKeyArtifacts.map((item, index) => (
               <div key={`${item.type}-${artifactText(item)}-${index}`} className="rounded-md border border-border bg-black/20 p-3 text-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-semibold text-zinc-200">{item.type || "Artifact"}</span>
@@ -286,9 +386,13 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 <div className="mt-2 text-xs text-zinc-500">{item.source || "Forensic parser"} · {item.confidence || "Review"}</div>
               </div>
             ))}
-            {!keyArtifacts.length ? <p className="text-sm text-zinc-500">No key forensic artifacts were included in this report.</p> : null}
+            {!nonPrefetchKeyArtifacts.length ? <p className="text-sm text-zinc-500">No non-Prefetch key forensic artifacts were included in this report.</p> : null}
           </div>
-          {keyArtifacts.length > 40 ? <p className="mt-3 text-xs text-zinc-500">Showing first 40 of {keyArtifacts.length}. The full list remains in Detailed Evidence and Raw report data.</p> : null}
+          {nonPrefetchKeyArtifacts.length > 8 ? (
+            <p className="mt-3 text-xs text-zinc-500">
+              {showAllKeyArtifacts ? `Showing all ${nonPrefetchKeyArtifacts.length} non-Prefetch artifacts.` : `Showing newest 8 of ${nonPrefetchKeyArtifacts.length}.`}
+            </p>
+          ) : null}
         </Card>
 
         <Card className="mt-5">
@@ -737,6 +841,145 @@ function isPrefetchArtifact(item: KeyArtifact) {
   return /prefetch/i.test(`${item.type || ""} ${artifactText(item)} ${item.source || ""}`);
 }
 
+function isDeletedKeyArtifact(item: KeyArtifact) {
+  return /deleted|deletion|recycle/i.test(`${item.type || ""} ${artifactText(item)} ${item.source || ""}`);
+}
+
+function buildDeletedFileArtifacts(data: ReportRow["report_json"]): DeletedFileArtifact[] {
+  const seen = new Map<string, DeletedFileArtifact>();
+  const add = (item: DeletedFileArtifact) => {
+    const originalPath = item.originalPath || item.path || "";
+    const filename = item.filename || pathBasename(originalPath) || "Deleted file";
+    const timestamp = item.deletionTimestamp || item.timestamp || "";
+    const key = (originalPath || `${filename}|${timestamp}`).toLowerCase();
+    const normalized: DeletedFileArtifact = {
+      ...item,
+      filename,
+      originalPath,
+      path: item.path || originalPath,
+      deletionTimestamp: timestamp,
+      timestamp,
+      sources: item.sources || (item.source ? [item.source] : []),
+    };
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, normalized);
+      return;
+    }
+    seen.set(key, mergeDeletedArtifact(existing, normalized));
+  };
+
+  (data.deletedFileArtifacts || []).forEach(add);
+  (data.keyArtifacts || []).filter(isDeletedKeyArtifact).forEach((item) => {
+    const text = artifactText(item).replace(/^DELETED FILE:\s*/i, "");
+    add({
+      filename: pathBasename(text || item.path || ""),
+      originalPath: text || item.path || "",
+      path: item.path || text,
+      deletionTimestamp: item.timestamp,
+      timestamp: item.timestamp,
+      source: item.source || item.type || "Key artifact",
+      sources: [item.source || item.type || "Key artifact"],
+      confidence: item.confidence,
+      metadata: item as Record<string, unknown>,
+    });
+  });
+  (data.usnJournalEvents || []).forEach((event) => {
+    const reasonText = `${event.eventType || ""} ${event.reason || ""}`.toLowerCase();
+    if (!reasonText.includes("delete")) return;
+    add({
+      filename: event.fileName || pathBasename(event.path || ""),
+      originalPath: event.path || event.fileName || "",
+      path: event.path || event.fileName || "",
+      deletionTimestamp: event.timestamp,
+      timestamp: event.timestamp,
+      mftRecordNumber: event.fileId,
+      usn: event.usn,
+      usnReason: event.reason || event.eventType,
+      source: "USN Journal",
+      sources: ["USN Journal"],
+      confidence: "Possible",
+      metadata: event as Record<string, unknown>,
+    });
+  });
+
+  return [...seen.values()].map((item) => ({
+    ...item,
+    recent: item.recent ?? isRecentTimestamp(item.deletionTimestamp || item.timestamp),
+  })).sort((a, b) => (parseTimestamp(b.deletionTimestamp || b.timestamp)?.getTime() || 0) - (parseTimestamp(a.deletionTimestamp || a.timestamp)?.getTime() || 0));
+}
+
+function mergeDeletedArtifact(left: DeletedFileArtifact, right: DeletedFileArtifact): DeletedFileArtifact {
+  const sources = [...(left.sources || []), ...(right.sources || [])].filter(Boolean);
+  const uniqueSources = [...new Set(sources)];
+  return {
+    ...left,
+    ...Object.fromEntries(Object.entries(right).filter(([, value]) => value !== undefined && value !== "" && value !== null)),
+    filename: left.filename || right.filename,
+    originalPath: left.originalPath || right.originalPath,
+    path: left.path || right.path,
+    deletionTimestamp: left.deletionTimestamp || right.deletionTimestamp,
+    timestamp: left.timestamp || right.timestamp,
+    source: uniqueSources.join(" + ") || left.source || right.source,
+    sources: uniqueSources,
+    metadata: { ...(left.metadata || {}), ...(right.metadata || {}) },
+    recent: Boolean(left.recent || right.recent || isRecentTimestamp(left.deletionTimestamp || right.deletionTimestamp || left.timestamp || right.timestamp)),
+  };
+}
+
+function sortDeletedFileArtifacts(items: DeletedFileArtifact[], sortKey: "deletionTimestamp" | "filename" | "source" | "fileSize") {
+  return [...items].sort((a, b) => {
+    if (sortKey === "deletionTimestamp") {
+      return (parseTimestamp(b.deletionTimestamp || b.timestamp)?.getTime() || 0) - (parseTimestamp(a.deletionTimestamp || a.timestamp)?.getTime() || 0);
+    }
+    if (sortKey === "fileSize") {
+      return numericFileSize(b.fileSize) - numericFileSize(a.fileSize);
+    }
+    return String(a[sortKey] || "").localeCompare(String(b[sortKey] || ""));
+  });
+}
+
+function deletedArtifactSearchText(item: DeletedFileArtifact) {
+  return [
+    item.filename,
+    item.originalPath,
+    item.path,
+    item.source,
+    ...(item.sources || []),
+    item.usnReason,
+    item.usn,
+    item.mftRecordNumber,
+  ].join(" ").toLowerCase();
+}
+
+function formatDeletedSources(item: DeletedFileArtifact) {
+  return (item.sources && item.sources.length ? item.sources : [item.source]).filter(Boolean).join(" + ") || "Unknown";
+}
+
+function pathBasename(path: string) {
+  const cleaned = String(path || "").replace(/^DELETED FILE:\s*/i, "");
+  return cleaned.split(/[\\/]/).filter(Boolean).pop() || "";
+}
+
+function isRecentTimestamp(timestamp?: string) {
+  const parsed = parseTimestamp(timestamp);
+  return Boolean(parsed && Date.now() - parsed.getTime() <= 7 * 24 * 60 * 60 * 1000);
+}
+
+function numericFileSize(value: unknown) {
+  const parsed = Number(String(value || "").replace(/[^0-9.]/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatFileSize(value: unknown) {
+  const bytes = numericFileSize(value);
+  if (!bytes) return value ? String(value) : "Unavailable";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
 function buildForensicSummary(data: ReportRow["report_json"]) {
   const keyArtifacts = data.keyArtifacts || [];
   const countType = (patterns: RegExp[]) =>
@@ -868,11 +1111,24 @@ function buildExportHtml(report: ReportRow) {
     ${item.path ? `<p>${escape(item.path)}</p>` : ""}
     <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
   `)).join("");
-  const keyArtifactRows = (data.keyArtifacts || []).slice(0, 60).map((item) => entry(item.timestamp, `
+  const nonPrefetchKeyArtifacts = (data.keyArtifacts || []).filter((item) => !isPrefetchArtifact(item));
+  const keyArtifactRows = nonPrefetchKeyArtifacts.slice(0, 60).map((item) => entry(item.timestamp, `
     <p><b>${escape(item.type || "Artifact")}</b> · ${escape(formatDate(item.timestamp))}</p>
     <p>${escape(artifactText(item))}</p>
     ${item.path ? `<p>${escape(item.path)}</p>` : ""}
     <p>${escape(item.source || "Forensic parser")} · ${escape(item.confidence || "Review")}</p>
+  `)).join("");
+  const deletedFileArtifacts = buildDeletedFileArtifacts(data);
+  const deletedFileRows = deletedFileArtifacts.map((item) => entry(item.deletionTimestamp || item.timestamp, `
+    <details>
+      <summary><b>${escape(item.filename || "Deleted file")}</b> · ${escape(formatDate(item.deletionTimestamp || item.timestamp))} · ${escape(formatDeletedSources(item))}${item.recent ? " · Recent" : ""}</summary>
+      <p>Original path: ${escape(item.originalPath || item.path || "Unavailable")}</p>
+      <p>MFT record: ${escape(item.mftRecordNumber || "Unavailable")} · USN: ${escape(item.usn || "Unavailable")}</p>
+      <p>USN reason: ${escape(item.usnReason || "Unavailable")} · Size: ${escape(formatFileSize(item.fileSize))}</p>
+      <p>Created: ${escape(formatDate(item.created))} · Modified: ${escape(formatDate(item.modified))} · Accessed: ${escape(formatDate(item.accessed))}</p>
+      <p>Source export: ${escape(item.sourceExport || "Unavailable")}</p>
+      ${item.metadata ? `<pre>${escape(JSON.stringify(item.metadata, null, 2))}</pre>` : ""}
+    </details>
   `)).join("");
   const prefetchArtifacts = (data.keyArtifacts || []).filter(isPrefetchArtifact);
   const prefetchRow = (item: KeyArtifact) => entry(item.timestamp, `
@@ -910,7 +1166,8 @@ function buildExportHtml(report: ReportRow) {
     <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
     <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section><section><h2>Forensic Artifacts</h2><p>Compact parser evidence summary. Full entries are lower in the report.</p><div class="mini-grid">${forensicCards}</div>${forensicHighlights || "<p>No key forensic artifacts included.</p>"}</section></aside></div>
     <section><h2>Prefetch Artifacts</h2><p>Execution-history Prefetch entries collected by Securo and parser exports. These are review signals unless paired with stronger evidence.</p>${prefetchPreviewRows || "<p>No Prefetch artifacts were included in this report.</p>"}${prefetchArtifacts.length > 6 ? `<details><summary>Show all ${prefetchArtifacts.length} Prefetch artifacts</summary>${prefetchAllRows}</details>` : ""}</section>
-    <section><h2>Key Forensic Artifacts</h2><p>Prefetch, deleted-file, Recycle Bin, registry, shortcut, and parser artifacts. These are review signals unless paired with stronger evidence.</p>${keyArtifactRows || "<p>No key forensic artifacts were included.</p>"}${(data.keyArtifacts || []).length > 60 ? `<p>Showing first 60 of ${(data.keyArtifacts || []).length}. Full list is in raw report data.</p>` : ""}</section>
+    <section><h2>Deleted File Artifacts</h2><p>Merged deleted-file evidence from MFTECmd, JLECmd/LECmd, Recycle Bin, USN Journal, and recovery metadata when available.</p>${deletedFileRows || "<p>No deleted-file artifacts were found in this report.</p>"}</section>
+    <section><h2>Key Forensic Artifacts</h2><p>Deleted-file, Recycle Bin, registry, shortcut, MFT, USN Journal, and parser artifacts. Prefetch is shown separately above.</p>${keyArtifactRows || "<p>No non-Prefetch key forensic artifacts were included.</p>"}${nonPrefetchKeyArtifacts.length > 60 ? `<p>Showing first 60 of ${nonPrefetchKeyArtifacts.length}. Full list is in raw report data.</p>` : ""}</section>
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>

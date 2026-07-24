@@ -2869,6 +2869,242 @@ def forensic_row_deleted(row: dict) -> bool:
     return False
 
 
+def deleted_file_artifact_key(path_text: str, filename: str = "", timestamp: str = "") -> str:
+    text = normalize_path(path_text) if path_text else ""
+    text = text.strip().lower()
+    if text:
+        return text
+    return f"{str(filename or '').strip().lower()}|{str(timestamp or '').strip()}"
+
+
+def compact_row_metadata(row: dict, limit: int = 80) -> dict:
+    metadata = {}
+    for key, value in row.items():
+        if len(metadata) >= limit:
+            break
+        if value not in (None, ""):
+            metadata[str(key)] = str(value)
+    return metadata
+
+
+def deleted_file_artifact_from_row(row: dict, family: str, csv_path: Path, path_text: str, when: dt.datetime | None) -> dict:
+    original_path = (
+        path_text
+        or csv_value(row, "OriginalPath", "Original File Name", "DeletedFilePath", "FullPath", "Path", "TargetPath")
+    )
+    filename = (
+        csv_value(row, "FileName", "Filename", "Name", "TargetName", "ItemName")
+        or Path(original_path).name
+        or family
+    )
+    deleted_at = (
+        csv_value(row, "DeletedTime", "DeletionTime", "Deleted On", "DeletedOn", "RecycleBinDeletedTime")
+        or (when.isoformat(sep=" ", timespec="seconds") if when else "")
+    )
+    created = csv_value(row, "Created", "Created0x10", "SourceCreated", "CreationTime", "CreatedOn")
+    modified = csv_value(row, "Modified", "LastModified", "LastModified0x30", "SourceModified", "ModifiedTime", "ModifiedOn")
+    accessed = csv_value(row, "Accessed", "LastAccessed", "Accessed0x30", "AccessedTime", "AccessedOn")
+    record = csv_value(row, "EntryNumber", "Entry Number", "RecordNumber", "Record Number", "MFTRecordNumber", "FileRecordNumber", "File Reference", "FileReference")
+    usn = csv_value(row, "USN", "UpdateSequenceNumber")
+    reason = csv_value(row, "Reason", "Reason(s)", "UsnReason", "UpdateReasons")
+    size = csv_value(row, "Size", "FileSize", "SourceFileSize", "LogicalSize")
+    source_label = {
+        "MFTECmd": "MFT",
+        "RBCmd": "Recycle Bin",
+        "JLECmd": "Jump List",
+        "LECmd": "Shortcut",
+    }.get(family, family)
+    return {
+        "filename": filename,
+        "originalPath": original_path,
+        "path": original_path,
+        "deletionTimestamp": deleted_at,
+        "timestamp": deleted_at,
+        "mftRecordNumber": record,
+        "usn": usn,
+        "usnReason": reason,
+        "fileSize": size,
+        "created": created,
+        "modified": modified,
+        "accessed": accessed,
+        "source": source_label,
+        "sources": [source_label],
+        "sourceExport": str(csv_path),
+        "confidence": "Possible",
+        "metadata": compact_row_metadata(row),
+    }
+
+
+def merge_deleted_file_artifact(existing: dict, incoming: dict) -> dict:
+    for key, value in incoming.items():
+        if key == "sources":
+            existing_sources = list(existing.get("sources") or [])
+            for source in value or []:
+                if source and source not in existing_sources:
+                    existing_sources.append(source)
+            existing["sources"] = existing_sources
+            existing["source"] = " + ".join(existing_sources)
+        elif key == "metadata":
+            metadata = dict(existing.get("metadata") or {})
+            metadata.update({k: v for k, v in (value or {}).items() if v not in (None, "")})
+            existing["metadata"] = metadata
+        elif value not in (None, "", []):
+            current = existing.get(key)
+            if current in (None, "", []):
+                existing[key] = value
+    return existing
+
+
+def collect_deleted_file_artifacts_from_exports(days: int, config: dict) -> list[dict]:
+    cut = cutoff(days)
+    artifacts = {}
+    max_files = int(config.get("forensic_export_max_files") or 80)
+    max_rows = int(config.get("forensic_export_max_rows") or 5000)
+    scanned_files = 0
+    scanned_rows = 0
+    for root in forensic_export_dirs(config):
+        if not safe_exists(root):
+            continue
+        try:
+            csv_files = sorted(root.rglob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            continue
+        for csv_path in csv_files:
+            if scanned_files >= max_files or scanned_rows >= max_rows:
+                break
+            scanned_files += 1
+            try:
+                with csv_path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    headers = list(reader.fieldnames or [])
+                    family = forensic_export_family(csv_path, headers)
+                    if family not in {"MFTECmd", "RBCmd", "JLECmd", "LECmd"}:
+                        continue
+                    for row in reader:
+                        if scanned_rows >= max_rows:
+                            break
+                        scanned_rows += 1
+                        when = forensic_row_time(row)
+                        if when and when < cut:
+                            continue
+                        path_text = forensic_row_path(row)
+                        row_blob = " ".join([family, path_text] + [str(v) for v in row.values()])
+                        deleted = forensic_row_deleted(row) or family == "RBCmd"
+                        lnk_missing_target = family in {"JLECmd", "LECmd"} and path_text and not safe_exists(Path(os.path.expandvars(path_text)).expanduser())
+                        if not deleted and not lnk_missing_target:
+                            continue
+                        artifact = deleted_file_artifact_from_row(row, family, csv_path, path_text, when)
+                        if not artifact.get("originalPath") and not artifact.get("filename"):
+                            continue
+                        if suspicious_text(row_blob, config) or ioc_text_matches(row_blob, config):
+                            artifact["confidence"] = "Likely"
+                        key = deleted_file_artifact_key(artifact.get("originalPath", ""), artifact.get("filename", ""), artifact.get("timestamp", ""))
+                        if key in artifacts:
+                            artifacts[key] = merge_deleted_file_artifact(artifacts[key], artifact)
+                        else:
+                            artifacts[key] = artifact
+            except (OSError, csv.Error):
+                continue
+    results = list(artifacts.values())
+    for item in results:
+        parsed = parse_dt(item.get("deletionTimestamp") or item.get("timestamp"))
+        item["recent"] = bool(parsed and (dt.datetime.now() - parsed) <= dt.timedelta(days=7))
+    return sorted(results, key=lambda item: parse_dt(item.get("deletionTimestamp") or item.get("timestamp")) or dt.datetime.min, reverse=True)
+
+
+def deleted_file_artifacts_from_report_parts(findings: list[dict], timeline: list[dict], recovery_artifacts: list[dict], usn_events: list[dict], exported_artifacts: list[dict] | None = None) -> list[dict]:
+    artifacts = {}
+
+    def add(item: dict):
+        if not item.get("originalPath") and item.get("path"):
+            item["originalPath"] = item.get("path")
+        if not item.get("path") and item.get("originalPath"):
+            item["path"] = item.get("originalPath")
+        if not item.get("filename"):
+            item["filename"] = Path(item.get("originalPath") or item.get("path") or "").name
+        key = deleted_file_artifact_key(item.get("originalPath", ""), item.get("filename", ""), item.get("timestamp", ""))
+        if not key.strip("|"):
+            return
+        if key in artifacts:
+            artifacts[key] = merge_deleted_file_artifact(artifacts[key], item)
+        else:
+            artifacts[key] = item
+
+    for item in exported_artifacts or []:
+        add(dict(item))
+    for item in recovery_artifacts:
+        path = item.get("path", "")
+        if path:
+            add({
+                "filename": Path(path).name,
+                "originalPath": path,
+                "path": path,
+                "deletionTimestamp": item.get("timestamp", ""),
+                "timestamp": item.get("timestamp", ""),
+                "source": item.get("source", "Recovery"),
+                "sources": [item.get("source", "Recovery")],
+                "confidence": "Possible",
+                "metadata": item,
+            })
+    for event in usn_events:
+        reason = str(event.get("reason", ""))
+        event_type = str(event.get("eventType", ""))
+        if "delete" not in f"{reason} {event_type}".lower():
+            continue
+        path = event.get("path") or event.get("fileName") or ""
+        add({
+            "filename": event.get("fileName") or Path(path).name,
+            "originalPath": path,
+            "path": path,
+            "deletionTimestamp": event.get("timestamp", ""),
+            "timestamp": event.get("timestamp", ""),
+            "usn": event.get("usn", ""),
+            "usnReason": reason or event_type,
+            "mftRecordNumber": event.get("fileId", ""),
+            "source": "USN Journal",
+            "sources": ["USN Journal"],
+            "confidence": "Possible",
+            "metadata": event,
+        })
+    for finding in findings:
+        timestamp = finding.get("first_seen", "")
+        for evidence in finding.get("supporting_evidence", []):
+            text = str(evidence)
+            if text.startswith("DELETED FILE:"):
+                path = text.split(":", 1)[1].strip()
+                add({
+                    "filename": Path(path).name,
+                    "originalPath": path,
+                    "path": finding.get("path") or path,
+                    "deletionTimestamp": timestamp,
+                    "timestamp": timestamp,
+                    "source": finding.get("artifact_source", "Finding evidence"),
+                    "sources": [finding.get("artifact_source", "Finding evidence")],
+                    "confidence": finding.get("confidence_level") or confidence_for_classification(finding.get("classification", "Indicator Found")),
+                    "metadata": {"supportingEvidence": finding.get("supporting_evidence", [])},
+                })
+    for event in timeline:
+        text = str(event.get("text", ""))
+        if text.startswith("DELETED FILE:"):
+            path = text.split(":", 1)[1].strip()
+            add({
+                "filename": Path(path).name,
+                "originalPath": path,
+                "path": path,
+                "deletionTimestamp": event.get("time", ""),
+                "timestamp": event.get("time", ""),
+                "source": event.get("source", "Timeline"),
+                "sources": [event.get("source", "Timeline")],
+                "confidence": event.get("confidence", "Possible"),
+                "metadata": event,
+            })
+    results = list(artifacts.values())
+    for item in results:
+        parsed = parse_dt(item.get("deletionTimestamp") or item.get("timestamp"))
+        item["recent"] = bool(parsed and (dt.datetime.now() - parsed) <= dt.timedelta(days=7))
+    return sorted(results, key=lambda item: parse_dt(item.get("deletionTimestamp") or item.get("timestamp")) or dt.datetime.min, reverse=True)
+
+
 def collect_external_forensic_exports(days: int, config: dict, sessions: list[dict]) -> tuple[list[dict], list[dict]]:
     # Optional CSV exports from common forensic tools give Securo stronger artifact coverage without slow full-disk brute force.
     findings = {}
@@ -5468,6 +5704,8 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         quality["USN Journal status"] = str(usn_status.get("error"))[:240]
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
+    exported_deleted_artifacts = collect_deleted_file_artifacts_from_exports(days, config)
+    deleted_file_artifacts = deleted_file_artifacts_from_report_parts(findings, timeline, recovery_artifacts, usn_events, exported_deleted_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -5495,6 +5733,7 @@ def build_scan_report(days: int, config: dict, verbose=False) -> dict:
         "evidenceSources": quality,
         "timeline": timeline,
         "keyArtifacts": key_artifacts,
+        "deletedFileArtifacts": deleted_file_artifacts,
         "sessions": [camel_session(s) for s in sessions_raw],
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
@@ -5841,6 +6080,8 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         quality["USN Journal status"] = str(usn_status.get("error"))[:240]
     timeline = annotate_timeline_confidence(filter_customer_timeline(dedupe_timeline(raw_timeline), config), findings)
     key_artifacts = key_artifacts_from_report_parts(findings, timeline, recovery_artifacts)
+    exported_deleted_artifacts = collect_deleted_file_artifacts_from_exports(days, config)
+    deleted_file_artifacts = deleted_file_artifacts_from_report_parts(findings, timeline, recovery_artifacts, usn_events, exported_deleted_artifacts)
     partial = {"findings": findings, "evidence_quality": quality}
     highest_result = determine_overall_category(partial)
     top_score = max([f.get("score", 0) for f in findings], default=0)
@@ -5869,6 +6110,7 @@ def build_scan_report_with_progress(days: int, config: dict, progress) -> dict:
         "evidenceSources": quality,
         "timeline": timeline,
         "keyArtifacts": key_artifacts,
+        "deletedFileArtifacts": deleted_file_artifacts,
         "sessions": [camel_session(s) for s in sessions_raw],
         "robloxLogs": roblox_logs_for_report(sessions_raw),
         "detectedFastFlags": fastflags_for_report(sessions_raw),
@@ -6699,13 +6941,14 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
     # Vercel rejects large function payloads before the API route can store them.
     # Keep the website report useful, but reserve the complete report for local files.
     size_profiles = [
-        {"timeline": 700, "keyArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "defenderExclusions": 80, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "usnEvents": 1200, "shellbags": 800, "rawRoblox": False},
-        {"timeline": 350, "keyArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "defenderExclusions": 60, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "usnEvents": 600, "shellbags": 400, "rawRoblox": False},
-        {"timeline": 150, "keyArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "defenderExclusions": 40, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "usnEvents": 250, "shellbags": 180, "rawRoblox": False},
+        {"timeline": 700, "keyArtifacts": 500, "deletedFileArtifacts": 500, "sessions": 120, "findings": 350, "detectLogs": 350, "warningLogs": 120, "recoveryArtifacts": 120, "antivirusLogs": 160, "defenderExclusions": 80, "engineResults": 300, "rawArtifacts": 80, "robloxLogs": 80, "fastFlags": 800, "usnEvents": 1200, "shellbags": 800, "rawRoblox": False},
+        {"timeline": 350, "keyArtifacts": 250, "deletedFileArtifacts": 250, "sessions": 80, "findings": 180, "detectLogs": 180, "warningLogs": 80, "recoveryArtifacts": 80, "antivirusLogs": 100, "defenderExclusions": 60, "engineResults": 150, "rawArtifacts": 40, "robloxLogs": 40, "fastFlags": 500, "usnEvents": 600, "shellbags": 400, "rawRoblox": False},
+        {"timeline": 150, "keyArtifacts": 120, "deletedFileArtifacts": 120, "sessions": 40, "findings": 80, "detectLogs": 80, "warningLogs": 40, "recoveryArtifacts": 40, "antivirusLogs": 60, "defenderExclusions": 40, "engineResults": 80, "rawArtifacts": 20, "robloxLogs": 20, "fastFlags": 250, "usnEvents": 250, "shellbags": 180, "rawRoblox": False},
     ]
     for profile in size_profiles:
         compacted["timeline"] = list(report.get("timeline", []))[-profile["timeline"]:]
         compacted["keyArtifacts"] = list(report.get("keyArtifacts", []))[:profile["keyArtifacts"]]
+        compacted["deletedFileArtifacts"] = list(report.get("deletedFileArtifacts", []))[:profile["deletedFileArtifacts"]]
         compacted["sessions"] = compact_sessions_for_upload(list(report.get("sessions", [])), profile["sessions"])
         compacted["findings"] = select_upload_findings(report.get("findings", []), limit=profile["findings"])
         compacted["detectLogs"] = list(report.get("detectLogs", []))[:profile["detectLogs"]]
@@ -6731,6 +6974,7 @@ def compact_report_for_upload(report: dict, max_bytes: int = 900_000) -> dict:
 
     compacted["timeline"] = list(report.get("timeline", []))[-80:]
     compacted["keyArtifacts"] = list(report.get("keyArtifacts", []))[:80]
+    compacted["deletedFileArtifacts"] = list(report.get("deletedFileArtifacts", []))[:80]
     compacted["sessions"] = compact_sessions_for_upload(list(report.get("sessions", [])), 20)
     compacted["findings"] = select_upload_findings(report.get("findings", []), limit=40)
     compacted["detectLogs"] = list(report.get("detectLogs", []))[:40]
