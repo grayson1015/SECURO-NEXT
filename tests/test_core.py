@@ -1992,6 +1992,24 @@ InstallDate    REG_DWORD    0x60764fa0
             checker.run_command = original_run
         self.assertIn("budget exhausted", out)
 
+    def test_persistence_collection_handles_missing_fields(self):
+        original_run = checker.run_command
+        try:
+            def fake_run(args, timeout=20):
+                if args[:2] == ["schtasks", "/query"]:
+                    return '"TaskName","Task To Run"\n"\\UnitTask","C:\\Users\\Example\\Downloads\\loader.exe"\n'
+                if args and args[0] == "wmic":
+                    return "Node,Name,PathName,StartMode\nUNIT,BadSvc,C:\\Users\\Example\\Downloads\\executor.exe,Auto\n"
+                return ""
+
+            checker.run_command = fake_run
+            findings, timeline = checker.collect_persistence(7, test_config(), [])
+        finally:
+            checker.run_command = original_run
+        self.assertTrue(findings)
+        self.assertTrue(timeline)
+        self.assertTrue(all(isinstance(item.get("text"), str) for item in timeline))
+
     def test_deleted_file_artifacts_merge_mft_and_shortcut_sources(self):
         exported = [{
             "filename": "tool.exe",

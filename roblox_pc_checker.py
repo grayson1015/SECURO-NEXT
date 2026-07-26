@@ -4941,6 +4941,8 @@ def collect_persistence(days: int, config: dict, sessions: list[dict]) -> tuple[
     findings = {}
     timeline = []
     checks = []
+    def clean(value) -> str:
+        return "" if value is None else str(value)
     run_keys = [
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
         r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce",
@@ -4973,7 +4975,11 @@ def collect_persistence(days: int, config: dict, sessions: list[dict]) -> tuple[
     for line in wmi.splitlines():
         checks.append(("WMI persistence", "", line))
     for source, location, text in checks:
-        if not (suspicious_text(text, config) or user_writable_path(text) or ioc_text_matches(" ".join([source, location, text]), config)):
+        source = clean(source)
+        location = clean(location)
+        text = clean(text)
+        combined = " ".join([source, location, text])
+        if not (suspicious_text(text, config) or user_writable_path(text) or ioc_text_matches(combined, config)):
             continue
         paths = re.findall(r"[A-Za-z]:\\[^\"<>|]+?\.(?:exe|dll|ps1|bat|cmd|vbs|js)", text, re.I)
         path = paths[0] if paths else location
@@ -4982,7 +4988,7 @@ def collect_persistence(days: int, config: dict, sessions: list[dict]) -> tuple[
         add_score(finding, config["score_rules"]["persistence"], f"Suspicious persistence entry: {source}")
         finding["supporting_evidence"].append(text[:800])
         finding["evidence_types"].append("persistence")
-        apply_ioc_matches(finding, config, " ".join([source, location, text]))
+        apply_ioc_matches(finding, config, combined)
         merge_findings(findings, finding)
         timeline.append({"time": finding["first_seen"], "source": source, "text": f"Suspicious persistence entry: {text[:160]}"})
     return list(findings.values()), timeline
