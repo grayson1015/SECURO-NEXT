@@ -200,6 +200,16 @@ export type SecuroFinding = {
 export type SecuroReportJson = {
   scanTime: string;
   hostname: string;
+  platform?: "windows" | "macos" | string;
+  platformVersion?: string;
+  scannerVersion?: string;
+  scanProfile?: string;
+  systemContext?: {
+    productName?: string;
+    productVersion?: string;
+    buildVersion?: string;
+    architecture?: string;
+  };
   highestResult: string;
   confidence: string;
   evidenceSources: Record<string, boolean | string | number | null>;
@@ -231,6 +241,16 @@ export type SecuroReportJson = {
   defenderExclusions?: DefenderExclusion[];
   findings: SecuroFinding[];
   limitations: string[];
+  _summary?: {
+    findingCount?: number | null;
+    confirmedCount?: number | null;
+    likelyCount?: number | null;
+    possibleCount?: number | null;
+    sessionCount?: number | null;
+    robloxLogCount?: number | null;
+    summaryOnly?: boolean;
+    compactedForDashboard?: boolean;
+  };
   [key: string]: unknown;
 };
 

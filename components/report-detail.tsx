@@ -14,6 +14,8 @@ import { AnimatedBackground, Reveal, Stagger, StaggerItem } from "@/components/m
 export function ReportDetail({ report }: { report: ReportRow }) {
   const currentReport = report;
   const data = currentReport.report_json;
+  const platform = reportPlatform(data);
+  const isMac = platform === "macos";
   const primary = data.sessions[0] || {};
   const visibleFindings = useMemo(() => data.findings.filter((finding) => !isSecuroSuppressedFinding(finding)), [data.findings]);
   const detectionFindings = useMemo(
@@ -99,7 +101,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           <Link className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-primary" href="/dashboard">
             <ArrowLeft size={16} /> Dashboard
           </Link>
-          <Button onClick={exportHtml}><Download size={16} />Export HTML</Button>
+          <div className="flex items-center gap-3">
+            <Badge label={isMac ? "macOS" : "Windows"} />
+            <Button onClick={exportHtml}><Download size={16} />Export HTML</Button>
+          </div>
         </Reveal>
 
         <Stagger className="grid gap-4 md:grid-cols-4">
@@ -147,6 +152,10 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           </Card>
 
           <div className="space-y-4">
+            {isMac ? (
+              <MacEvidenceSidebar data={data} />
+            ) : (
+              <>
             <Card>
               <h2 className="text-lg font-semibold">Factory Reset Information</h2>
               <p className="mt-1 text-xs text-zinc-500">Install records may represent a reset, reinstall, or major Windows upgrade.</p>
@@ -223,9 +232,13 @@ export function ReportDetail({ report }: { report: ReportRow }) {
                 ))}
               </div>
             </Card>
+              </>
+            )}
           </div>
         </section>
 
+        {!isMac ? (
+        <>
         <Card className="mt-5">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
             <div>
@@ -367,7 +380,6 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             {!filteredShellBags.length ? <p className="text-sm text-zinc-500">No SBECmd ShellBag artifacts were included in this report.</p> : null}
           </div>
         </Card>
-
         <Card className="mt-5">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
             <div>
@@ -412,6 +424,8 @@ export function ReportDetail({ report }: { report: ReportRow }) {
             {usnEvents.length > 120 ? <p className="text-xs text-zinc-500">Showing first 120 of {usnEvents.length}. Full list is in Detailed Evidence / Raw report data.</p> : null}
           </div>
         </Card>
+        </>
+        ) : null}
 
         <Card className="mt-5">
           <h2 className="mb-4 text-lg font-semibold">Findings</h2>
@@ -596,6 +610,64 @@ export function ReportDetail({ report }: { report: ReportRow }) {
       </div>
     </main>
   );
+}
+
+function MacEvidenceSidebar({ data }: { data: ReportRow["report_json"] }) {
+  const context = data.systemContext || {};
+  const sources = Object.entries(data.evidenceSources || {});
+  const available = sources.filter(([, value]) => value === true || (typeof value === "number" && value > 0));
+
+  return (
+    <>
+      <Card>
+        <h2 className="text-lg font-semibold">macOS System</h2>
+        <div className="mt-3 space-y-2 text-sm">
+          <div><span className="text-zinc-500">Product:</span> {context.productName || "macOS"}</div>
+          <div><span className="text-zinc-500">Version:</span> {context.productVersion || data.platformVersion || "Unavailable"}</div>
+          <div><span className="text-zinc-500">Build:</span> {context.buildVersion || "Unavailable"}</div>
+          <div><span className="text-zinc-500">Architecture:</span> {context.architecture || "Unavailable"}</div>
+          <div><span className="text-zinc-500">Scanner:</span> {data.scannerVersion || "Mac alpha"}</div>
+          <div><span className="text-zinc-500">Profile:</span> {data.scanProfile || "Unknown"}</div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Mac Evidence Coverage</h2>
+            <p className="mt-1 text-xs text-zinc-500">Permission-aware macOS and Roblox sources checked by this scan.</p>
+          </div>
+          <span className="text-sm text-primary">{available.length}/{sources.length}</span>
+        </div>
+        <div className="mt-3 space-y-2">
+          {sources.map(([source, value]) => (
+            <div key={source} className="flex items-start justify-between gap-3 rounded-md border border-border bg-black/20 p-3 text-xs">
+              <span className="min-w-0 break-words text-zinc-300 [overflow-wrap:anywhere]">{source}</span>
+              <span className={value === true || (typeof value === "number" && value > 0) ? "text-primary" : "text-zinc-500"}>
+                {formatEvidenceValue(value)}
+              </span>
+            </div>
+          ))}
+          {!sources.length ? <p className="text-sm text-zinc-500">No Mac evidence coverage data was included.</p> : null}
+        </div>
+      </Card>
+
+      <Card>
+        <h2 className="text-lg font-semibold">Mac Coverage Limits</h2>
+        <div className="mt-3 space-y-2 text-xs text-zinc-400">
+          {(data.limitations || []).slice(0, 8).map((limitation, index) => (
+            <div key={`${limitation}-${index}`} className="rounded-md border border-border bg-black/20 p-3">{limitation}</div>
+          ))}
+          {!data.limitations?.length ? <p>No collector limitations were reported.</p> : null}
+        </div>
+      </Card>
+    </>
+  );
+}
+
+function reportPlatform(data: ReportRow["report_json"]): "windows" | "macos" {
+  const value = String(data.platform || "").toLowerCase();
+  return value === "macos" || value === "mac" || value === "darwin" ? "macos" : "windows";
 }
 
 function Summary({ label, value }: { label: string; value: string }) {
@@ -972,6 +1044,8 @@ function reportEvidenceGroups(data: ReportRow["report_json"]): EvidenceGroup[] {
 
 function buildExportHtml(report: ReportRow) {
   const data = report.report_json;
+  const platform = reportPlatform(data);
+  const isMac = platform === "macos";
   const visibleFindings = data.findings.filter((finding) => !isSecuroSuppressedFinding(finding));
   const evidenceGroups = reportEvidenceGroups(data);
   const forensicSummary = buildForensicSummary(data);
@@ -1068,6 +1142,16 @@ function buildExportHtml(report: ReportRow) {
   `);
   const prefetchPreviewRows = prefetchArtifacts.slice(0, 6).map(prefetchRow).join("");
   const prefetchAllRows = prefetchArtifacts.map(prefetchRow).join("");
+  const macContext = data.systemContext || {};
+  const macEvidenceRows = Object.entries(data.evidenceSources || {}).map(([source, value]) =>
+    `<div class="report-entry"><b>${escape(source)}</b><span style="float:right">${escape(formatEvidenceValue(value))}</span></div>`
+  ).join("");
+  const sidePanel = isMac
+    ? `<section><h2>macOS System</h2><p>Version: ${escape(macContext.productVersion || data.platformVersion || "Unavailable")}</p><p>Build: ${escape(macContext.buildVersion || "Unavailable")}</p><p>Architecture: ${escape(macContext.architecture || "Unavailable")}</p><p>Scanner: ${escape(data.scannerVersion || "Mac alpha")}</p><p>Profile: ${escape(data.scanProfile || "Unknown")}</p></section><section><h2>Mac Evidence Coverage</h2>${macEvidenceRows || "<p>No coverage data included.</p>"}</section><section><h2>Mac Coverage Limits</h2>${(data.limitations || []).map((item) => `<p>${escape(item)}</p>`).join("") || "<p>No limitations reported.</p>"}</section>`
+    : `<section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section><section><h2>Forensic Artifacts</h2><p>Compact parser evidence counts. Detailed sections are shown below.</p><div class="mini-grid">${forensicCards}</div></section>`;
+  const platformArtifactSections = isMac ? "" : `
+    <section><h2>Prefetch Artifacts</h2><p>Execution-history Prefetch entries collected by Securo and parser exports. These are review signals unless paired with stronger evidence.</p>${prefetchPreviewRows || "<p>No Prefetch artifacts were included in this report.</p>"}${prefetchArtifacts.length > 6 ? `<details><summary>Show all ${prefetchArtifacts.length} Prefetch artifacts</summary>${prefetchAllRows}</details>` : ""}</section>
+    <section><h2>Deleted File Artifacts</h2><p>Merged deleted-file evidence from MFTECmd, JLECmd/LECmd, Recycle Bin, USN Journal, and recovery metadata when available.</p>${deletedFileRows || "<p>No deleted-file artifacts were found in this report.</p>"}</section>`;
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Securo Report</title>
     <style>
@@ -1092,10 +1176,9 @@ function buildExportHtml(report: ReportRow) {
     </style>
     </head><body>
     <h1>Securo Report</h1>
-    <section><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
-    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside><section><h2>Factory Reset Information</h2><p>Install records may represent a reset, reinstall, or major Windows upgrade.</p>${installHistory || resetHistory || "<p>No Windows installation records available.</p>"}</section><section><h2>Services</h2><p><b>${escape(sysMain.serviceName || "SysMain")}</b></p><p>Current State: ${escape(sysMain.currentState || "Unavailable")}</p><p>Startup Type: ${escape(sysMain.startupType || "Unavailable")}</p><p>Last Changed: ${escape(sysMain.lastChanged || "Could not determine")}</p></section><section><h2>Defender Exclusions</h2><p>Configured AV exclusions. Review entries can hide executor folders from Defender.</p>${defenderExclusionRows || "<p>No Defender exclusions were found or accessible.</p>"}</section><section><h2>Forensic Artifacts</h2><p>Compact parser evidence counts. Detailed sections are shown below.</p><div class="mini-grid">${forensicCards}</div></section></aside></div>
-    <section><h2>Prefetch Artifacts</h2><p>Execution-history Prefetch entries collected by Securo and parser exports. These are review signals unless paired with stronger evidence.</p>${prefetchPreviewRows || "<p>No Prefetch artifacts were included in this report.</p>"}${prefetchArtifacts.length > 6 ? `<details><summary>Show all ${prefetchArtifacts.length} Prefetch artifacts</summary>${prefetchAllRows}</details>` : ""}</section>
-    <section><h2>Deleted File Artifacts</h2><p>Merged deleted-file evidence from MFTECmd, JLECmd/LECmd, Recycle Bin, USN Journal, and recovery metadata when available.</p>${deletedFileRows || "<p>No deleted-file artifacts were found in this report.</p>"}</section>
+    <section><p>Platform: ${isMac ? "macOS" : "Windows"}</p><p>Host: ${escape(report.hostname)}</p><p>Risk: ${escape(report.risk_level)}</p><p>Score: ${report.evidence_score}</p><p>Scan: ${escape(data.scanTime)}</p></section>
+    <div class="timeline-reset-grid"><section><h2>Timeline</h2>${data.timeline.map((event) => entry(event.time, `<div class="timeline-entry"><time>${escape(formatDate(event.time))}</time><div class="timeline-message">${escape(event.text || "")}</div><small class="timeline-source">${escape(event.source || "")}</small></div>`)).join("") || "<p>No timeline entries.</p>"}</section><aside>${sidePanel}</aside></div>
+    ${platformArtifactSections}
     <section><h2>Roblox Account History</h2><p>${escape(accountContext.privacyNote || "Only non-secret Roblox account identifiers are collected.")}</p>${accounts || "<p>No Roblox account identifiers available.</p>"}</section>
     <section><h2>Detected FastFlags</h2>${fastFlags || "<p>No FastFlags detected.</p>"}</section>
     <section><h2>Show All Roblox Logs</h2>${robloxLogs || "<p>No raw Roblox logs captured.</p>"}</section>

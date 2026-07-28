@@ -535,17 +535,29 @@ as $$
     jsonb_build_object(
       'scanTime', r.scan_time::text,
       'hostname', r.hostname,
-      'highestResult', r.risk_level,
-      'confidence', '',
-      'evidenceSources', '{}'::jsonb,
+      'platform', coalesce(r.report_json -> 'platform', to_jsonb('windows'::text)),
+      'platformVersion', coalesce(r.report_json -> 'platformVersion', 'null'::jsonb),
+      'scannerVersion', coalesce(r.report_json -> 'scannerVersion', 'null'::jsonb),
+      'scanProfile', coalesce(r.report_json -> 'scanProfile', 'null'::jsonb),
+      'highestResult', coalesce(r.report_json -> 'highestResult', to_jsonb(r.risk_level)),
+      'confidence', coalesce(r.report_json -> 'confidence', to_jsonb(''::text)),
+      'evidenceSources', coalesce(r.report_json -> 'evidenceSources', '{}'::jsonb),
       'timeline', '[]'::jsonb,
-      'sessions', '[]'::jsonb,
+      'sessions', case
+        when jsonb_typeof(r.report_json -> 'sessions') = 'array'
+          and jsonb_array_length(r.report_json -> 'sessions') > 0
+        then jsonb_build_array((r.report_json -> 'sessions') -> 0)
+        else '[]'::jsonb
+      end,
       'findings', '[]'::jsonb,
       'limitations', '[]'::jsonb,
       '_summary', jsonb_build_object(
-        'findingCount', null,
-        'sessionCount', null,
-        'robloxLogCount', null,
+        'findingCount', case when jsonb_typeof(r.report_json -> 'findings') = 'array' then jsonb_array_length(r.report_json -> 'findings') else 0 end,
+        'confirmedCount', jsonb_array_length(jsonb_path_query_array(coalesce(r.report_json -> 'findings', '[]'::jsonb), '$[*] ? (@.confidenceLevel == "Confirmed" || @.classification == "Confirmed" || @.classification == "Confirmed Exploit")')),
+        'likelyCount', jsonb_array_length(jsonb_path_query_array(coalesce(r.report_json -> 'findings', '[]'::jsonb), '$[*] ? (@.confidenceLevel == "Likely" || @.classification == "Likely")')),
+        'possibleCount', jsonb_array_length(jsonb_path_query_array(coalesce(r.report_json -> 'findings', '[]'::jsonb), '$[*] ? (@.confidenceLevel == "Possible" || @.classification == "Possible")')),
+        'sessionCount', case when jsonb_typeof(r.report_json -> 'sessions') = 'array' then jsonb_array_length(r.report_json -> 'sessions') else 0 end,
+        'robloxLogCount', case when jsonb_typeof(r.report_json -> 'robloxLogs') = 'array' then jsonb_array_length(r.report_json -> 'robloxLogs') else 0 end,
         'summaryOnly', true
       )
     ) as report_json

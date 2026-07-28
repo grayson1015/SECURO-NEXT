@@ -14,6 +14,7 @@ import { AnimatedBackground, Reveal, Stagger, StaggerItem } from "@/components/m
 import { SecuroLogo } from "@/components/securo-logo";
 
 type TimeRange = "30d" | "14d" | "7d" | "3d";
+type PlatformFilter = "all" | "windows" | "macos";
 const timeRanges: { label: string; value: TimeRange; days: number }[] = [
   { label: "1 month", value: "30d", days: 30 },
   { label: "2 weeks", value: "14d", days: 14 },
@@ -32,6 +33,7 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
   const [loadError, setLoadError] = useState(initialLoadError);
   const [query, setQuery] = useState("");
   const [timeRange, setTimeRange] = useState<TimeRange>("30d");
+  const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortKey, setSortKey] = useState<"username" | "userId" | "placeId" | "risk" | "scanTime">("scanTime");
   const [createdPin, setCreatedPin] = useState<PinRow | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,17 +74,26 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
   }, []);
 
   const rangedReports = useMemo(() => filterReportsByTimeRange(reports, timeRange), [reports, timeRange]);
-  const filtered = useMemo(() => sortReports(filterReports(rangedReports, query), sortKey), [rangedReports, query, sortKey]);
-  const latest = rangedReports[0];
-  const confirmed = latest ? countFindings(latest.report_json, "Confirmed") : 0;
-  const likely = latest ? countFindings(latest.report_json, "Likely") : 0;
-  const possible = latest ? countFindings(latest.report_json, "Possible") : 0;
-  const sessions = latest?.report_json.sessions.length || 0;
+  const platformReports = useMemo(
+    () => rangedReports.filter((report) => platformFilter === "all" || reportPlatform(report) === platformFilter),
+    [rangedReports, platformFilter]
+  );
+  const filtered = useMemo(() => sortReports(filterReports(platformReports, query), sortKey), [platformReports, query, sortKey]);
+  const latest = platformReports[0];
+  const confirmed = latest ? summaryFindingCount(latest, "Confirmed") : 0;
+  const likely = latest ? summaryFindingCount(latest, "Likely") : 0;
+  const possible = latest ? summaryFindingCount(latest, "Possible") : 0;
+  const sessions = Number(latest?.report_json._summary?.sessionCount ?? latest?.report_json.sessions.length ?? 0);
   const coverage = latest ? coveragePercent(latest.report_json.evidenceSources) : 0;
   const packed = latest ? countDetectionCategory(latest.report_json, ["packed", "UPX", "VMProtect", "Themida"]) : 0;
   const dotnet = latest ? countDetectionCategory(latest.report_json, ["dotnet", "DotNet", "Suspicious Net File"]) : 0;
   const autoit = latest ? countDetectionCategory(latest.report_json, ["AutoIT", "AutoHotkey", "autohotkey"]) : 0;
   const tampered = latest ? countDetectionCategory(latest.report_json, ["Tampered File"]) : 0;
+  const latestPlatform = latest ? reportPlatform(latest) : "windows";
+  const macRobloxLogs = latest ? evidenceCount(latest, "Roblox Player logs records") : 0;
+  const macProcesses = latest ? evidenceCount(latest, "macOS running processes records") : 0;
+  const macPersistence = latest ? evidenceCount(latest, "macOS persistence records") : 0;
+  const macQuarantine = latest ? evidenceCount(latest, "macOS quarantine download records records") : 0;
 
   async function createPin() {
     setBusy(true);
@@ -117,7 +128,7 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
             <SecuroLogo size={42} />
             <div>
               <h1 className="text-2xl font-bold">Securo Dashboard</h1>
-              <p className="text-sm text-zinc-400">Roblox PC checks, PIN sessions, and evidence review</p>
+              <p className="text-sm text-zinc-400">Windows and macOS Roblox checks, PIN sessions, and evidence review</p>
             </div>
           </div>
           <div className="flex gap-2">
@@ -182,10 +193,21 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
           <StaggerItem><Stat icon={<ShieldAlert />} title="Possible Findings" value={String(possible)} /></StaggerItem>
         </Stagger>
         <section className="mt-4 grid gap-4 md:grid-cols-4">
-          <Stat icon={<ShieldAlert />} title="Packed Files" value={String(packed)} />
-          <Stat icon={<ShieldAlert />} title=".NET Detections" value={String(dotnet)} />
-          <Stat icon={<ShieldAlert />} title="AutoIT/AHK" value={String(autoit)} />
-          <Stat icon={<ShieldAlert />} title="Tampered Files" value={String(tampered)} />
+          {latestPlatform === "macos" ? (
+            <>
+              <Stat icon={<Activity />} title="Roblox Logs Checked" value={String(macRobloxLogs)} />
+              <Stat icon={<Monitor />} title="Processes Inspected" value={String(macProcesses)} />
+              <Stat icon={<ShieldAlert />} title="Persistence Entries" value={String(macPersistence)} />
+              <Stat icon={<ShieldAlert />} title="Quarantine Matches" value={String(macQuarantine)} />
+            </>
+          ) : (
+            <>
+              <Stat icon={<ShieldAlert />} title="Packed Files" value={String(packed)} />
+              <Stat icon={<ShieldAlert />} title=".NET Detections" value={String(dotnet)} />
+              <Stat icon={<ShieldAlert />} title="AutoIT/AHK" value={String(autoit)} />
+              <Stat icon={<ShieldAlert />} title="Tampered Files" value={String(tampered)} />
+            </>
+          )}
         </section>
 
         <section className="mt-5 grid gap-4 lg:grid-cols-[1fr_360px]">
@@ -196,6 +218,22 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
                 <p className="text-sm text-zinc-400">Realtime updates appear as soon as Securo uploads.</p>
               </div>
               <div className="flex flex-wrap items-center justify-end gap-3">
+                <div className="flex rounded-md border border-border bg-black/20 p-1">
+                  {([
+                    { label: "All", value: "all" },
+                    { label: "Windows", value: "windows" },
+                    { label: "macOS", value: "macos" }
+                  ] as const).map((platform) => (
+                    <button
+                      key={platform.value}
+                      className={`rounded px-3 py-1.5 text-xs font-semibold ${platformFilter === platform.value ? "bg-primary text-black" : "text-zinc-400 hover:text-white"}`}
+                      type="button"
+                      onClick={() => setPlatformFilter(platform.value)}
+                    >
+                      {platform.label}
+                    </button>
+                  ))}
+                </div>
                 <div className="flex rounded-md border border-border bg-black/20 p-1">
                   {timeRanges.map((range) => (
                     <button
@@ -223,6 +261,7 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
                     <SortTh label="Place ID" active={sortKey === "placeId"} onClick={() => setSortKey("placeId")} />
                     <th>Duration</th>
                     <th>Status</th>
+                    <th>Platform</th>
                     <th>Host</th>
                     <SortTh label="Risk" active={sortKey === "risk"} onClick={() => setSortKey("risk")} />
                     <th>Score</th>
@@ -242,20 +281,21 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
                             <td>{session.userId || ""}</td>
                             <td>{session.placeId || session.gameId || ""}</td>
                             <td>{session.duration || "unknown"}</td>
-                            <td>{session.status || "Clean"}</td>
+                            <td>{session.status || report.report_json.highestResult || "Limited evidence"}</td>
                           </>
                         );
                       })()}
+                      <td><Badge label={platformLabel(reportPlatform(report))} /></td>
                       <td className="py-3 font-medium">{report.hostname}</td>
                       <td><Badge label={report.risk_level} /></td>
                       <td>{report.evidence_score}</td>
                       <td>{formatDate(report.scan_time)}</td>
-                      <td>{report.report_json.findings.length}</td>
+                      <td>{Number(report.report_json._summary?.findingCount ?? report.report_json.findings.length)}</td>
                       <td className="text-right"><Link className="text-primary hover:underline" href={`/reports/${report.id}`}>Open</Link></td>
                     </tr>
                   ))}
                   {!filtered.length ? (
-                    <tr><td className="py-6 text-zinc-500" colSpan={11}>No reports found in this range. Try 1 month for older scans.</td></tr>
+                    <tr><td className="py-6 text-zinc-500" colSpan={12}>No reports found for this platform and time range. Try All or 1 month.</td></tr>
                   ) : null}
                 </tbody>
               </table>
@@ -266,9 +306,9 @@ export function Dashboard({ initialReports, initialPins, initialLoadError = "" }
             <Card>
               <CardTitle>Risk Section</CardTitle>
               <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-                <Risk label="High" value={rangedReports.filter((r) => r.risk_level === "High").length} />
-                <Risk label="Medium" value={rangedReports.filter((r) => r.risk_level === "Medium").length} />
-                <Risk label="Low" value={rangedReports.filter((r) => r.risk_level === "Low").length} />
+                <Risk label="High" value={platformReports.filter((r) => r.risk_level === "High").length} />
+                <Risk label="Medium" value={platformReports.filter((r) => r.risk_level === "Medium").length} />
+                <Risk label="Low" value={platformReports.filter((r) => r.risk_level === "Low").length} />
               </div>
             </Card>
             <Card>
@@ -343,6 +383,26 @@ function coveragePercent(sources: Record<string, unknown>) {
 
 function displayPin(pin: Partial<PinRow> & Record<string, unknown>) {
   return String(pin.pin_code || pin.pin || pin.pinCode || "Unknown");
+}
+
+function reportPlatform(report: ReportRow): "windows" | "macos" {
+  const value = String(report.report_json.platform || "").toLowerCase();
+  return value === "macos" || value === "mac" || value === "darwin" ? "macos" : "windows";
+}
+
+function platformLabel(platform: "windows" | "macos") {
+  return platform === "macos" ? "macOS" : "Windows";
+}
+
+function evidenceCount(report: ReportRow, key: string) {
+  const value = Number(report.report_json.evidenceSources?.[key] || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function summaryFindingCount(report: ReportRow, confidence: "Confirmed" | "Likely" | "Possible") {
+  const key = `${confidence.toLowerCase()}Count` as "confirmedCount" | "likelyCount" | "possibleCount";
+  const summarized = report.report_json._summary?.[key];
+  return summarized == null ? countFindings(report.report_json, confidence) : Number(summarized);
 }
 
 function profileLabel(profile: unknown) {
