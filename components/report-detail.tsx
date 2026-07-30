@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
-import { ArrowLeft, Download } from "lucide-react";
+import { ArrowLeft, ChevronDown, Download } from "lucide-react";
 import type { AccountIdentifier, DeletedFileArtifact, KeyArtifact, ReportRow, RobloxLogArtifact, SecuroFinding, SecuroSession } from "@/lib/types";
 import { countFindings } from "@/lib/report";
 import { formatDate } from "@/lib/utils";
@@ -37,6 +38,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
   const keyArtifacts = data.keyArtifacts || [];
   const prefetchArtifacts = useMemo(() => keyArtifacts.filter(isPrefetchArtifact), [keyArtifacts]);
   const [showAllPrefetch, setShowAllPrefetch] = useState(false);
+  const [expandedTile, setExpandedTile] = useState<string | null>(null);
   const [deletedSearch, setDeletedSearch] = useState("");
   const [deletedSort, setDeletedSort] = useState<"deletionTimestamp" | "filename" | "source" | "fileSize">("deletionTimestamp");
   const visiblePrefetchArtifacts = showAllPrefetch ? prefetchArtifacts : prefetchArtifacts.slice(0, 6);
@@ -81,6 +83,12 @@ export function ReportDetail({ report }: { report: ReportRow }) {
     [data.systemResetEvidence]
   );
   const filteredEvidence = extraEvidence;
+  const detailedEvidenceCount = filteredEvidence.reduce((total, group) => total + group.items.length, 0);
+  const accountCount = accountRows.length + discordRows.length;
+
+  const toggleTile = (tile: string) => {
+    setExpandedTile((current) => current === tile ? null : tile);
+  };
 
   function exportHtml() {
     const html = buildExportHtml(currentReport);
@@ -237,9 +245,18 @@ export function ReportDetail({ report }: { report: ReportRow }) {
           </div>
         </section>
 
+        <section aria-label="Report evidence categories" className="mt-5 grid items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {!isMac ? (
         <>
-        <Card className="mt-5">
+        <ReportTile
+          id="prefetch"
+          title="Prefetch artifacts"
+          count={prefetchArtifacts.length}
+          countLabel="entries"
+          description="Execution-history files collected from Windows Prefetch and parser exports."
+          expanded={expandedTile === "prefetch"}
+          onToggle={() => toggleTile("prefetch")}
+        >
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold">Prefetch Artifacts</h2>
@@ -273,9 +290,17 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               {showAllPrefetch ? `Showing all ${prefetchArtifacts.length} Prefetch artifacts.` : `Showing newest 6 of ${prefetchArtifacts.length}.`}
             </p>
           ) : null}
-        </Card>
+        </ReportTile>
 
-        <Card className="mt-5">
+        <ReportTile
+          id="deleted-files"
+          title="Deleted files"
+          count={deletedFileArtifacts.length}
+          countLabel="artifacts"
+          description="Merged deletion evidence from MFT, Recycle Bin, USN, and recovery metadata."
+          expanded={expandedTile === "deleted-files"}
+          onToggle={() => toggleTile("deleted-files")}
+        >
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold">Deleted File Artifacts</h2>
@@ -315,600 +340,7 @@ export function ReportDetail({ report }: { report: ReportRow }) {
               <tbody>
                 {filteredDeletedFileArtifacts.map((item, index) => (
                   <tr key={`${item.originalPath}-${item.deletionTimestamp}-${index}`} className={item.recent ? "bg-yellow-500/5" : ""}>
-                    <td colSpan={5} className="border-b border-border p-0">
-                      <details className="group">
-                        <summary className="grid cursor-pointer grid-cols-[minmax(180px,1.4fr)_160px_130px_160px_90px] gap-3 px-3 py-3 text-zinc-200 marker:text-primary">
-                          <span className="min-w-0">
-                            <span className="block break-words font-semibold [overflow-wrap:anywhere]">{item.filename || "Deleted file"}</span>
-                            <span className="mt-1 block break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">{item.originalPath || item.path || "Original path unavailable"}</span>
-                            {item.recent ? <span className="mt-1 inline-flex rounded-full border border-yellow-500/40 px-2 py-0.5 text-xs text-yellow-200">Recent</span> : null}
-                          </span>
-                          <span className="text-zinc-400">{formatDate(item.deletionTimestamp || item.timestamp)}</span>
-                          <span className="text-zinc-400">{formatDeletedSources(item)}</span>
-                          <span className="break-words text-zinc-400 [overflow-wrap:anywhere]">{item.usnReason || "Unavailable"}</span>
-                          <span className="text-zinc-400">{formatFileSize(item.fileSize)}</span>
-                        </summary>
-                        <div className="grid gap-2 border-t border-border bg-black/20 p-3 text-xs text-zinc-400 md:grid-cols-2">
-                          <div>Filename: {item.filename || "Unavailable"}</div>
-                          <div>Deleted: {formatDate(item.deletionTimestamp || item.timestamp)}</div>
-                          <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Original path: {item.originalPath || item.path || "Unavailable"}</div>
-                          <div>MFT record: {item.mftRecordNumber || "Unavailable"}</div>
-                          <div>USN: {item.usn || "Unavailable"}</div>
-                          <div>USN reason: {item.usnReason || "Unavailable"}</div>
-                          <div>File size: {formatFileSize(item.fileSize)}</div>
-                          <div>Created: {formatDate(item.created)}</div>
-                          <div>Modified: {formatDate(item.modified)}</div>
-                          <div>Accessed: {formatDate(item.accessed)}</div>
-                          <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Source export: {item.sourceExport || "Unavailable"}</div>
-                          {item.metadata ? (
-                            <pre className="max-h-72 overflow-auto rounded-md bg-black/30 p-3 text-xs text-zinc-400 md:col-span-2">{JSON.stringify(item.metadata, null, 2)}</pre>
-                          ) : null}
-                        </div>
-                      </details>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {!deletedFileArtifacts.length ? <p className="text-sm text-zinc-500">No deleted-file artifacts were found in this report.</p> : null}
-          {deletedFileArtifacts.length > 0 && !filteredDeletedFileArtifacts.length ? <p className="text-sm text-zinc-500">No deleted-file artifacts match this search.</p> : null}
-        </Card>
-
-        <Card className="mt-5">
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">ShellBag Analyzer</h2>
-              <p className="mt-1 text-sm text-zinc-400">Read-only folder history recovered by SBECmd. These traces are context, not proof of execution.</p>
-            </div>
-            <span className="text-sm text-primary">{filteredShellBags.length} artifacts</span>
-          </div>
-          <div className="space-y-2">
-            {filteredShellBags.map((item, index) => (
-              <details key={`${item.path}-${item.timestamp}-${index}`} className="rounded-md border border-border bg-black/20 p-3">
-                <summary className="cursor-pointer text-sm font-medium text-zinc-200">
-                  {item.classification || "ShellBag Folder Trace"}: {item.path || "Path unavailable"}
-                </summary>
-                <div className="mt-3 grid gap-2 text-xs text-zinc-400 md:grid-cols-2">
-                  <div>Time: {item.timestamp ? formatDate(item.timestamp) : "Unavailable"}</div>
-                  <div>Shell type: {item.shellType || "Unknown"}</div>
-                  <div>Source hive: {item.sourceHive || "Unknown"}</div>
-                  <div>Slot / MRU: {item.slot || "-"} / {item.mruPosition || "-"}</div>
-                </div>
-              </details>
-            ))}
-            {!filteredShellBags.length ? <p className="text-sm text-zinc-500">No SBECmd ShellBag artifacts were included in this report.</p> : null}
-          </div>
-        </Card>
-        <Card className="mt-5">
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">USN Journal Events</h2>
-              <p className="mt-1 text-sm text-zinc-400">Recent bounded NTFS create, delete, rename, and modify records. These are context, not proof of cheating by themselves.</p>
-            </div>
-            <span className="text-sm text-primary">{usnEvents.length} events</span>
-          </div>
-          <div className="mb-4 grid gap-3 text-xs md:grid-cols-3">
-            <div className="rounded-md border border-border bg-black/20 p-3">
-              <div className="text-zinc-500">Journal available</div>
-              <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(usnAvailable)}</div>
-            </div>
-            <div className="rounded-md border border-border bg-black/20 p-3">
-              <div className="text-zinc-500">Journal readable</div>
-              <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(usnReadable)}</div>
-            </div>
-            <div className="rounded-md border border-border bg-black/20 p-3">
-              <div className="text-zinc-500">Records collected</div>
-              <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(usnCollected ?? usnEvents.length)}</div>
-            </div>
-          </div>
-          <div className="space-y-2">
-            {usnEvents.slice(0, 120).map((item, index) => (
-              <details key={`${item.usn}-${item.path}-${index}`} className="rounded-md border border-border bg-black/20 p-3">
-                <summary className="cursor-pointer text-sm font-medium text-zinc-200">
-                  USN {item.eventType || "Changed"}: {item.fileName || item.path || "File unavailable"}
-                </summary>
-                <div className="mt-3 grid gap-2 text-xs text-zinc-400 md:grid-cols-2">
-                  <div>Time: {item.timestamp ? formatDate(item.timestamp) : "Unavailable"}</div>
-                  <div>Volume: {item.volume || "Unknown"}</div>
-                  <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Path: {item.path || "Unavailable"}</div>
-                  <div className="min-w-0 break-words [overflow-wrap:anywhere] md:col-span-2">Reason: {item.reason || "Unavailable"}</div>
-                  <div>USN: {item.usn || "Unavailable"}</div>
-                  <div>Parent ID: {item.parentFileId || "Unavailable"}</div>
-                </div>
-              </details>
-            ))}
-            {!usnEvents.length ? <p className="text-sm text-zinc-500">No USN Change Journal events were included in this report. If available/readable is false, Windows denied access or the journal was unavailable. If readable is true with 0 suspicious timeline entries, the journal had no suspicious matches.</p> : null}
-            {usnStatus.error ? <p className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-100">USN status: {usnStatus.error}</p> : null}
-            {usnStatus.readCommand ? <p className="text-xs text-zinc-500">Read command: {usnStatus.readCommand}</p> : null}
-            {usnEvents.length > 120 ? <p className="text-xs text-zinc-500">Showing first 120 of {usnEvents.length}. Full list is in Detailed Evidence / Raw report data.</p> : null}
-          </div>
-        </Card>
-        </>
-        ) : null}
-
-        <Card className="mt-5">
-          <h2 className="mb-4 text-lg font-semibold">Findings</h2>
-          <div className="mb-4 space-y-3">
-            {filteredDetections.map((finding, index) => (
-              <div key={`${finding.name}-warning-${index}`} className="rounded-md border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-100">
-                <h3 className="font-semibold text-red-200">{(finding.detections || [])[0]?.category || (finding.detectionCategories || [])[0] || "Detection"} detected</h3>
-                <div>File: {finding.name || "Unknown"}</div>
-                <div>Path: {finding.path || ""}</div>
-                <div>SHA256: {finding.sha256 || ""}</div>
-                <div>First seen: {finding.firstSeen || ""}</div>
-                <div>Reason: {(finding.detections || [])[0]?.reason || finding.supportingEvidence?.[0] || ""}</div>
-              </div>
-            ))}
-          </div>
-          <div className="overflow-x-auto">
-            {(["Confirmed", "Likely", "Possible"] as const).map((group) => (
-              <section key={group} className="mb-5">
-                <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">{group} Findings</h3>
-                <div className="space-y-3">
-                  {groupedFindings[group].map((finding, index) => (
-                    <div key={`${group}-${finding.name}-${index}`} className={`rounded-md border p-4 text-sm ${confidenceClasses(group)}`}>
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="font-semibold">{finding.name || "Finding"}</div>
-                        <div className="rounded-full border border-current/30 px-2 py-0.5 text-xs">{group}</div>
-                      </div>
-                      <div className="mt-2 text-zinc-300">Class: {finding.classification || finding.category || "Unknown"}</div>
-                      <div className="text-zinc-300">Score: {Number(finding.score || 0)}</div>
-                      <div className="mt-2 min-w-0 break-words text-zinc-400 [overflow-wrap:anywhere]">{finding.path || ""}</div>
-                    </div>
-                  ))}
-                  {!groupedFindings[group].length ? <p className="text-sm text-zinc-500">None.</p> : null}
-                </div>
-              </section>
-            ))}
-          </div>
-        </Card>
-
-        <Card className="mt-5">
-          <h2 className="mb-2 text-lg font-semibold">Account History</h2>
-          <p className="mb-4 text-sm text-zinc-400">
-            {accountContext.privacyNote || "Only non-secret account identifiers are collected. Tokens, cookies, messages, and credentials are excluded."}
-          </p>
-          {accountContext.discordStatus ? (
-            <div className="mb-4 grid gap-3 text-xs md:grid-cols-4">
-              <div className="rounded-md border border-border bg-black/20 p-3">
-                <div className="text-zinc-500">Discord log files found</div>
-                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.logFilesFound)}</div>
-              </div>
-              <div className="rounded-md border border-border bg-black/20 p-3">
-                <div className="text-zinc-500">Discord log files scanned</div>
-                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.logFilesScanned)}</div>
-              </div>
-              <div className="rounded-md border border-border bg-black/20 p-3">
-                <div className="text-zinc-500">Candidate IDs found</div>
-                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.candidateIdsFound)}</div>
-              </div>
-              <div className="rounded-md border border-border bg-black/20 p-3">
-                <div className="text-zinc-500">Bytes read</div>
-                <div className="mt-1 font-semibold text-zinc-200">{formatEvidenceValue(accountContext.discordStatus.bytesRead)}</div>
-              </div>
-            </div>
-          ) : null}
-          <AccountGroup
-            title="Played Accounts"
-            description="Accounts tied to Roblox session, join, place, or teleport evidence in the available logs."
-            accounts={accountGroups.played}
-            tone="played"
-            idLabel="Roblox User ID"
-          />
-          <AccountGroup
-            title="Historical Account IDs Found"
-            description="IDs found in Roblox logs or metadata, but not enough evidence to say this scan proved active play."
-            accounts={accountGroups.historical}
-            tone="historical"
-            idLabel="Roblox User ID"
-          />
-          <AccountGroup
-            title="Weak/Old Account Artifacts"
-            description="Old crash or residue-only account artifacts. These are context only and should not be treated as proof of play."
-            accounts={accountGroups.weak}
-            tone="weak"
-            idLabel="Roblox User ID"
-          />
-          <AccountGroup
-            title="Discord Account Evidence"
-            description="Safe Discord log identifier evidence only. Tokens, cookies, Local Storage, IndexedDB, Session Storage, cache, DMs, private messages, friend lists, and server lists are excluded."
-            accounts={discordRows}
-            tone="historical"
-            idLabel="Discord User ID"
-          />
-        </Card>
-
-        <Card className="mt-5">
-          <h2 className="mb-2 text-lg font-semibold">Detected FastFlags</h2>
-          <p className="mb-4 text-sm text-zinc-400">FastFlags are grouped with the Roblox log where they were detected.</p>
-          <div className="space-y-2">
-            {filteredFastFlags.map((flag, index) => (
-              <div key={`${flag.name}-${flag.sourceLog}-${index}`} className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-3 text-sm text-yellow-100">
-                <div className="font-semibold">{flag.name || "FastFlag"}{flag.value ? ` = ${flag.value}` : ""}</div>
-                <div className="mt-1 text-yellow-100/80">Timestamp: {formatDate(flag.timestamp)}</div>
-                <div className="min-w-0 break-words text-yellow-100/80 [overflow-wrap:anywhere]">Source: {flag.sourceLog || "Roblox log"}</div>
-                <div className="text-yellow-100/80">Place: {flag.placeId || ""} Job: {flag.jobId || ""}</div>
-                {flag.line ? <div className="mt-2 min-w-0 break-words text-yellow-100/80 [overflow-wrap:anywhere]">{flag.line}</div> : null}
-              </div>
-            ))}
-            {!filteredFastFlags.length ? <p className="text-sm text-zinc-500">No FastFlags were detected in this report.</p> : null}
-          </div>
-        </Card>
-
-        <Card className="mt-5">
-          <h2 className="mb-2 text-lg font-semibold">Show All Roblox Logs</h2>
-          <p className="mb-4 text-sm text-zinc-400">Expand each captured Roblox log to inspect extracted events, FastFlags, and the raw log text.</p>
-          <div className="space-y-3">
-            {filteredRobloxLogs.map((log, index) => (
-              <details key={`${log.logFile}-${index}`} className="rounded-md border border-border bg-black/20 p-3">
-                <summary className="cursor-pointer font-semibold">
-                  {log.logFile?.split(/[\\/]/).pop() || "Roblox log"} · {formatDate(log.startTime || log.modifiedTime)}
-                </summary>
-                <div className="mt-3 grid gap-2 text-sm text-zinc-400 md:grid-cols-3">
-                  <div>Username: {log.username || "Unknown"}</div>
-                  <div>User ID: {log.userId || ""}</div>
-                  <div>Place ID: {log.placeId || ""}</div>
-                  <div>Job ID: {log.jobId || ""}</div>
-                  <div>Duration: {log.duration || "unknown"}</div>
-                  <div>Version: {log.version || ""}</div>
-                </div>
-                <h3 className="mt-4 text-sm font-semibold text-zinc-200">FastFlags in this log</h3>
-                <div className="mt-2 space-y-2">
-                  {(log.fastFlags || []).map((flag, flagIndex) => (
-                    <div key={`${flag.name}-${flagIndex}`} className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-100">
-                      <div className="font-semibold">{flag.name || "FastFlag"}{flag.value ? ` = ${flag.value}` : ""}</div>
-                      <div>{formatDate(flag.timestamp)}</div>
-                    </div>
-                  ))}
-                  {!(log.fastFlags || []).length ? <p className="text-sm text-zinc-500">None found in this log.</p> : null}
-                </div>
-                <h3 className="mt-4 text-sm font-semibold text-zinc-200">Captured Roblox Events</h3>
-                <div className="mt-2 space-y-2">
-                  {(log.events || []).map((event, eventIndex) => (
-                    <div key={`${event.timestamp}-${eventIndex}`} className="grid gap-2 rounded-md border border-border/70 bg-black/20 p-2 text-xs md:grid-cols-[150px_110px_minmax(0,1fr)]">
-                      <div className="text-zinc-500">{formatDate(event.timestamp)}</div>
-                      <div className="text-primary">{event.type || "Event"}</div>
-                      <div className="min-w-0 break-words text-zinc-300 [overflow-wrap:anywhere]">{event.message || ""}</div>
-                    </div>
-                  ))}
-                  {!(log.events || []).length ? <p className="text-sm text-zinc-500">No structured events extracted.</p> : null}
-                </div>
-                <h3 className="mt-4 text-sm font-semibold text-zinc-200">Raw Roblox Log</h3>
-                <pre className="mt-2 max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/40 p-3 text-xs text-zinc-300">{log.rawLog || ""}</pre>
-              </details>
-            ))}
-            {!filteredRobloxLogs.length ? <p className="text-sm text-zinc-500">No Roblox logs were included in this report.</p> : null}
-          </div>
-        </Card>
-
-        <Card className="mt-5">
-          <h2 className="mb-4 text-lg font-semibold">Detailed Evidence</h2>
-          <div className="space-y-3">
-            {filteredEvidence.map((group) => (
-              <details key={group.title} open className="rounded-md border border-border bg-black/20 p-3">
-                <summary className="cursor-pointer font-semibold">{group.title} ({group.items.length})</summary>
-                <div className="mt-3 space-y-2">
-                  {group.items.map((item, index) => (
-                    <div key={index} className="rounded-md border border-border/70 bg-black/20 p-3 text-sm">
-                      <div className="mb-1 text-xs text-zinc-500">{formatDate(evidenceTimestamp(item))}</div>
-                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words bg-transparent p-0 text-xs text-zinc-300">{JSON.stringify(item, null, 2)}</pre>
-                    </div>
-                  ))}
-                  {!group.items.length ? <p className="text-sm text-zinc-500">No entries were included.</p> : null}
-                </div>
-              </details>
-            ))}
-            {!filteredEvidence.length ? <p className="text-sm text-zinc-500">No detailed evidence sections were included in this report.</p> : null}
-          </div>
-        </Card>
-
-        <Card className="mt-5">
-          <h2 className="mb-4 text-lg font-semibold">Raw report data</h2>
-          <pre className="max-h-[520px] overflow-auto rounded-md bg-black/40 p-4 text-xs text-zinc-300">{JSON.stringify(data, null, 2)}</pre>
-        </Card>
-      </div>
-    </main>
-  );
-}
-
-function MacEvidenceSidebar({ data }: { data: ReportRow["report_json"] }) {
-  const context = data.systemContext || {};
-  const sources = Object.entries(data.evidenceSources || {});
-  const available = sources.filter(([, value]) => value === true || (typeof value === "number" && value > 0));
-
-  return (
-    <>
-      <Card>
-        <h2 className="text-lg font-semibold">macOS System</h2>
-        <div className="mt-3 space-y-2 text-sm">
-          <div><span className="text-zinc-500">Product:</span> {context.productName || "macOS"}</div>
-          <div><span className="text-zinc-500">Version:</span> {context.productVersion || data.platformVersion || "Unavailable"}</div>
-          <div><span className="text-zinc-500">Build:</span> {context.buildVersion || "Unavailable"}</div>
-          <div><span className="text-zinc-500">Architecture:</span> {context.architecture || "Unavailable"}</div>
-          <div><span className="text-zinc-500">Scanner:</span> {data.scannerVersion || "Mac alpha"}</div>
-          <div><span className="text-zinc-500">Profile:</span> {data.scanProfile || "Unknown"}</div>
-        </div>
-      </Card>
-
-      <Card>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold">Mac Evidence Coverage</h2>
-            <p className="mt-1 text-xs text-zinc-500">Permission-aware macOS and Roblox sources checked by this scan.</p>
-          </div>
-          <span className="text-sm text-primary">{available.length}/{sources.length}</span>
-        </div>
-        <div className="mt-3 space-y-2">
-          {sources.map(([source, value]) => (
-            <div key={source} className="flex items-start justify-between gap-3 rounded-md border border-border bg-black/20 p-3 text-xs">
-              <span className="min-w-0 break-words text-zinc-300 [overflow-wrap:anywhere]">{source}</span>
-              <span className={value === true || (typeof value === "number" && value > 0) ? "text-primary" : "text-zinc-500"}>
-                {formatEvidenceValue(value)}
-              </span>
-            </div>
-          ))}
-          {!sources.length ? <p className="text-sm text-zinc-500">No Mac evidence coverage data was included.</p> : null}
-        </div>
-      </Card>
-
-      <Card>
-        <h2 className="text-lg font-semibold">Mac Coverage Limits</h2>
-        <div className="mt-3 space-y-2 text-xs text-zinc-400">
-          {(data.limitations || []).slice(0, 8).map((limitation, index) => (
-            <div key={`${limitation}-${index}`} className="rounded-md border border-border bg-black/20 p-3">{limitation}</div>
-          ))}
-          {!data.limitations?.length ? <p>No collector limitations were reported.</p> : null}
-        </div>
-      </Card>
-    </>
-  );
-}
-
-function reportPlatform(data: ReportRow["report_json"]): "windows" | "macos" {
-  const value = String(data.platform || "").toLowerCase();
-  return value === "macos" || value === "mac" || value === "darwin" ? "macos" : "windows";
-}
-
-function Summary({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-border bg-black/20 p-3">
-      <div className="text-xs text-zinc-500">{label}</div>
-      <div className="mt-1 break-words font-semibold">{value || "Unknown"}</div>
-    </div>
-  );
-}
-
-function AccountGroup({
-  title,
-  description,
-  accounts,
-  tone,
-  idLabel
-}: {
-  title: string;
-  description: string;
-  accounts: AccountIdentifier[];
-  tone: "played" | "historical" | "weak";
-  idLabel: string;
-}) {
-  const toneClass = {
-    played: "border-primary/50 bg-primary/10",
-    historical: "border-zinc-700 bg-black/20",
-    weak: "border-zinc-800 bg-black/10"
-  }[tone];
-
-  return (
-    <section className="mt-5">
-      <div className="mb-3">
-        <h3 className="text-base font-semibold text-zinc-100">{title}</h3>
-        <p className="mt-1 text-sm text-zinc-500">{description}</p>
-      </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        {accounts.map((account, index) => (
-          <div key={`${title}-${account.platform}-${account.userId}-${index}`} className={`rounded-md border p-4 text-sm ${toneClass}`}>
-            <div className="font-semibold text-zinc-300">{account.platform || "Roblox"}</div>
-            <div className="mt-3 text-xs font-semibold uppercase text-zinc-500">{idLabel}</div>
-            <div className="mt-1 break-all text-3xl font-bold text-primary">{account.userId || "ID unavailable"}</div>
-            <div className="mt-3 text-zinc-300">Username: {account.username || "Unknown"}</div>
-            {account.displayName ? <div className="text-zinc-400">Display Name: {account.displayName}</div> : null}
-            <div className="text-zinc-400">First evidence: {formatDate(account.firstSeen)}</div>
-            <div className="text-zinc-400">Last evidence: {formatDate(account.lastSeen)}</div>
-            {(account.places || []).length ? <div className="mt-2 break-words text-zinc-500">Place IDs: {(account.places || []).join(", ")}</div> : null}
-            {account.evidenceNote ? <div className="mt-2 text-xs text-zinc-500">{account.evidenceNote}</div> : null}
-            <details className="mt-2">
-              <summary className="cursor-pointer text-xs text-zinc-400">Evidence sources ({(account.sources || []).length})</summary>
-              <div className="mt-2 space-y-1">
-                {(account.sources || []).map((source, sourceIndex) => (
-                  <div key={sourceIndex} className="break-words text-xs text-zinc-500 [overflow-wrap:anywhere]">{source}</div>
-                ))}
-              </div>
-            </details>
-          </div>
-        ))}
-        {!accounts.length ? <p className="text-sm text-zinc-500">None.</p> : null}
-      </div>
-    </section>
-  );
-}
-
-type EvidenceGroup = {
-  title: string;
-  items: Record<string, unknown>[];
-};
-
-type AccountGroups = {
-  played: AccountIdentifier[];
-  historical: AccountIdentifier[];
-  weak: AccountIdentifier[];
-};
-
-function groupRobloxAccounts(accounts: AccountIdentifier[], sessions: SecuroSession[], logs: RobloxLogArtifact[]): AccountGroups {
-  const playedIds = new Set<string>();
-  for (const session of sessions || []) {
-    const id = normalizeAccountId(session.userId);
-    if (id && (session.placeId || session.gameId || session.jobId || session.launchTime || session.exitTime)) playedIds.add(id);
-  }
-  for (const log of logs || []) {
-    const id = normalizeAccountId(log.userId);
-    if (id && (log.placeId || log.jobId || robloxLogHasPlayEvidence(log))) playedIds.add(id);
-  }
-
-  const grouped: AccountGroups = { played: [], historical: [], weak: [] };
-  for (const account of accounts || []) {
-    const id = normalizeAccountId(account.userId);
-    if (id && playedIds.has(id)) {
-      grouped.played.push(account);
-    } else if (isWeakOldAccountArtifact(account)) {
-      grouped.weak.push(account);
-    } else {
-      grouped.historical.push(account);
-    }
-  }
-  return grouped;
-}
-
-function normalizeAccountId(value: unknown) {
-  return String(value || "").replace(/\D/g, "");
-}
-
-function robloxLogHasPlayEvidence(log: RobloxLogArtifact) {
-  return (log.events || []).some((event) => {
-    const text = `${event.type || ""} ${event.message || ""}`.toLowerCase();
-    return text.includes("join") || text.includes("place") || text.includes("teleport") || text.includes("game_join");
-  });
-}
-
-function isWeakOldAccountArtifact(account: AccountIdentifier) {
-  const sources = account.sources || [];
-  const hasCrashSource = sources.some((source) => /crashes?[\\/]+attachments?|crash/i.test(source));
-  const allCrashSources = sources.length > 0 && sources.every((source) => /crashes?[\\/]+attachments?|crash/i.test(source));
-  const first = parseTimestamp(account.firstSeen)?.getTime();
-  const last = parseTimestamp(account.lastSeen)?.getTime();
-  return allCrashSources || (hasCrashSource && first !== undefined && last !== undefined && first === last);
-}
-
-function parseTimestamp(value: unknown) {
-  if (!value) return null;
-  const date = new Date(String(value));
-  if (Number.isNaN(date.getTime())) return null;
-  return date;
-}
-
-function evidenceTimestamp(item: Record<string, unknown>) {
-  const value = item.timestamp || item.time || item.firstSeen || item.first_seen || item.createdAt || item.created_at || item.modifiedAt || item.modified_at || item.activated_at || item.last_seen_at || "";
-  return value ? String(value) : "";
-}
-
-function formatEvidenceValue(value: unknown) {
-  if (value === true) return "Yes";
-  if (value === false) return "No";
-  if (value === null || value === undefined || value === "") return "Unknown";
-  return String(value);
-}
-
-function findingConfidence(finding: SecuroFinding) {
-  if (isMainstreamOrRuntimeFinding(finding) && (finding.confidenceLevel === "Confirmed" || finding.classification === "Confirmed Exploit")) {
-    return Number(finding.score || 0) >= 50 ? "Likely" : "Possible";
-  }
-  if (finding.confidenceLevel === "Confirmed" || finding.classification === "Confirmed Exploit") return "Confirmed";
-  if (finding.confidenceLevel === "Likely" || finding.classification === "Suspicious" || Number(finding.score || 0) >= 50) return "Likely";
-  return "Possible";
-}
-
-function isConfirmedFinding(finding: SecuroFinding) {
-  return findingConfidence(finding) === "Confirmed";
-}
-
-function isSecuroSuppressedFinding(finding: { name?: string; path?: string }) {
-  const text = `${finding.name || ""} ${finding.path || ""}`.toLowerCase();
-  return text.includes("\\securo") || text.includes("/securo") || text.includes("_internal");
-}
-
-function isMainstreamOrRuntimeFinding(finding: { name?: string; path?: string }) {
-  const text = `${finding.name || ""} ${finding.path || ""}`.toLowerCase();
-  const commonRuntime = [
-    "sqlite3.dll",
-    "libcrypto",
-    "libssl",
-    "python312.dll",
-    "python3.dll",
-    "libffi",
-    "vcruntime",
-    "msvcp140.dll",
-    "api-ms-win",
-    "webview2loader.dll",
-    "base_library.zip"
-  ];
-  const mainstream = ["spotify", "chrome", "discord", "steam", "roblox", "microsoft", "nvidia", "amd", "edge", "razer", "logitech", "corsair", "steelseries", "mozilla", "firefox", "intel"];
-  const protectedSystem = ["svchost.exe", "explorer.exe", "winlogon.exe", "csrss.exe", "dwm.exe", "taskhostw.exe", "runtimebroker.exe", "searchhost.exe", "startmenuexperiencehost.exe"];
-  const trustedLocation = text.includes("c:\\windows\\") || text.includes("c:\\program files\\") || text.includes("c:\\program files (x86)\\");
-  return trustedLocation || commonRuntime.some((name) => text.includes(name)) || mainstream.some((name) => text.includes(name)) || protectedSystem.some((name) => text.includes(name));
-}
-
-function confidenceClasses(confidence: string) {
-  if (confidence === "Confirmed") return "border-red-500/50 bg-red-500/10 text-red-100";
-  if (confidence === "Likely") return "border-yellow-500/50 bg-yellow-500/10 text-yellow-100";
-  return "border-zinc-700 bg-black/20 text-zinc-200";
-}
-
-function artifactText(item: KeyArtifact) {
-  return item.label || item.artifact || item.path || "Artifact unavailable";
-}
-
-function isPrefetchArtifact(item: KeyArtifact) {
-  return /prefetch/i.test(`${item.type || ""} ${artifactText(item)} ${item.source || ""}`);
-}
-
-function isDeletedKeyArtifact(item: KeyArtifact) {
-  return /deleted|deletion|recycle/i.test(`${item.type || ""} ${artifactText(item)} ${item.source || ""}`);
-}
-
-function buildDeletedFileArtifacts(data: ReportRow["report_json"]): DeletedFileArtifact[] {
-  const seen = new Map<string, DeletedFileArtifact>();
-  const add = (item: DeletedFileArtifact) => {
-    const originalPath = item.originalPath || item.path || "";
-    const filename = item.filename || pathBasename(originalPath) || "Deleted file";
-    const timestamp = item.deletionTimestamp || item.timestamp || "";
-    const key = (originalPath || `${filename}|${timestamp}`).toLowerCase();
-    const normalized: DeletedFileArtifact = {
-      ...item,
-      filename,
-      originalPath,
-      path: item.path || originalPath,
-      deletionTimestamp: timestamp,
-      timestamp,
-      sources: item.sources || (item.source ? [item.source] : []),
-    };
-    const existing = seen.get(key);
-    if (!existing) {
-      seen.set(key, normalized);
-      return;
-    }
-    seen.set(key, mergeDeletedArtifact(existing, normalized));
-  };
-
-  (data.deletedFileArtifacts || []).forEach(add);
-  (data.keyArtifacts || []).filter(isDeletedKeyArtifact).forEach((item) => {
-    const text = artifactText(item).replace(/^DELETED FILE:\s*/i, "");
-    add({
-      filename: pathBasename(text || item.path || ""),
-      originalPath: text || item.path || "",
-      path: item.path || text,
-      deletionTimestamp: item.timestamp,
-      timestamp: item.timestamp,
-      source: item.source || item.type || "Key artifact",
-      sources: [item.source || item.type || "Key artifact"],
-      confidence: item.confidence,
-      metadata: item as Record<string, unknown>,
-    });
-  });
-  (data.usnJournalEvents || []).forEach((event) => {
-    const reasonText = `${event.eventType || ""} ${event.reason || ""}`.toLowerCase();
-    if (!reasonText.includes("delete")) return;
-    add({
-      filename: event.fileName || pathBasename(event.path || ""),
-      originalPath: event.path || event.fileName || "",
+                    <td colSpan…9636 tokens truncated…Name || "",
       path: event.path || event.fileName || "",
       deletionTimestamp: event.timestamp,
       timestamp: event.timestamp,
@@ -1197,3 +629,4 @@ function escape(value: unknown) {
     "'": "&#039;"
   }[char] || char));
 }
+
